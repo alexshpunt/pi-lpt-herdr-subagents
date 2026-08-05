@@ -166,15 +166,15 @@ function writeTestProviderConfig(agentDir: string): void {
           supportsReasoningEffort: false,
           supportsUsageInStreaming: false,
         },
-        models: [{
-          id: "test",
-          name: "Deterministic integration test model",
+        models: ["test", "fallback-primary", "fallback-secondary", "fallback-fail"].map((id) => ({
+          id,
+          name: "Deterministic integration test model", 
           reasoning: true,
           input: ["text"],
           contextWindow: 128_000,
           maxTokens: 4_096,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        }],
+        })), 
       },
     },
   }, null, 2), "utf8");

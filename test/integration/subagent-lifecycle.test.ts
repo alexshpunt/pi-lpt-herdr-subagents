@@ -691,5 +691,34 @@ for (const backend of backends) {
 				`System prompt test marker should exist`,
 			);
 		});
+
+		it("falls back after a provider failure and reports the selected model", async () => {
+			const id = uniqueId();
+			const markerFile = `/tmp/pi-integ-fallback-${id}.txt`;
+			trackTempFile(env, markerFile);
+			const surface = createTrackedSurface(env, `fallback-${id}`);
+			await waitForPaneReady(surface);
+			startPi(surface, env.dir, [
+				`Call subagent once with name: "Fallback-${id}".`,
+				`agent: "test-echo".`,
+				`model: "pi-integration/fallback-primary, pi-integration/fallback-secondary".`,
+				`task: "Run: echo 'FALLBACK_${id}' > '${markerFile}'".`,
+			].join("\n"));
+			assert.match(await waitForFile(markerFile, PI_TIMEOUT), new RegExp(`FALLBACK_${id}`));
+			await waitForScreen(surface, /fallback-primary.*fallback-secondary|fallback-secondary.*fallback-primary/, PI_TIMEOUT);
+		});
+
+		it("reports every attempted model when all fallbacks fail", async () => {
+			const id = uniqueId();
+			const surface = createTrackedSurface(env, `fallback-fail-${id}`);
+			await waitForPaneReady(surface);
+			startPi(surface, env.dir, [
+				`Call subagent once with name: "FallbackFail-${id}".`,
+				`agent: "test-echo".`,
+				`model: "pi-integration/fallback-primary, pi-integration/fallback-fail".`,
+				`task: "Return exactly SHOULD_NOT_COMPLETE".`,
+			].join("\n"));
+			await waitForScreen(surface, /Models attempted: pi-integration\/fallback-primary, pi-integration\/fallback-fail/, PI_TIMEOUT);
+		});
 	});
 }

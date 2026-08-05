@@ -91,6 +91,7 @@ function subagentCalls(source: string): ToolCall[] {
 		if (!name || !task) return [];
 
 		const agent = quotedValue(section, "agent");
+		const model = quotedValue(section, "model");
 		const cwd = quotedValue(section, "cwd");
 		const systemPrompt = quotedValue(section, "systemPrompt");
 		const branch = section.match(
@@ -102,6 +103,7 @@ function subagentCalls(source: string): ToolCall[] {
 				arguments: {
 					name,
 					...(agent ? { agent } : {}),
+					...(model ? { model } : {}),
 					...(cwd ? { cwd } : {}),
 					...(systemPrompt ? { systemPrompt } : {}),
 					...(section.includes("fork: true") ? { fork: true } : {}),
@@ -348,6 +350,11 @@ const server = createServer(async (request, response) => {
 	}
 	try {
 		const chatRequest = await readJson(request);
+		if (chatRequest.model === "fallback-primary" || chatRequest.model === "fallback-fail") {
+			response.writeHead(503, { "content-type": "application/json" });
+			response.end(JSON.stringify({ error: { message: "deterministic fallback provider failure" } }));
+			return;
+		}
 		writeResponse(response, chatRequest, await planResponse(chatRequest));
 	} catch (error) {
 		response.writeHead(500, { "content-type": "application/json" });

@@ -53,6 +53,7 @@ import {
 import {
 	buildAuthenticatedModelCatalog,
 	resolveRuntimePlan,
+	resolveRuntimePlans,
 	wrapPiModelRegistry,
 	THINKING_LEVELS,
 	isThinkingLevel,
@@ -202,7 +203,7 @@ const SubagentParams = Type.Object({
 	model: Type.Optional(
 		Type.String({
 			description:
-				"Exact authenticated provider/model-id. Omit to inherit the parent model. Select another model only when task capability, speed, cost, modality, or context requirements warrant it.",
+				"Exact authenticated provider/model-id, or an ordered comma-separated fallback list. Omit to inherit the parent model. Fallbacks are Pi-backed only and cannot be used with worktrees.",
 		}),
 	),
 	thinking: Type.Optional(ThinkingLevelSchema),
@@ -1147,6 +1148,7 @@ function resolveResultPresentation(
 		| "summary"
 		| "sessionFile"
 		| "errorMessage"
+		| "fallbackAttempts"
 		| "worktree"
 	>,
 	name: string,
@@ -1173,6 +1175,9 @@ function resolveResultPresentation(
 				: `Sub-agent "${name}" completed (${formatElapsed(result.elapsed)}).\n\n${result.summary}`;
 	}
 
+	if (result.fallbackAttempts && result.fallbackAttempts.length > 1) {
+		body += `\n\nModels attempted: ${result.fallbackAttempts.join(", ")}`;
+	}
 	if (result.worktree) body += `\n\n${formatWorktreeHandoff(result.worktree)}`;
 	const runtimeWarning = runtimeMismatch
 		? `\n\nRuntime warning: ${runtimeMismatch}`
@@ -1215,6 +1220,8 @@ interface SubagentResult {
 	error?: string;
 	/** Provider/agent error message when auto-retry exhausted (overload, rate limit, etc.). */
 	errorMessage?: string;
+	/** Ordered models launched for this run, including failed fallback attempts. */
+	fallbackAttempts?: string[];
 	ping?: { name: string; message: string };
 	worktree?: WorktreeHandoff;
 }
@@ -2045,10 +2052,10 @@ async function launchSubagent(
 		};
 	},
 	parentThinking: ThinkingLevel,
-	options?: { surface?: string },
+	options?: { surface?: string; runtimePlan?: ResolvedRuntimePlan; id?: string },
 ): Promise<RunningSubagent> {
 	const startTime = Date.now();
-	const id = Math.random().toString(16).slice(2, 10);
+	const id = options?.id ?? Math.random().toString(16).slice(2, 10);
 
 	const agentDefs = params.agent
 		? loadAgentDefaults(params.agent, runtime.pi)
@@ -2064,19 +2071,21 @@ async function launchSubagent(
 	requireClaudeAdapter(agentDefs?.cli);
 	if (!ctx.model)
 		throw new Error("Subagent launch requires a resolved parent model");
-	const runtimePlan = resolveRuntimePlan(
-		{ model: params.model, thinking: params.thinking },
-		{
-			model: resolveModelDefault(params.agent, agentDefs?.model, modelConfig),
-			thinking: agentDefs?.thinking,
-		},
-		{
-			provider: ctx.model.provider,
-			modelId: ctx.model.id,
-			thinking: parentThinking,
-		},
-		wrapPiModelRegistry(ctx.modelRegistry),
-	);
+	const runtimePlan =
+		options?.runtimePlan ??
+		resolveRuntimePlan(
+			{ model: params.model, thinking: params.thinking },
+			{
+				model: resolveModelDefault(params.agent, agentDefs?.model, modelConfig),
+				thinking: agentDefs?.thinking,
+			},
+			{
+				provider: ctx.model.provider,
+				modelId: ctx.model.id,
+				thinking: parentThinking,
+			},
+			wrapPiModelRegistry(ctx.modelRegistry),
+		);
 	const effectiveModel = runtimePlan.model;
 	const effectiveTools = params.tools ?? agentDefs?.tools;
 	const effectiveSkills = params.skills ?? agentDefs?.skills;
@@ -2484,6 +2493,67 @@ async function launchSubagent(
  * the summary from the session file, and closes ordinary panes. Worktree
  * workspaces are retained for parent review.
  */
+function resolveSubagentRuntimePlans(
+	params: typeof SubagentParams.static,
+	ctx: Parameters<typeof launchSubagent>[1],
+	parentThinking: ThinkingLevel,
+): ResolvedRuntimePlan[] {
+	const agentDefs = params.agent
+		? loadAgentDefaults(params.agent, runtime.pi)
+		: null;
+	if (params.agent && !agentDefs) {
+		const diagnostic = discoverAgentCatalog(runtime.pi).diagnostics.find(
+			(candidate) => candidate.agentName === params.agent,
+		);
+		throw new Error(
+			diagnostic?.message ?? `Agent "${params.agent}" was not found.`,
+		);
+	}
+	if (!ctx.model) throw new Error("Subagent launch requires a resolved parent model");
+	const plans = resolveRuntimePlans(
+		{ model: params.model, thinking: params.thinking },
+		{
+			model: resolveModelDefault(params.agent, agentDefs?.model, modelConfig),
+			thinking: agentDefs?.thinking,
+		},
+		{
+			provider: ctx.model.provider,
+			modelId: ctx.model.id,
+			thinking: parentThinking,
+		},
+		wrapPiModelRegistry(ctx.modelRegistry),
+	);
+	if (agentDefs?.cli === "claude" && plans.length > 1) {
+		throw new Error("Model fallbacks are supported only for Pi-backed subagents.");
+	}
+	if (params.worktree && plans.length > 1) {
+		throw new Error("Model fallbacks are not supported for worktree subagents.");
+	}
+	return plans;
+}
+
+async function launchSubagentWithFallbacks(
+	params: typeof SubagentParams.static,
+	ctx: Parameters<typeof launchSubagent>[1],
+	parentThinking: ThinkingLevel,
+	plans: ResolvedRuntimePlan[],
+): Promise<{ running: RunningSubagent; index: number }> {
+	const failures: string[] = [];
+	for (const [index, plan] of plans.entries()) {
+		try {
+			return {
+				running: await launchSubagent(params, ctx, parentThinking, { runtimePlan: plan }),
+				index,
+			};
+		} catch (error) {
+			failures.push(`${plan.model}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	throw new Error(
+		`Subagent could not launch with any configured model. Attempted: ${plans.map((plan) => plan.model).join(", ")}. ${failures.join("; ")}`,
+	);
+}
+
 async function watchSubagent(
 	running: RunningSubagent,
 	signal: AbortSignal,
@@ -2673,6 +2743,64 @@ async function watchSubagent(
 			error: err?.message ?? String(err),
 			...(worktreeHandoff ? { worktree: worktreeHandoff } : {}),
 		};
+	}
+}
+
+async function watchSubagentWithFallbacks(
+	initial: RunningSubagent,
+	initialPlanIndex: number,
+	params: typeof SubagentParams.static,
+	ctx: Parameters<typeof launchSubagent>[1],
+	parentThinking: ThinkingLevel,
+	plans: ResolvedRuntimePlan[],
+	signal: AbortSignal,
+): Promise<{ running: RunningSubagent; result: SubagentResult }> {
+	let running = initial;
+	let nextPlan = initialPlanIndex + 1;
+	const attempts = [running.runtimePlan?.model].filter(
+		(model): model is string => !!model,
+	);
+
+	for (;;) {
+		const result = await watchSubagent(running, signal);
+		const shouldRetry = !!result.errorMessage && nextPlan < plans.length;
+		if (!shouldRetry) {
+			return { running, result: { ...result, fallbackAttempts: attempts } };
+		}
+
+		runningSubagents.delete(running.id);
+		updateWidget();
+		const launchErrors: string[] = [];
+		let launchedFallback = false;
+		while (nextPlan < plans.length) {
+			const plan = plans[nextPlan++];
+			attempts.push(plan.model);
+			try {
+				running = await launchSubagent(params, ctx, parentThinking, {
+					runtimePlan: plan,
+					id: initial.id,
+				});
+				running.abortController = initial.abortController;
+				launchedFallback = true;
+				startWidgetRefresh();
+				startStatusRefresh(runtime.pi!);
+				break;
+			} catch (error) {
+				launchErrors.push(
+					`${plan.model}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+		if (!launchedFallback) {
+			return {
+				running,
+				result: {
+					...result,
+					errorMessage: `${result.errorMessage}\n\nFallback launch failures: ${launchErrors.join("; ")}`,
+					fallbackAttempts: attempts,
+				},
+			};
+		}
 	}
 }
 
@@ -3604,7 +3732,17 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 						`Unsupported parent thinking level: ${parentThinking}`,
 					);
 				}
-				const running = await launchSubagent(params, ctx, parentThinking);
+				const runtimePlans = resolveSubagentRuntimePlans(
+					params,
+					ctx,
+					parentThinking,
+				);
+				const { running, index: initialPlanIndex } = await launchSubagentWithFallbacks(
+					params,
+					ctx,
+					parentThinking,
+					runtimePlans,
+				);
 
 				// Create a separate AbortController for the watcher
 				// (the tool's signal completes when we return)
@@ -3616,16 +3754,24 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				startStatusRefresh(pi);
 
 				// Fire-and-forget: start watching in background
-				watchSubagent(running, watcherAbort.signal)
-					.then((result) => {
-						if (!shouldDeliverSubagentCompletion(running)) {
-							running.lifecycle = markDelivery(running.lifecycle, "suppressed");
-							runningSubagents.delete(running.id);
+				watchSubagentWithFallbacks(
+					running,
+					initialPlanIndex,
+					params,
+					ctx,
+					parentThinking,
+					runtimePlans,
+					watcherAbort.signal,
+				)
+					.then(({ running: completedRunning, result }) => {
+						if (!shouldDeliverSubagentCompletion(completedRunning)) {
+							completedRunning.lifecycle = markDelivery(completedRunning.lifecycle, "suppressed");
+							runningSubagents.delete(completedRunning.id);
 							updateWidget();
 							return;
 						}
-						running.lifecycle = markDelivery(running.lifecycle, "delivered");
-						runningSubagents.delete(running.id);
+						completedRunning.lifecycle = markDelivery(completedRunning.lifecycle, "delivered");
+						runningSubagents.delete(completedRunning.id);
 						updateWidget();
 						const completionApi = selectCompletionApi(pi, runtime.pi);
 
@@ -3655,26 +3801,29 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
 						const presentation = resolveResultPresentation(
 							result,
-							running.name,
-							running.runtimePlan?.runtimeMismatch,
+							completedRunning.name,
+							completedRunning.runtimePlan?.runtimeMismatch,
 						);
 
 						sendSubagentResult(completionApi, presentation, {
-							name: running.name,
-							task: running.task,
-							agent: running.agent,
+							name: completedRunning.name,
+							task: completedRunning.task,
+							agent: completedRunning.agent,
 							exitCode: result.exitCode,
 							elapsed: result.elapsed,
 							sessionFile: result.sessionFile,
 							...(result.errorMessage
 								? { errorMessage: result.errorMessage }
 								: {}),
+							...(result.fallbackAttempts
+								? { fallbackAttempts: result.fallbackAttempts }
+								: {}),
 							...(result.claudeSessionId
 								? { claudeSessionId: result.claudeSessionId }
 								: {}),
 							...(result.worktree ? { worktree: result.worktree } : {}),
-							...(running.runtimePlan
-								? { runtimePlan: running.runtimePlan }
+							...(completedRunning.runtimePlan
+								? { runtimePlan: completedRunning.runtimePlan }
 								: {}),
 						});
 					})

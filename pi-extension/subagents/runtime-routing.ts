@@ -190,6 +190,16 @@ function selectField(
   return { source: "parent" };
 }
 
+export function parseModelFallbacks(reference: string): string[] {
+  const candidates = reference.split(",").map((candidate) => candidate.trim());
+  if (candidates.some((candidate) => candidate === "")) {
+    throw new RuntimeResolutionError(
+      `model fallback list ${JSON.stringify(reference)} cannot contain an empty candidate`,
+    );
+  }
+  return candidates;
+}
+
 export function resolveRuntimePlan(
   request: RuntimeRequest,
   agentDefaults: RuntimeRequest,
@@ -270,6 +280,30 @@ export function resolveRuntimePlan(
     ...(thinkingSelection.value ? { requestedThinking: preferredThinking } : {}),
     ...(thinkingAdjustment ? { thinkingAdjustment } : {}),
   };
+}
+
+/** Resolve every configured fallback before launching the first child. */
+export function resolveRuntimePlans(
+  request: RuntimeRequest,
+  agentDefaults: RuntimeRequest,
+  parent: ParentRuntime,
+  registry: ModelRegistryAdapter,
+): ResolvedRuntimePlan[] {
+  const selection = selectField(request.model, agentDefaults.model);
+  if (!selection.value) {
+    return [resolveRuntimePlan(request, agentDefaults, parent, registry)];
+  }
+
+  return parseModelFallbacks(selection.value).map((model) =>
+    resolveRuntimePlan(
+      selection.source === "request" ? { ...request, model } : { ...request, model: undefined },
+      selection.source === "agent"
+        ? { ...agentDefaults, model }
+        : agentDefaults,
+      parent,
+      registry,
+    ),
+  );
 }
 
 function formatTokenCount(value: number | undefined): string | undefined {

@@ -314,7 +314,14 @@ exact IDs from your authenticated model catalog:
 `subagent({ agent: ... })`. Explicit `model` tool arguments take precedence,
 followed by agent frontmatter, per-agent config, the global default, and finally
 the parent model. Model values must be exact authenticated `provider/model-id`
-references.
+references. A value can contain an ordered comma-separated fallback list, for
+example `provider/preferred, provider/fallback`. The extension validates every
+candidate before launch, retries the preferred model normally, then launches
+later candidates only after a provider/agent request failure. A completed child
+result, including a negative task result, never switches models. Completion
+metadata and the status widget report the model actually used; an exhausted
+list reports every attempted model. Workflow metadata accepts one exact model
+only, to keep approved workflow runtimes deterministic.
 
 `config.json` is gitignored in the source tree so local overrides are not
 committed from a checkout. On an installed package root, treat it as disposable
@@ -356,7 +363,7 @@ subagent({
 | `agent`                | string  | —              | Load defaults from agent definition                                                               |
 | `fork`                 | boolean | `false`        | Force the full-context fork mode for this spawn, overriding any agent `session-mode` frontmatter  |
 | `interactive`          | boolean | derived        | Mark this spawn as interactive (don't wake the parent on stall/recovery). Defaults to the agent's `interactive` frontmatter, otherwise the inverse of `auto-exit`. |
-| `model`                | string  | configured or parent | Exact authenticated `provider/model-id`; resolution is tool argument → agent frontmatter → per-agent config → global config → parent |
+| `model`                | string  | configured or parent | Exact authenticated `provider/model-id`, or an ordered comma-separated Pi fallback list; unavailable for Claude CLI and worktree spawns. Resolution is tool argument → agent frontmatter → per-agent config → global config → parent |
 | `thinking`             | string  | parent level   | Pi thinking level (`off` through `max`); omit to inherit the parent                                |
 | `systemPrompt`         | string  | —              | Role/system-prompt text for a bare spawn; overrides the body for Claude CLI agents, while named Pi agents keep their definition body |
 | `resumeSessionId`      | string  | —              | Claude CLI session ID to resume; separate from the Pi `subagent_resume` tool                       |
@@ -683,7 +690,7 @@ and verify them with `/subagent list` plus a smoke launch.
 | ------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `name`        | string  | Optional explicit agent name used in `agent: "my-agent"`; defaults to the filename stem and must match it in role packs                                                                                                                                                                                            |
 | `description` | string  | Shown in `subagents_list` output                                                                                                                                                                                                                                            |
-| `model`       | string  | Optional exact authenticated Pi model default; omit to use per-agent config, global config, then the parent                                                                                                                                                                 |
+| `model`       | string  | Optional exact authenticated Pi model default or ordered comma-separated fallback list; omit to use per-agent config, global config, then the parent                                                                                                                       |
 | `cli`         | string  | Set to `claude` to launch the Claude CLI instead of Pi                                                                                                                                                                                                                       |
 | `cli-model`   | string  | Optional model name passed to a Claude CLI agent; separate from Pi model routing                                                                                                                                                                             |
 | `thinking`    | string  | Optional Pi thinking default (`off` through `max`); omit to inherit the parent. Thinking overrides are not supported for Claude CLI agents                                                                                                                                   |

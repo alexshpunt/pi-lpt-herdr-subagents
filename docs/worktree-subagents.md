@@ -46,7 +46,7 @@ For a worktree launch:
 - Uncommitted and untracked files from the parent checkout are not copied. Commit anything the child must see before spawning it, or pass the needed context in the task.
 - Worktree creation does not steal terminal focus.
 
-`worktree` cannot be set in agent frontmatter and is not exposed by the `/subagent <agent> <task>` shorthand. It is selected per call to the `subagent` tool.
+`worktree` cannot be set in agent frontmatter and is not exposed by the `/subagent <agent> <task>` shorthand. It is selected per call to the `subagent` tool. Ordered model fallback lists are not supported for worktree subagents: a failed attempt retains its worktree and branch for review, so a retry cannot safely reuse the requested branch.
 
 ## Parent and worker responsibilities
 

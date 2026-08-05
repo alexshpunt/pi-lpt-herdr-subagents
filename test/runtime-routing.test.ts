@@ -4,6 +4,7 @@ import {
   RuntimeResolutionError,
   buildAuthenticatedModelCatalog,
   resolveRuntimePlan,
+  resolveRuntimePlans,
   wrapPiModelRegistry,
   type ParentRuntime,
   type RuntimeRequest,
@@ -109,6 +110,58 @@ describe("runtime routing", () => {
         RuntimeResolutionError,
       );
     }
+  });
+
+  it("resolves trimmed fallback candidates in declaration order", () => {
+    const plans = resolveRuntimePlans(
+      { model: " other/fast , fake/parent " },
+      {},
+      parent,
+      registry(),
+    );
+    assert.deepEqual(
+      plans.map((plan) => [plan.model, plan.modelSource]),
+      [
+        ["other/fast", "request"],
+        ["fake/parent", "request"],
+      ],
+    );
+  });
+
+  it("validates every fallback before launch", () => {
+    assert.throws(
+      () =>
+        resolveRuntimePlans(
+          { model: "other/fast, other/missing" },
+          {},
+          parent,
+          registry(),
+        ),
+      /unknown model "other\/missing"/,
+    );
+    assert.throws(
+      () =>
+        resolveRuntimePlans(
+          { model: "other/fast," },
+          {},
+          parent,
+          registry(),
+        ),
+      /cannot contain an empty candidate/,
+    );
+  });
+
+  it("keeps the selected source when agent defaults provide fallbacks", () => {
+    const plans = resolveRuntimePlans(
+      {},
+      { model: "other/fast, fake/parent" },
+      parent,
+      registry(),
+    );
+    assert.deepEqual(
+      plans.map((plan) => plan.modelSource),
+      ["agent", "agent"],
+    );
   });
 
   it("rejects unsupported explicit thinking with supported alternatives", () => {

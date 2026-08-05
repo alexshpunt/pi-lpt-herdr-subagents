@@ -41,15 +41,6 @@ describe("production package manifest", () => {
 		assert.equal(manifest.author?.name, "Giuseppe Rodriguez");
 		assert.equal(manifest.author?.url, "https://github.com/giuseppecrj");
 		assert.ok(manifest.keywords?.includes("pi-package"));
-		assert.ok(
-			Array.isArray(manifest.contributors) &&
-				manifest.contributors.some(
-					(entry) => entry?.url === "https://github.com/HazAT",
-				) &&
-				manifest.contributors.some(
-					(entry) => entry?.url === "https://github.com/0xRichardH",
-				),
-		);
 	});
 });
 

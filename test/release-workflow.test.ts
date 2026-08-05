@@ -230,11 +230,18 @@ test("release workflow uses package.json identity and trusted publishing", async
   assert.match(workflow, /concurrency:\n\s+group: pi-herdr-agents-release/);
   assert.match(workflow, /id-token:\s*write/);
   assert.match(workflow, /contents:\s*write/);
-  assert.match(workflow, /node-version:\s*22\.14/);
-  assert.match(workflow, /npm@\^11\.5\.1/);
+  assert.match(workflow, /node-version:\s*26\.3\.0/);
+  assert.doesNotMatch(workflow, /npm install -g/);
   assert.doesNotMatch(workflow, /uses:\s+[^\s@]+@v\d/);
   assert.match(workflow, /actions\/checkout@11d5960a326750d5838078e36cf38b85af677262/);
   assert.match(workflow, /actions\/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020/);
+  assert.equal(
+    workflow.match(/persist-credentials: false/g)?.length,
+    2,
+    "each checkout must avoid persisting credentials",
+  );
+  assert.match(workflow, /GH_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.match(workflow, /gh auth setup-git/);
   assert.match(workflow, /REGISTRY_URL: https:\/\/registry\.npmjs\.org\//);
   assert.match(workflow, /await fetch\(url/);
   assert.match(workflow, /redirect: "error"/);

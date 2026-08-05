@@ -29,6 +29,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Detect package version bump
         id: version
@@ -102,16 +103,14 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22.14
+          node-version: 26.3.0
           registry-url: https://registry.npmjs.org
           cache: npm
-
-      - name: Install npm for trusted publishing
-        run: npm install -g npm@^11.5.1
 
       - name: Verify package version is unpublished
         id: npm
@@ -226,6 +225,7 @@ jobs:
       - name: Create and push tag
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.detect.outputs.tag }}
         run: |
           if git rev-parse "$TAG" >/dev/null 2>&1; then
@@ -239,6 +239,7 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git tag -a "$TAG" -m "Release $TAG"
+            gh auth setup-git
             git push origin "$TAG"
           fi
 

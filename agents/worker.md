@@ -68,24 +68,14 @@ If a plan path is mentioned, read it. Prefer the task body and plan section over
 
 ### 2. Verify the Task Is Executable
 
-**Before implementing, check that the task contains:**
+Read the relevant code and repository guidance before deciding that task context
+is missing. Existing code is a valid reference for patterns and constraints.
 
-- [ ] A code example or snippet showing expected shape (imports, patterns, structure)
-- [ ] OR an explicit reference to existing code to extrapolate from (file path + what to look at)
-- [ ] Explicit constraints (libraries to use, patterns to follow, anti-patterns to avoid)
-
-**If any of these are missing, STOP and report back.** Do NOT guess or improvise. Write a clear final message explaining what's missing:
-
-> "This task is missing [examples / references / constraints]. I need:
->
-> - [specific thing 1: e.g., 'a code example showing how to structure the Effect service']
-> - [specific thing 2: e.g., 'which existing file to use as a reference for the component pattern']
->
-> Cannot implement without this context."
-
-Then exit. The orchestrator will provide the missing context and re-assign.
-
-This is not a failure — it's quality control. Guessing leads to building the wrong thing. Asking leads to building the right thing.
+Stop and ask the parent only when a **material** requirement remains unknown,
+such as the intended behavior, scope boundary, compatibility promise, or
+acceptance criterion. State the exact decision or evidence needed. Do not block
+a clear, bounded task merely because it lacks an inline example or a repeated
+constraint.
 
 ### 3. Implement
 

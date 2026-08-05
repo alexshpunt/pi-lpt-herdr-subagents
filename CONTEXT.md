@@ -20,6 +20,22 @@ _Avoid_: Evaluated metadata, inferred policy
 A mandatory exact `provider/model` reference and thinking level declared in workflow metadata; every execution node must resolve to one of these approved runtimes. Missing values fail preparation rather than inheriting parent or role defaults. The first workflow supports Pi-backed agents only; existing public Claude subagents remain unchanged.
 _Avoid_: Runtime tiers, silent fallback, inherited runtime, v1 Claude workflow adapter
 
+**External CLI runtime adapter**:
+A runtime-specific module selected by a known local role `cli` value. The MVP dispatches `cli: claude` to the built-in Claude adapter; a future registry needs a proven second CLI.
+_Avoid_: Raw flag template, plugin system before a second CLI
+
+**Adapter permission policy**:
+The runtime adapter owns its fixed vendor flags for the MVP. A local role selects the CLI, not raw flags or a policy profile.
+_Avoid_: Implied permission bypass, raw flag values
+
+**Adapter seam**:
+`index.ts` retains pane, worktree, lifecycle, and delivery ownership. The Claude adapter owns Claude command construction, completion/result extraction, transcript copying, and workspace cleanup.
+_Avoid_: Vendor behavior in the shared lifecycle
+
+**Runtime dispatch**:
+The core validates a role's `cli` value before pane creation and dispatches each known value to its internal adapter. The MVP recognizes `claude` only; unknown values fail closed.
+_Avoid_: Silent Pi fallback, speculative runtime registry
+
 **Run journal**:
 The runner-owned append-only `run.jsonl` that starts with approval binding the workflow-script hash, canonical repository identity, and committed base, then records observed node calls and results. Exactly one terminal event contains the bounded runtime envelope; a following delivery event references it without duplicating the task result.
 _Avoid_: User-authored plan, mutable audit log, duplicated result

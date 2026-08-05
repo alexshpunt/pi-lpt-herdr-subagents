@@ -47,8 +47,14 @@ Report template when blocked:
 
 ### When prerequisites exist
 
+Use only a loopback or staging target, unless the user explicitly authorizes a
+named non-production target. Do not select an arbitrary open browser tab. Use a
+disposable test account and data. Do not submit forms or trigger actions that
+create, send, delete, purchase, publish, or otherwise mutate external state
+without explicit user approval for that action.
+
 - Chrome with remote debugging enabled: `chrome://inspect/#remote-debugging` → toggle the switch
-- The target page open in a Chrome tab
+- The approved target page open in a Chrome tab
 
 ```bash
 # 1. Find your target tab
@@ -123,6 +129,10 @@ Use judgment — not every page needs all breakpoints.
 ---
 
 ## Interaction Testing
+
+Use non-mutating interactions by default. Before a state-changing action,
+confirm that the approved target and disposable test data make it safe, or stop
+and report that approval is required.
 
 ```bash
 # Click elements

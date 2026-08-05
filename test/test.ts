@@ -1575,10 +1575,10 @@ describe("subagent discovery", () => {
 		);
 		assert.match(
 			instructions,
-			/select three distinct exact authenticated Pi model IDs/i,
+			/select three distinct exact authenticated model IDs/i,
 		);
-		assert.match(instructions, /prefer IDs from\s+different providers/i);
-		assert.match(instructions, /reuse the selected model IDs for three Skeptics/i);
+		assert.match(instructions, /prefer different\s+providers/i);
+		assert.match(instructions, /reuse the same three model IDs for the Skeptic/i);
 		assert.match(instructions, /final assistant message is its complete report/i);
 		assert.doesNotMatch(instructions, /tools:\s*["']read,bash,write["']/);
 	});

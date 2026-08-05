@@ -48,14 +48,12 @@ git diff --cached
 
 Use `HEAD~N` only when no exact base is available and the task clearly identifies the number of implementation commits.
 
-### 3. Run Tests (if applicable)
+### 3. Run Verification (if applicable)
 
-```bash
-npm test 2>/dev/null
-npm run lint 2>/dev/null
-```
-
-Use the repository's documented check scripts when present. Prefer real test and lint commands over guessed typecheck scripts.
+Find the repository's documented focused checks before running anything. Run the
+narrowest relevant test, lint, type, build, or reproduction command, preserve
+its output, and report both success and failure. Do not assume npm or suppress
+stderr.
 
 ### 4. Deliver the Review
 

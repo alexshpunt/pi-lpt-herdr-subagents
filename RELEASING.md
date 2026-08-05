@@ -4,13 +4,9 @@ GitHub Actions publishes this package when the version in `package.json` changes
 
 The published version must be unique on npm.
 
-## Why the first public version is 0.2.0
+## Public versioning
 
-`0.2.0` is the initial release of the public npm package `pi-herdr-agents`.
-
-- Repository tags `v0.1.0`–`v0.1.5` belong to inherited upstream history and are not present in this clean repository.
-- Product work is already on the 0.2 feature line (async subagents, approved review workflows, bundled orchestration skill).
-- Starting the new package name at `0.1.0` would understate that feature line; reusing `0.1.x` would collide with inherited numbering.
+`0.0.1` was a manual bootstrap publication that established the npm package. `0.0.2` is the first release published through the trusted GitHub Actions workflow and is the current public baseline.
 
 Do not design a release that creates a GitHub Release without a successful npm publish for a new version. The workflow publishes first, then tags and creates the GitHub Release.
 
@@ -62,30 +58,19 @@ After the package exists on npm, steady-state releases use npm trusted publishin
 4. Confirm the workflow uses the exactly pinned Node `26.3.0`, whose bundled npm supports trusted publishing.
 5. Publish stays tokenless: `npm publish --access public --provenance`.
 
-When the repository secret `NPM_TOKEN` is absent, the publish step unsets `NODE_AUTH_TOKEN` and relies on OIDC. Once the package exists, the workflow fails if `NPM_TOKEN` is still configured, so steady-state releases cannot silently keep using the bootstrap credential.
+When the repository secret `NPM_TOKEN` is absent, the publish step unsets `NODE_AUTH_TOKEN` and relies on OIDC. Once the package exists, the workflow fails if `NPM_TOKEN` is still configured, so steady-state releases cannot silently keep using the bootstrap credential. Manual dispatch runs only from `main`; other refs are rejected.
 
-### First-package bootstrap
+### Bootstrap history
 
-Trusted publishers are configured on an existing npm package. The first publish of `pi-herdr-agents` therefore needs a short-lived granular npm token once, and must go through the Actions workflow so provenance is GitHub-backed:
-
-1. Create a granular access token on npm with permission to publish a new package (allow automated publishing / bypass 2FA if npm requires it for CI).
-2. Add it temporarily as a GitHub Actions repository secret named `NPM_TOKEN`.
-3. The first push that creates `main` does not release: `github.event.before` is all zeroes, so the workflow sets `release=false` and prints a clear message. After the temporary secret is configured, run **Actions → Release → Run workflow** (`workflow_dispatch`) from the `main` branch to publish `pi-herdr-agents@0.2.0`; other refs are rejected.
-4. When the package does not exist, the publish step requires the temporary `NPM_TOKEN` as `NODE_AUTH_TOKEN`. Once any version exists, the workflow rejects that token and requires OIDC trusted publishing.
-5. Configure the trusted publisher as above (`giuseppecrj` / `pi-herdr-agents` / `publish.yml`).
-6. Immediately revoke or delete the granular token on npm and remove the temporary `NPM_TOKEN` repository secret.
-
-Do not publish the first version with a local `npm publish`. Local publish does not create the same GitHub Actions provenance the workflow expects, and it skips the workflow's tag/release path. Always bootstrap through Actions.
-
-Later version bumps use trusted publishing only. A leftover bootstrap secret blocks publication until it is removed.
+The initial `0.0.1` publication established the npm package. Trusted publishing is now configured for `giuseppecrj/pi-herdr-agents` and `publish.yml`, so all later releases use OIDC only. Later version bumps use trusted publishing only. Do not add `NPM_TOKEN`: the workflow rejects it once the package exists.
 
 ## Publish a release
 
 Choose the semantic version increment:
 
-- `patch`: compatible bug fixes, such as `0.2.0` to `0.2.1`
-- `minor`: compatible features, such as `0.2.0` to `0.3.0`
-- `major`: breaking changes, such as `0.2.0` to `1.0.0`
+- `patch`: compatible bug fixes, such as `0.0.2` to `0.0.3`
+- `minor`: compatible features, such as `0.0.2` to `0.1.0`
+- `major`: breaking changes, such as `0.0.2` to `1.0.0`
 
 Create the version commit without a local tag:
 
@@ -124,7 +109,7 @@ The workflow stops if the matching version tag already points to a different com
 
 ### npm rejects authentication
 
-Confirm that the trusted publisher matches owner `giuseppecrj`, repository `pi-herdr-agents`, and workflow `publish.yml`, that the job has `id-token: write`, and that the runner is GitHub-hosted. For the one-time bootstrap only, confirm the temporary granular token still has publish rights and has not expired. If an existing package release reports that `NPM_TOKEN` is bootstrap-only, remove the secret and use the trusted publisher.
+Confirm that the trusted publisher matches owner `giuseppecrj`, repository `pi-herdr-agents`, and workflow `publish.yml`, that the job has `id-token: write`, and that the runner is GitHub-hosted. If a release reports that `NPM_TOKEN` is bootstrap-only, remove the secret and use the trusted publisher.
 
 ### npm reports that the version already exists
 
@@ -132,7 +117,7 @@ If the published `gitHead` does not match this commit, the workflow fails before
 
 ### Initial branch creation did not release
 
-A clean repository's first push has `github.event.before` all zeroes. The workflow treats that as `release=false`. Configure the temporary `NPM_TOKEN` if needed, then bootstrap with `workflow_dispatch`.
+A clean repository's first push has `github.event.before` all zeroes. The workflow treats that as `release=false`. This package is already established on npm, so use tokenless trusted publishing for later releases.
 
 ### The package is absent from pi.dev
 

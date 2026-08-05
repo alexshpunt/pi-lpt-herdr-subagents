@@ -81,7 +81,7 @@ function runDetect(
       join(dir, "package.json"),
       JSON.stringify({
         name: "pi-herdr-agents",
-        version: options.currentVersion ?? "0.2.0",
+        version: options.currentVersion ?? "0.0.2",
       }),
     );
 
@@ -199,7 +199,7 @@ globalThis.fetch = async (_url, options) => {
           PACKAGE_NAME: "pi-herdr-agents",
           REGISTRY_SCENARIO: scenario,
           REGISTRY_URL: "https://registry.test/",
-          VERSION: "0.2.0",
+          VERSION: "0.0.2",
         },
         stdio: "pipe",
       });
@@ -270,16 +270,16 @@ test("release detection executes the guarded push and dispatch branches", async 
 
   const unchanged = runDetect(detect, {
     eventName: "push",
-    previousVersion: "0.2.0",
-    currentVersion: "0.2.0",
+    previousVersion: "0.0.2",
+    currentVersion: "0.0.2",
   });
   assert.equal(unchanged.error, undefined);
   assert.equal(unchanged.outputs.release, "false");
 
   const bumped = runDetect(detect, {
     eventName: "push",
-    previousVersion: "0.2.0",
-    currentVersion: "0.2.1",
+    previousVersion: "0.0.2",
+    currentVersion: "0.0.3",
   });
   assert.equal(bumped.error, undefined);
   assert.equal(bumped.outputs.release, "true");
@@ -294,8 +294,8 @@ test("release detection executes the guarded push and dispatch branches", async 
 
   const downgrade = runDetect(detect, {
     eventName: "push",
-    previousVersion: "0.2.0",
-    currentVersion: "0.1.9",
+    previousVersion: "0.0.2",
+    currentVersion: "0.0.1",
   });
   assert.ok(downgrade.error, "version downgrade must fail closed");
 
@@ -381,7 +381,6 @@ test("release workflow enforces bootstrap-only token and trusted publishing", as
   assert.match(guide, /workflow fails if `NPM_TOKEN` is still configured/);
   assert.match(guide, /other refs are rejected/);
   assert.match(guide, /Later version bumps use trusted publishing only/);
-  assert.match(guide, /Do not publish the first version with a local `npm publish`/);
 });
 
 test("release workflow retries only exact-commit npm publishes", async () => {

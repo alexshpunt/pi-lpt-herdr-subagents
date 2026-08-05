@@ -65,7 +65,7 @@ Use `pi install -l npm:pi-herdr-agents` for a project-local installation, or try
 pi -e npm:pi-herdr-agents
 ```
 
-Pi packages execute with your user account's full system access. Review the package source before installation. Claude CLI children always launch with `--dangerously-skip-permissions`, so those runs skip Claude's interactive permission prompts.
+Pi packages execute with your user account's full system access. Review the package source before installation. A locally installed Claude CLI adapter launches with `--dangerously-skip-permissions`, so those runs skip Claude's interactive permission prompts.
 
 After the one-time first-package bootstrap, changing the `package.json` version on `main` automatically publishes to npm and creates the matching Git tag and GitHub Release. For bootstrap authentication, versioning, verification, and troubleshooting, see [RELEASING.md](RELEASING.md).
 
@@ -144,7 +144,7 @@ This package uses five distinct concepts:
   dependencies of roles or workflows, not subagent definitions.
 - A **runtime** is how an invocation executes: Pi or an external CLI, plus its
   model and thinking policy.
-- An **adapter** is a hidden runtime-specific definition used by a workflow.
+- An **adapter** is a hidden runtime-specific definition supplied locally or optionally used by a workflow.
 
 See [ADR-0002](docs/adr/0002-agent-workflow-skill-runtime-taxonomy.md) for the
 accepted decision, rationale, migration boundaries, and evidence.
@@ -157,7 +157,7 @@ The current workflow inventory is:
 | Iteration | `/iterate` | Opens one interactive full-context Pi fork and returns its completion summary. |
 | Side question | `/btw`, `/btw-close` | Opens one replaceable interactive Pi side session; its answer stays outside the parent transcript. |
 | Approved review runner | `herdr_workflow` (low-level control tool) | Validates and runs exact approved project-local JavaScript with bounded read-only Pi reviewers. The bundled `orchestrate` skill authors this first-flow topology. |
-| Adversarial review | `adversarial-reviewer` | Transitional workflow implementation that runs Pi reviewer passes plus the hidden Claude CLI adapter and writes `.reviews/...` artifacts. It remains visible and launchable until a dedicated workflow surface replaces it. |
+| Adversarial review | `adversarial-reviewer` | Transitional workflow implementation that selects three distinct authenticated Pi runtimes for generic reviewer passes, preferring provider diversity; it writes `.reviews/...` artifacts. It remains visible and launchable until a dedicated workflow surface replaces it. |
 
 ### Bundled visible definitions
 
@@ -169,15 +169,20 @@ The current workflow inventory is:
 | **reviewer** | Leaf agent role | Config, then parent | Reviews changes for correctness, security, and maintainability. |
 | **visual-tester** | Leaf agent role | Config, then parent | Performs visual QA through the `chrome-cdp` skill. |
 | **poteto** | Coordinator agent role | Config, then parent | Autonomously investigates, edits minimally, delegates independent work, and verifies. |
-| **adversarial-reviewer** | Transitional workflow implementation | Grok + GPT + Claude | Runs evidence-backed Optimizer and Skeptic review passes. |
+| **adversarial-reviewer** | Transitional workflow implementation | Three distinct authenticated Pi model IDs, preferring provider diversity | Runs evidence-backed Optimizer and Skeptic review passes through generic `reviewer` children. |
 
-`claude-reviewer` is an internal Claude CLI adapter. Discovery hides it, but
-workflows can still load and invoke it by exact name. Its CLI and the Claude pass
-in adversarial review require `claude` and always add `--dangerously-skip-permissions`;
-adversarial review also requires live authenticated XAI/Grok and OpenAI Codex
-model IDs. Optional prerequisites fail closed and are not bundled:
+Bundled definitions are portable Pi roles. Vendor-specific external CLI adapters
+are local or optional definitions, not bundled roles. The existing external CLI
+path supports a local hidden Claude adapter (`cli: claude`) and always adds
+`--dangerously-skip-permissions`; it does not provide an adapter registry or
+Cursor/OpenCode support. Put an adapter in
+`$PI_CODING_AGENT_DIR/agents/` or `.pi/agents/` with
+`disable-model-invocation: true` when direct exact-name invocation needs it.
+
+Optional prerequisites fail closed and are not bundled:
 
 - `visual-tester` needs an external `chrome-cdp` skill that provides `scripts/cdp.mjs`.
+- `adversarial-reviewer` needs three distinct exact authenticated Pi model IDs; it prefers IDs from different providers when available.
 - `/plan` uses the bundled scout and planner roles and records ordered tasks in
   `plan.md`; it does not require a researcher role, todo tool, or `write-todos` skill.
 
@@ -859,7 +864,7 @@ herdr
 pi
 ```
 
-Other multiplexers and terminal backends are not supported. Worktrees provide Git checkout isolation only, not process or security isolation; child agents and installed Pi packages run with your user's filesystem and command permissions. Claude CLI children always launch with `--dangerously-skip-permissions` and therefore skip Claude's interactive permission prompts.
+Other multiplexers and terminal backends are not supported. Worktrees provide Git checkout isolation only, not process or security isolation; child agents and installed Pi packages run with your user's filesystem and command permissions. Locally configured Claude CLI adapters always launch with `--dangerously-skip-permissions` and therefore skip Claude's interactive permission prompts.
 
 ---
 

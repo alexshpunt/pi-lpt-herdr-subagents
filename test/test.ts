@@ -1495,7 +1495,6 @@ describe("subagent discovery", () => {
 				reviewer: false,
 				planner: true,
 				"visual-tester": false,
-				"claude-reviewer": false,
 			} as const;
 
 			for (const [name, interactive] of Object.entries(expectedInteraction)) {
@@ -1523,17 +1522,7 @@ describe("subagent discovery", () => {
 				"chrome-cdp",
 			);
 
-			const claude = testApi.loadAgentDefaults("claude-reviewer");
-			assert.ok(
-				claude,
-				"expected bundled Claude reviewer to load by exact name",
-			);
-			assert.equal(
-				claude.model,
-				undefined,
-				"Claude CLI reviewer should inherit Pi routing",
-			);
-			assert.equal(claude.cliModel, "sonnet");
+			assert.equal(testApi.loadAgentDefaults("claude-reviewer"), null);
 		});
 	});
 
@@ -1586,16 +1575,12 @@ describe("subagent discovery", () => {
 		);
 		assert.match(
 			instructions,
-			/reuse the resolved XAI\/Grok and OpenAI Codex model\s+IDs for the Skeptic/i,
+			/select three distinct exact authenticated Pi model IDs/i,
 		);
+		assert.match(instructions, /prefer IDs from\s+different providers/i);
+		assert.match(instructions, /reuse the selected model IDs for three Skeptics/i);
 		assert.match(instructions, /final assistant message is its complete report/i);
 		assert.doesNotMatch(instructions, /tools:\s*["']read,bash,write["']/);
-
-		const claudeReviewer = testApi.loadAgentDefaults("claude-reviewer");
-		assert.match(
-			claudeReviewer?.body ?? "",
-			/return the complete report in your final assistant message/i,
-		);
 	});
 
 	it("ignores invalid session-mode values", async () => {
@@ -2008,8 +1993,18 @@ describe("subagent discovery", () => {
 		);
 	});
 
-	it("hides the bundled Claude adapter but keeps exact-name loading and adversarial review", async () => {
-		await withIsolatedAgentEnv(async () => {
+	it("hides a local external CLI adapter while preserving exact-name loading", async () => {
+		await withIsolatedAgentEnv(async ({ globalAgentsDir }) => {
+			writeAgentFile(
+				globalAgentsDir,
+				"external-cli-reviewer",
+				[
+					"description: Hidden external CLI review adapter",
+					"cli: claude",
+					"cli-model: sonnet",
+					"disable-model-invocation: true",
+				].join("\n"),
+			);
 			const { api, registeredTools } = createMockExtensionApi();
 			(subagentsModule as any).default(api);
 
@@ -2020,20 +2015,16 @@ describe("subagent discovery", () => {
 
 			const result = await tool.execute();
 			const agents = result.details?.agents ?? [];
-
 			assert.equal(
-				agents.some((agent: any) => agent.name === "claude-reviewer"),
+				agents.some((agent: any) => agent.name === "external-cli-reviewer"),
 				false,
 			);
-			assert.equal(
-				agents.some((agent: any) => agent.name === "adversarial-reviewer"),
-				true,
-			);
-			assert.doesNotMatch(result.content[0].text, /claude-reviewer/);
+			assert.doesNotMatch(result.content[0].text, /external-cli-reviewer/);
 
-			const claude = testApi.loadAgentDefaults("claude-reviewer");
-			assert.equal(claude?.cli, "claude");
-			assert.equal(claude?.disableModelInvocation, true);
+			const adapter = testApi.loadAgentDefaults("external-cli-reviewer");
+			assert.equal(adapter?.cli, "claude");
+			assert.equal(adapter?.cliModel, "sonnet");
+			assert.equal(adapter?.disableModelInvocation, true);
 		});
 	});
 

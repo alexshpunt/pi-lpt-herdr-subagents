@@ -58,7 +58,6 @@ describe("bundled orchestration skill", () => {
 			"RELEASING.md",
 			"skills/orchestrate/SKILL.md",
 			"agents/adversarial-reviewer.md",
-			"agents/claude-reviewer.md",
 			"agents/planner.md",
 			"agents/poteto.md",
 			"agents/reviewer.md",
@@ -73,6 +72,7 @@ describe("bundled orchestration skill", () => {
 		]) {
 			assert.equal(packageFiles.has(path), true, `missing package file: ${path}`);
 		}
+		assert.equal(packageFiles.has("agents/claude-reviewer.md"), false);
 		for (const path of packageFiles) {
 			assert.doesNotMatch(
 				path,

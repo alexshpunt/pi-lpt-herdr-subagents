@@ -24,8 +24,8 @@ Use these terms consistently:
   skill author and user-facing.
 - **Runtime** — How a role executes: Pi or an external CLI, plus model and
   thinking selection. Owned by invocation/configuration and not user-facing.
-- **Adapter** — An internal, runtime-specific role used by a workflow, such as
-  the Claude review pass. Owned by this package and not user-facing.
+- **Adapter** — A local or optional runtime-specific role for direct invocation.
+  Owned by the caller or local configuration and not user-facing.
 
 An agent role is **not** a workflow merely because it can spawn other agents.
 A coordinator role is allowed when it owns an interactive or multi-stage child
@@ -38,9 +38,9 @@ surface:
 
 - Agent definitions are discovered from package, global, and project folders,
   with project definitions overriding global and bundled definitions.
-- The bundled list includes reusable roles (`scout`, `worker`, `reviewer`), a
-  multi-stage orchestration (`adversarial-reviewer`), and a Claude-specific
-  implementation (`claude-reviewer`).
+- The bundled list includes reusable roles (`scout`, `worker`, `reviewer`) and
+  a multi-stage orchestration (`adversarial-reviewer`). Runtime-specific
+  implementations are local optional adapters, not bundled definitions.
 - The extension can request Pi skills, select model defaults, and start
   sessions, but it has no first-class workflow definition or agent-definition
   schema validation.
@@ -133,9 +133,9 @@ the package's `/plan` workflow, not as a second kind of subagent definition.
 A role describes the work; a runtime describes how one invocation performs it.
 For Pi-backed agents, the current model-resolution chain is the correct
 foundation: explicit invocation choice, agent default, per-agent configuration,
-global configuration, then the parent model. Claude CLI adapters instead use
-`cli` and `cli-model`; do not set a Pi `model` on an adapter expecting it to
-select the CLI model.
+global configuration, then the parent model. A local Claude CLI adapter instead
+uses `cli` and `cli-model`; do not set a Pi `model` on an adapter expecting it
+to select the CLI model.
 
 Apply these rules:
 
@@ -150,17 +150,22 @@ Apply these rules:
    runtime is unavailable.
 
 This preserves the useful multi-model review behavior without baking a
-particular vendor choice into the generic `reviewer` role.
+particular vendor choice into the generic `reviewer` role. Adversarial review
+selects three distinct exact authenticated Pi model IDs at runtime, preferring
+provider diversity, and launches generic `reviewer` children.
 
-### 5. Internal adapters are hidden from task discovery
+### 5. Local adapters are hidden from task discovery
 
 An adapter exists to satisfy a workflow's runtime contract, not to ask a user
-what they want to do. It should use `disable-model-invocation: true` and have a
-name that makes its internal nature clear.
+what they want to do. It is a local or optional definition, must use
+`disable-model-invocation: true`, and should have a name that makes its internal
+nature clear. Hidden adapters remain explicitly invokable by exact name.
 
-`claude-reviewer` is the current example. It uses
-`disable-model-invocation: true`: hidden adapters remain explicitly invokable
-by exact name, including from the existing adversarial-review orchestrator.
+The package preserves its existing external CLI launch path for local adapters;
+it does not bundle vendor-specific adapters, provide an adapter registry, or add
+Cursor/OpenCode support. Move callers that invoke `claude-reviewer` by exact
+name to `$PI_CODING_AGENT_DIR/agents/claude-reviewer.md` or
+`.pi/agents/claude-reviewer.md` with the same hidden frontmatter.
 
 ### 6. Agent frontmatter is a constrained contract
 
@@ -194,10 +199,12 @@ project authors can still add their own namespaced fields.
   engineering responsibility remains intentional.
 - `visual-tester` — Leaf agent role with skill prerequisite. Keep its
   `chrome-cdp` dependency declared through canonical `skills` metadata.
-- `claude-reviewer` — Hidden internal runtime adapter. Workflows can still
-  invoke it by exact name.
+- `claude-reviewer` — No longer bundled. Callers that need this exact local
+  Claude CLI adapter must provide it in a global or project agent directory.
 - `adversarial-reviewer` — Workflow implementation pending a workflow surface.
-  Do not clone this pattern for new outcomes; migrate its user contract to an
+  It selects three distinct exact authenticated Pi model IDs at runtime,
+  preferring provider diversity, and launches generic `reviewer` children. Do
+  not clone this pattern for new outcomes; migrate its user contract to an
   adversarial-review workflow.
 - `plan-skill.md` — Planning workflow instruction. Document by workflow purpose,
   not agent type.
@@ -218,9 +225,11 @@ not a general workflow registry.
    `scout`'s `output` metadata and `visual-tester`'s compatibility `skill` key.
 4. Document every current workflow—planning, iteration, side questions, and
    adversarial review—with its roles, artifacts, prerequisites, and runtime
-   policy in one place.
-5. Mark `claude-reviewer` with `disable-model-invocation: true`; this is an
-   existing visibility control, not new framework work.
+   policy in one place. Adversarial review selects three distinct exact
+   authenticated Pi model IDs at runtime, prefers provider diversity, and uses
+   generic `reviewer` children.
+5. Remove bundled `claude-reviewer`; exact-name callers supply the hidden local
+   adapter from their global or project agent directory.
 
 ### Phase 2 — improve discovery without a new framework
 

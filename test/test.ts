@@ -18,6 +18,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
+import {
+	buildClaudeLaunchCommand,
+	requireClaudeAdapter,
+} from "../pi-extension/subagents/claude.ts";
 import rolePackExample from "../examples/role-pack/extension.ts";
 import {
 	cleanupSubagentsForShutdown,
@@ -101,6 +105,35 @@ after(() => {
 	else process.env.PI_SUBAGENT_ID = inheritedSubagentId;
 	if (inheritedDenyTools == null) delete process.env.PI_DENY_TOOLS;
 	else process.env.PI_DENY_TOOLS = inheritedDenyTools;
+});
+
+describe("Claude CLI adapter", () => {
+	it("builds the established unattended Claude command", () => {
+		requireClaudeAdapter("claude");
+		const command = buildClaudeLaunchCommand({
+			cwd: "/tmp/project",
+			sentinelFile: "/tmp/claude-done",
+			pluginDir: "/tmp/no-plugin",
+			model: "sonnet",
+			systemPrompt: "Review this change.",
+			resumeSessionId: "session-123",
+			task: "Review the diff",
+		});
+
+		assert.match(command, /PI_CLAUDE_SENTINEL='\/tmp\/claude-done'/);
+		assert.match(command, /claude --dangerously-skip-permissions/);
+		assert.match(command, /--model 'sonnet'/);
+		assert.match(command, /--append-system-prompt 'Review this change\.'/);
+		assert.match(command, /--resume 'session-123'/);
+		assert.match(command, /'Review the diff'; echo '__SUBAGENT_DONE_'\$\?'__'/);
+	});
+
+	it("rejects unknown CLI values before launch", () => {
+		assert.throws(
+			() => requireClaudeAdapter("opencode"),
+			/Unsupported subagent CLI "opencode"/,
+		);
+	});
 });
 
 // --- Helpers ---

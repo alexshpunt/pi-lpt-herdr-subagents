@@ -21,8 +21,6 @@ import {
 	writeFileSync,
 	existsSync,
 	mkdirSync,
-	copyFileSync,
-	unlinkSync,
 	rmSync,
 	renameSync,
 	statSync,
@@ -45,6 +43,13 @@ import {
 	waitForProcessesExit,
 } from "./terminal.ts";
 import { waitForCompletion } from "./completion.ts";
+import {
+	buildClaudeLaunchCommand,
+	captureClaudeWorkspaceBaseline,
+	cleanupClaudeWorkspace,
+	completeClaudeRun,
+	requireClaudeAdapter,
+} from "./claude.ts";
 import {
 	buildAuthenticatedModelCatalog,
 	resolveRuntimePlan,
@@ -804,69 +809,6 @@ function formatElapsed(seconds: number): string {
  * (for example direnv/devenv), so the delay is configurable for users who hit
  * dropped commands. Keep the historical default at 500ms.
  */
-function captureWorkspaceBaseline(cwd: string): Set<string> | undefined {
-	try {
-		const output = execFileSync(
-			"git",
-			["status", "--porcelain=v1", "--untracked-files=all", "-z"],
-			{ cwd, encoding: "utf8" },
-		);
-		return new Set(
-			output
-				.split("\0")
-				.filter(Boolean)
-				.map((entry) => entry.slice(3)),
-		);
-	} catch {
-		return undefined;
-	}
-}
-
-function guardClaudeWorkspace(running: RunningSubagent): string | undefined {
-	if (!running.workspaceBaseline || !running.workspaceCwd) return;
-
-	try {
-		const output = execFileSync(
-			"git",
-			["status", "--porcelain=v1", "--untracked-files=all", "-z"],
-			{ cwd: running.workspaceCwd, encoding: "utf8" },
-		);
-		const changed = output
-			.split("\0")
-			.filter(Boolean)
-			.map((entry) => ({
-				status: entry.slice(0, 2),
-				path: entry.slice(3),
-			}));
-		const newPaths = changed.filter(
-			({ path }) => !running.workspaceBaseline!.has(path),
-		);
-		const cleaned: string[] = [];
-
-		for (const { status, path } of newPaths) {
-			if (path.startsWith(".reviews/")) continue;
-			if (status === "??") {
-				rmSync(`${running.workspaceCwd}/${path}`, {
-					recursive: true,
-					force: true,
-				});
-			} else {
-				execFileSync("git", ["restore", "--staged", "--worktree", "--", path], {
-					cwd: running.workspaceCwd,
-					stdio: "ignore",
-				});
-			}
-			cleaned.push(path);
-		}
-
-		return cleaned.length > 0
-			? `Claude workspace guard reverted newly introduced paths: ${cleaned.join(", ")}`
-			: undefined;
-	} catch (error: any) {
-		return `Claude workspace guard failed: ${error?.message ?? String(error)}`;
-	}
-}
-
 function getShellReadyDelayMs(): number {
 	const raw = process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS?.trim();
 	const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
@@ -2119,6 +2061,7 @@ async function launchSubagent(
 			diagnostic?.message ?? `Agent "${params.agent}" was not found.`,
 		);
 	}
+	requireClaudeAdapter(agentDefs?.cli);
 	if (!ctx.model)
 		throw new Error("Subagent launch requires a resolved parent model");
 	const runtimePlan = resolveRuntimePlan(
@@ -2244,7 +2187,7 @@ async function launchSubagent(
 	);
 	const workspaceBaseline =
 		agentDefs?.cli === "claude" && !worktree
-			? captureWorkspaceBaseline(targetCwdForSession)
+			? captureClaudeWorkspaceBaseline(targetCwdForSession)
 			: undefined;
 
 	// Generate a deterministic session file path for this subagent.
@@ -2312,35 +2255,15 @@ async function launchSubagent(
 		const sentinelFile = `/tmp/pi-claude-${id}-done`;
 		const pluginDir = join(SUBAGENTS_DIR, "plugin");
 
-		const cmdParts: string[] = [];
-		cmdParts.push(`PI_CLAUDE_SENTINEL=${shellQuote(sentinelFile)}`);
-		cmdParts.push("claude");
-		cmdParts.push("--dangerously-skip-permissions");
-
-		if (existsSync(pluginDir)) {
-			cmdParts.push("--plugin-dir", shellQuote(pluginDir));
-		}
-
-		const cliModel = agentDefs.cliModel ?? effectiveModel;
-		if (cliModel) {
-			cmdParts.push("--model", shellQuote(cliModel));
-		}
-
-		const sp = params.systemPrompt ?? agentDefs.body;
-		if (sp) {
-			cmdParts.push("--append-system-prompt", shellQuote(sp));
-		}
-
-		if (params.resumeSessionId) {
-			cmdParts.push("--resume", shellQuote(params.resumeSessionId));
-		}
-
-		// Always pass the task as the prompt — even for resumed sessions,
-		// the caller's task is the follow-up instruction.
-		cmdParts.push(shellQuote(params.task));
-
-		const cdPrefix = `cd ${shellQuote(targetCwdForSession)} && `;
-		const command = `${cdPrefix}${cmdParts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
+		const command = buildClaudeLaunchCommand({
+			cwd: targetCwdForSession,
+			sentinelFile,
+			pluginDir,
+			model: agentDefs.cliModel ?? effectiveModel,
+			systemPrompt: params.systemPrompt ?? agentDefs.body,
+			resumeSessionId: params.resumeSessionId,
+			task: params.task,
+		});
 
 		const launchScriptName = `${
 			(params.name || "subagent")
@@ -2561,31 +2484,6 @@ async function launchSubagent(
  * the summary from the session file, and closes ordinary panes. Worktree
  * workspaces are retained for parent review.
  */
-const CLAUDE_SESSIONS_DIR = join(
-	process.env.HOME ?? "/tmp",
-	".pi",
-	"agent",
-	"sessions",
-	"claude-code",
-);
-
-function copyClaudeSession(sentinelFile: string): string | null {
-	try {
-		const transcriptFile = sentinelFile + ".transcript";
-		if (!existsSync(transcriptFile)) return null;
-		const transcriptPath = readFileSync(transcriptFile, "utf-8").trim();
-		if (!transcriptPath || !existsSync(transcriptPath)) return null;
-		mkdirSync(CLAUDE_SESSIONS_DIR, { recursive: true });
-		const filename =
-			transcriptPath.split("/").pop() ?? `claude-${Date.now()}.jsonl`;
-		const dest = join(CLAUDE_SESSIONS_DIR, filename);
-		copyFileSync(transcriptPath, dest);
-		return filename;
-	} catch {
-		return null;
-	}
-}
-
 async function watchSubagent(
 	running: RunningSubagent,
 	signal: AbortSignal,
@@ -2623,41 +2521,13 @@ async function watchSubagent(
 		const elapsed = Math.floor((detectedAt - startTime) / 1000);
 
 		if (running.cli === "claude") {
-			// Claude Code result extraction
-			const guardMessage = guardClaudeWorkspace(running);
-			let summary = "";
-
-			if (running.sentinelFile) {
-				try {
-					summary = readFileSync(running.sentinelFile, "utf-8").trim();
-				} catch {}
-			}
-
-			if (!summary) {
-				summary = readPane(surface, 200)
-					.replace(/__SUBAGENT_DONE_\d+__/, "")
-					.trimEnd();
-			}
-
-			if (!summary) {
-				summary =
-					result.exitCode !== 0
-						? `Claude Code exited with code ${result.exitCode}`
-						: "Claude Code exited without output";
-			}
-			if (guardMessage) summary += `\n\n${guardMessage}`;
-
-			// Copy Claude session transcript
-			let sessionId: string | null = null;
-			if (running.sentinelFile) {
-				sessionId = copyClaudeSession(running.sentinelFile);
-				try {
-					unlinkSync(running.sentinelFile);
-				} catch {}
-				try {
-					unlinkSync(running.sentinelFile + ".transcript");
-				} catch {}
-			}
+			const claudeCompletion = completeClaudeRun({
+				sentinelFile: running.sentinelFile!,
+				exitCode: result.exitCode,
+				baseline: running.workspaceBaseline,
+				cwd: running.workspaceCwd,
+				readTerminal: () => readPane(surface, 200),
+			});
 
 			const worktreeHandoff = finalizeSubagentSurface(
 				running,
@@ -2668,7 +2538,7 @@ async function watchSubagent(
 					? markCompleted(running.lifecycle, Date.now())
 					: markFailed(
 							running.lifecycle,
-							result.errorMessage ?? summary,
+							result.errorMessage ?? claudeCompletion.summary,
 							Date.now(),
 							result.exitCode,
 						);
@@ -2676,10 +2546,12 @@ async function watchSubagent(
 			return {
 				name,
 				task,
-				summary,
+				summary: claudeCompletion.summary,
 				exitCode: result.exitCode,
 				elapsed,
-				...(sessionId ? { claudeSessionId: sessionId } : {}),
+				...(claudeCompletion.sessionId
+					? { claudeSessionId: claudeCompletion.sessionId }
+					: {}),
 				...(worktreeHandoff ? { worktree: worktreeHandoff } : {}),
 			};
 		}
@@ -2761,7 +2633,12 @@ async function watchSubagent(
 		};
 	} catch (err: any) {
 		const guardMessage =
-			running.cli === "claude" ? guardClaudeWorkspace(running) : undefined;
+			running.cli === "claude"
+				? cleanupClaudeWorkspace({
+						baseline: running.workspaceBaseline,
+						cwd: running.workspaceCwd,
+					})
+				: undefined;
 		const worktreeHandoff = finalizeSubagentSurface(running, "failed", true);
 		running.lifecycle = markFailed(
 			running.lifecycle,

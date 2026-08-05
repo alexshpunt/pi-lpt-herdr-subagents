@@ -1,6 +1,6 @@
 {
   "name": "pi-herdr-agents",
-  "version": "0.2.0",
+  "version": "0.0.1",
   "description": "Asynchronous Pi subagents and approved review workflows in Herdr, with optional isolated Git worktrees",
   "keywords": [
     "pi-package",
@@ -16,16 +16,6 @@
     "name": "Giuseppe Rodriguez",
     "url": "https://github.com/giuseppecrj"
   },
-  "contributors": [
-    {
-      "name": "HazAT",
-      "url": "https://github.com/HazAT"
-    },
-    {
-      "name": "Richard Hao",
-      "url": "https://github.com/0xRichardH"
-    }
-  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/giuseppecrj/pi-herdr-agents.git"

@@ -1,0 +1,11 @@
+.pi/
+test/
+.github/
+.gitignore
+config.json
+prototype/
+prototypes/
+sessions/
+run.jsonl
+.reviews/
+*.tgz

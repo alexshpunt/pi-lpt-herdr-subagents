@@ -1,0 +1,68 @@
+{
+  "name": "pi-herdr-agents",
+  "version": "0.2.0",
+  "description": "Asynchronous Pi subagents and approved review workflows in Herdr, with optional isolated Git worktrees",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "herdr",
+    "subagents",
+    "agents",
+    "worktrees",
+    "orchestration"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "Giuseppe Rodriguez",
+    "url": "https://github.com/giuseppecrj"
+  },
+  "contributors": [
+    {
+      "name": "HazAT",
+      "url": "https://github.com/HazAT"
+    },
+    {
+      "name": "Richard Hao",
+      "url": "https://github.com/0xRichardH"
+    }
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/giuseppecrj/pi-herdr-agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/giuseppecrj/pi-herdr-agents/issues"
+  },
+  "homepage": "https://github.com/giuseppecrj/pi-herdr-agents#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "scripts": {
+    "lint": "oxlint pi-extension test",
+    "test": "node --experimental-strip-types --test test/test.ts test/runtime-routing.test.ts test/release-workflow.test.ts test/workflow.test.ts test/package-skill.test.js",
+    "test:integration": "node --experimental-strip-types --test --test-concurrency=1 test/integration/*.test.ts",
+    "test:integration:live": "PI_TEST_LIVE=1 node --experimental-strip-types --test --test-concurrency=1 test/integration/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./pi-extension/subagents/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.83.0",
+    "@earendil-works/pi-coding-agent": "^0.83.0",
+    "@earendil-works/pi-tui": "^0.83.0",
+    "@sinclair/typebox": "^0.34.52",
+    "oxlint": "^1.73.0"
+  }
+}

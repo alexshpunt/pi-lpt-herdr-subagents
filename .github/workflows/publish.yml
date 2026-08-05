@@ -1,0 +1,269 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - package.json
+  workflow_dispatch:
+
+concurrency:
+  group: pi-herdr-agents-release
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: Detect version bump
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      name: ${{ steps.version.outputs.name }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Detect package version bump
+        id: version
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          name="$(node --input-type=module -e "import pkg from './package.json' with { type: 'json' }; process.stdout.write(pkg.name)")"
+          version="$(node --input-type=module -e "import pkg from './package.json' with { type: 'json' }; process.stdout.write(pkg.version)")"
+          release=true
+
+          if ! node --input-type=module -e 'if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(process.argv[1])) process.exit(1)' "$version"; then
+            echo "::error::package.json version must be a stable semantic version (major.minor.patch), not ${version}."
+            exit 1
+          fi
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "::error::Release workflow_dispatch must run from main, not ${GITHUB_REF}."
+            exit 1
+          fi
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            # Initial branch creation has before=000...0; git show fails and
+            # a first push must not release. Bootstrap via workflow_dispatch.
+            if [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+              release=false
+              echo "Initial branch creation (before SHA is all zeroes); no release. Bootstrap with workflow_dispatch after configuring a temporary NPM_TOKEN if needed."
+            elif ! previous_version="$(git show "${BEFORE_SHA}:package.json" 2>/dev/null | node --input-type=module -e "let input=''; process.stdin.on('data', chunk => input += chunk); process.stdin.on('end', () => process.stdout.write(JSON.parse(input).version));")"; then
+              release=false
+              echo "Could not read package.json at ${BEFORE_SHA}; refusing to infer a release."
+            elif ! version_order="$(node --input-type=module -e '
+              const parse = (value) => {
+                if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value)) process.exit(1);
+                return value.split(".").map(BigInt);
+              };
+              const [previous, current] = process.argv.slice(1).map(parse);
+              let order = "equal";
+              for (let index = 0; index < 3; index += 1) {
+                if (current[index] > previous[index]) { order = "greater"; break; }
+                if (current[index] < previous[index]) { order = "lower"; break; }
+              }
+              process.stdout.write(order);
+            ' "$previous_version" "$version")"; then
+              echo "::error::Previous package version ${previous_version} is not a supported stable semantic version."
+              exit 1
+            elif [[ "$version_order" == "equal" ]]; then
+              release=false
+              echo "package.json changed without a version bump; no release is needed."
+            elif [[ "$version_order" != "greater" ]]; then
+              echo "::error::package.json version must increase from ${previous_version}, not decrease to ${version}."
+              exit 1
+            fi
+          fi
+
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Publish, tag, and create GitHub release
+    needs: detect
+    if: needs.detect.outputs.release == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.14
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Install npm for trusted publishing
+        run: npm install -g npm@^11.5.1
+
+      - name: Verify package version is unpublished
+        id: npm
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ needs.detect.outputs.name }}
+          REGISTRY_URL: https://registry.npmjs.org/
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFile } from "node:fs/promises";
+
+          const { GITHUB_OUTPUT, GITHUB_SHA, PACKAGE_NAME, REGISTRY_URL, VERSION } = process.env;
+          if (![GITHUB_OUTPUT, GITHUB_SHA, PACKAGE_NAME, REGISTRY_URL, VERSION].every(Boolean)) {
+            throw new Error("Missing required release verification environment.");
+          }
+
+          const url = new URL(encodeURIComponent(PACKAGE_NAME), REGISTRY_URL);
+          const response = await fetch(url, {
+            headers: { accept: "application/json" },
+            redirect: "error",
+            signal: AbortSignal.timeout(30_000),
+          });
+          const body = await response.text();
+
+          if (response.status === 404) {
+            let error;
+            try {
+              error = JSON.parse(body);
+            } catch {
+              throw new Error(`npm returned a malformed 404 response for ${PACKAGE_NAME}.`);
+            }
+            if (
+              !error ||
+              typeof error !== "object" ||
+              Array.isArray(error) ||
+              Object.keys(error).length !== 1 ||
+              !Object.hasOwn(error, "error") ||
+              error.error !== "Not found"
+            ) {
+              throw new Error(`npm returned an ambiguous 404 response for ${PACKAGE_NAME}.`);
+            }
+            await appendFile(GITHUB_OUTPUT, "package_exists=false\npublished=false\n");
+            console.log(`${PACKAGE_NAME} does not exist on npm.`);
+          } else {
+            if (!response.ok) {
+              throw new Error(`npm registry lookup failed for ${PACKAGE_NAME} with HTTP ${response.status}.`);
+            }
+
+            let metadata;
+            try {
+              metadata = JSON.parse(body);
+            } catch {
+              throw new Error(`npm returned malformed package metadata for ${PACKAGE_NAME}.`);
+            }
+            if (metadata?.name !== PACKAGE_NAME || !metadata.versions || typeof metadata.versions !== "object" || Array.isArray(metadata.versions)) {
+              throw new Error(`npm returned unexpected package metadata for ${PACKAGE_NAME}.`);
+            }
+
+            const published = Object.hasOwn(metadata.versions, VERSION)
+              ? metadata.versions[VERSION]
+              : undefined;
+            if (published === undefined) {
+              await appendFile(GITHUB_OUTPUT, "package_exists=true\npublished=false\n");
+              console.log(`${PACKAGE_NAME}@${VERSION} is not published.`);
+            } else if (!published || typeof published !== "object" || published.version !== VERSION) {
+              throw new Error(`npm returned unexpected version metadata for ${PACKAGE_NAME}@${VERSION}.`);
+            } else if (published.gitHead === GITHUB_SHA) {
+              await appendFile(GITHUB_OUTPUT, "package_exists=true\npublished=true\n");
+              console.log(`${PACKAGE_NAME}@${VERSION} is already published from this commit (${GITHUB_SHA}); npm publish will be skipped for retry.`);
+            } else {
+              const gitHead = typeof published.gitHead === "string" ? published.gitHead : "missing";
+              throw new Error(`${PACKAGE_NAME}@${VERSION} is published from gitHead ${gitHead}, not ${GITHUB_SHA}. Refusing to tag or create a GitHub Release for a foreign publish. Increment the package version instead.`);
+            }
+          }
+          NODE
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+
+      - name: Verify package contents
+        run: npm pack --dry-run
+
+      # A temporary NPM_TOKEN may create the package once. Existing packages
+      # must use OIDC, so a forgotten bootstrap secret fails closed.
+      - name: Publish package to npm
+        if: steps.npm.outputs.published != 'true'
+        env:
+          PACKAGE_EXISTS: ${{ steps.npm.outputs.package_exists }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN != '' && secrets.NPM_TOKEN || '' }}
+        run: |
+          if [[ -n "${NODE_AUTH_TOKEN}" && "${PACKAGE_EXISTS}" == "true" ]]; then
+            echo "::error::NPM_TOKEN is bootstrap-only. Remove it and use the configured trusted publisher."
+            exit 1
+          elif [[ -n "${NODE_AUTH_TOKEN}" ]]; then
+            echo "Publishing the first package version with temporary NPM_TOKEN bootstrap. Revoke it after this run."
+          elif [[ "${PACKAGE_EXISTS}" != "true" ]]; then
+            echo "::error::The package does not exist. Configure the temporary NPM_TOKEN bootstrap described in RELEASING.md."
+            exit 1
+          else
+            echo "Publishing with OIDC trusted publishing (no NPM_TOKEN)."
+            unset NODE_AUTH_TOKEN
+          fi
+          npm publish --access public --provenance
+
+      - name: Create and push tag
+        shell: bash
+        env:
+          TAG: ${{ needs.detect.outputs.tag }}
+        run: |
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            tagged_sha="$(git rev-list -n 1 "$TAG")"
+            if [[ "$tagged_sha" != "$GITHUB_SHA" ]]; then
+              echo "$TAG already points to $tagged_sha instead of $GITHUB_SHA."
+              exit 1
+            fi
+            echo "$TAG already exists on this commit."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
+
+      - name: Create GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.detect.outputs.tag }}
+          PACKAGE_NAME: ${{ needs.detect.outputs.name }}
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "GitHub release $TAG already exists."
+          else
+            gh release create "$TAG" \
+              --verify-tag \
+              --title "$TAG" \
+              --generate-notes \
+              --notes "Published package: [${PACKAGE_NAME}@${VERSION}](https://www.npmjs.com/package/${PACKAGE_NAME}/v/${VERSION})"
+          fi
+
+      - name: Release summary
+        env:
+          TAG: ${{ needs.detect.outputs.tag }}
+          PACKAGE_NAME: ${{ needs.detect.outputs.name }}
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          echo "Released [$TAG](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}) and [${PACKAGE_NAME}@${VERSION}](https://www.npmjs.com/package/${PACKAGE_NAME}/v/${VERSION})." >> "$GITHUB_STEP_SUMMARY"

@@ -31,6 +31,21 @@ interface ResponsePlan {
 
 export const TEST_MODEL = "pi-integration/test";
 
+export interface ProviderRequest {
+	model?: string;
+	status: number;
+}
+
+const providerRequests: ProviderRequest[] = [];
+
+export function getProviderRequests(): readonly ProviderRequest[] {
+	return providerRequests;
+}
+
+export function resetProviderRequests(): void {
+	providerRequests.length = 0;
+}
+
 async function readJson(request: IncomingMessage): Promise<ChatRequest> {
 	const chunks: Buffer[] = [];
 	for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -357,12 +372,15 @@ const server = createServer(async (request, response) => {
 	try {
 		const chatRequest = await readJson(request);
 		if (chatRequest.model === "fallback-primary" || chatRequest.model === "fallback-fail") {
+			providerRequests.push({ model: chatRequest.model, status: 503 });
 			response.writeHead(503, { "content-type": "application/json" });
 			response.end(JSON.stringify({ error: { message: "deterministic fallback provider failure" } }));
 			return;
 		}
+		providerRequests.push({ model: chatRequest.model, status: 200 });
 		writeResponse(response, chatRequest, await planResponse(chatRequest));
 	} catch (error) {
+		providerRequests.push({ status: 500 });
 		response.writeHead(500, { "content-type": "application/json" });
 		response.end(
 			JSON.stringify({

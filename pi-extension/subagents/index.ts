@@ -39,6 +39,7 @@ import {
 	readPaneAsync,
 	inspectPane,
 	getPaneProcessInfo,
+	waitForShellReady,
 	waitForPaneAbsence,
 	waitForProcessesExit,
 } from "./terminal.ts";
@@ -801,19 +802,6 @@ function formatElapsed(seconds: number): string {
 	const m = Math.floor(seconds / 60);
 	const s = seconds % 60;
 	return `${m}m ${s}s`;
-}
-
-/**
- * Wait long enough for a freshly created pane to finish shell startup.
- *
- * Some environments do extra shell-init work before the prompt is ready
- * (for example direnv/devenv), so the delay is configurable for users who hit
- * dropped commands. Keep the historical default at 500ms.
- */
-function getShellReadyDelayMs(): number {
-	const raw = process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS?.trim();
-	const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
-	return Number.isFinite(parsed) && parsed >= 0 ? parsed : 500;
 }
 
 function muxUnavailableResult() {
@@ -1984,7 +1972,6 @@ function buildWorkflowChildCommand(params: {
 
 export const __test__ = {
 	borderLine,
-	getShellReadyDelayMs,
 	renderSubagentWidgetLines,
 	loadAgentDefaults,
 	discoverAgentDefinitions,
@@ -2218,13 +2205,8 @@ async function launchSubagent(
 		});
 	}
 
-	// Use pre-created surface (parallel mode) or create a new one.
-	// For new surfaces, pause briefly so the shell is ready before sending the command.
-	if (!options?.surface) {
-		await new Promise<void>((resolve) =>
-			setTimeout(resolve, getShellReadyDelayMs()),
-		);
-	}
+	// `pane run` is safe only after the shell owns the foreground process group.
+	await waitForShellReady(surface);
 
 	const launchBehavior = resolveLaunchBehavior(params, agentDefs);
 
@@ -3009,9 +2991,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			mkdirSync(dirname(sessionFile), { recursive: true });
 			surface = createSubagentPane(`${candidate.runId}: ${roleName}`);
 			owner.children.set(id, { controller: childController, surface });
-			await new Promise<void>((done) =>
-				setTimeout(done, getShellReadyDelayMs()),
-			);
+			await waitForShellReady(surface, { signal: childController.signal });
 			if (childController.signal.aborted)
 				return workflowFailure("cancelled", "Workflow cancelled.");
 			const command = buildWorkflowChildCommand({
@@ -4182,9 +4162,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				const entryCountBefore = getNewEntries(params.sessionPath, 0).length;
 
 				const surface = createSubagentPane(name);
-				await new Promise<void>((resolve) =>
-					setTimeout(resolve, getShellReadyDelayMs()),
-				);
+				await waitForShellReady(surface);
 
 				// Build pi resume command
 				const parts = ["pi", "--session", shellQuote(params.sessionPath)];
@@ -4418,9 +4396,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
 				sessionFile = createBtwSessionSnapshot(parentSessionFile, leafId);
 				surface = createSubagentPane("BTW");
-				await new Promise<void>((resolve) =>
-					setTimeout(resolve, getShellReadyDelayMs()),
-				);
+				await waitForShellReady(surface);
 
 				const artifactDir = getArtifactDir(
 					ctx.sessionManager.getSessionDir(),

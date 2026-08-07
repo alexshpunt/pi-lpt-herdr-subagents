@@ -129,6 +129,10 @@ function getHerdrParentPaneId(): string {
   return paneId;
 }
 
+function buildCurrentPaneArgs(): string[] {
+	return ["pane", "current", "--current"];
+}
+
 function getHerdrCurrentPaneInfo(): {
   pane_id: string;
   tab_id: string;
@@ -141,7 +145,7 @@ function getHerdrCurrentPaneInfo(): {
   // Fall back to `herdr pane current` if any identity env var is missing —
   // older herdr versions may not set all three.
   if (!paneId || !tabId || !workspaceId) {
-    const output = herdrExec(["pane", "current"]);
+    const output = herdrExec(buildCurrentPaneArgs());
     const parsed = parseHerdrJson(output);
 		const pane = (parsed as { result?: { pane?: unknown } } | null)?.result
 			?.pane as
@@ -449,6 +453,46 @@ export function getHerdrPaneProcessInfo(surface: string): HerdrPaneProcessInfo {
 	);
 }
 
+async function getHerdrPaneProcessInfoAsync(
+	surface: string,
+): Promise<HerdrPaneProcessInfo> {
+	return parsePaneProcessInfo(
+		await herdrExecAsync(["pane", "process-info", "--pane", surface]),
+		surface,
+	);
+}
+
+function isHerdrShellReady(info: HerdrPaneProcessInfo): boolean {
+	return (
+		info.shellPid != null &&
+		info.foregroundProcessGroupId === info.shellPid
+	);
+}
+
+export async function waitForHerdrShellReady(
+	surface: string,
+	options: { timeoutMs?: number; intervalMs?: number; signal?: AbortSignal } = {},
+): Promise<void> {
+	const timeoutMs = options.timeoutMs ?? 10_000;
+	const intervalMs = options.intervalMs ?? 50;
+	const deadline = Date.now() + timeoutMs;
+	let lastError = "no interactive shell foreground process";
+
+	while (Date.now() <= deadline) {
+		if (options.signal?.aborted) throw new Error("Shell readiness wait cancelled.");
+		try {
+			if (isHerdrShellReady(await getHerdrPaneProcessInfoAsync(surface))) return;
+		} catch (error) {
+			lastError = error instanceof Error ? error.message : String(error);
+		}
+		if (Date.now() >= deadline) break;
+		await new Promise((resolve) => setTimeout(resolve, intervalMs));
+	}
+	throw new Error(
+		`Timed out waiting for interactive shell in Herdr pane ${surface}: ${lastError}`,
+	);
+}
+
 export function isProcessAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
@@ -529,6 +573,7 @@ export function renameHerdrWorkspace(title: string): void {
 }
 
 export const __herdrTest__ = {
+  buildCurrentPaneArgs,
   buildTabCreateArgs,
   buildWorktreeCreateArgs,
   parseHerdrJson,
@@ -538,4 +583,5 @@ export const __herdrTest__ = {
   parsePaneGetOutput,
   parsePaneGetError,
 	parsePaneProcessInfo,
+	isHerdrShellReady,
 };

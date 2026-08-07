@@ -7,6 +7,7 @@ import {
   createHerdrSurfaceSplit,
   createHerdrWorktree,
 	getHerdrPaneProcessInfo,
+	waitForHerdrShellReady,
   isHerdrAvailable,
 	isProcessAlive,
   readHerdrScreen,
@@ -150,6 +151,14 @@ export type { HerdrPaneProcessInfo };
 export function getPaneProcessInfo(paneId: PaneId): HerdrPaneProcessInfo {
 	assertTerminalAvailable();
 	return getHerdrPaneProcessInfo(paneId);
+}
+
+export async function waitForShellReady(
+	paneId: PaneId,
+	options?: { timeoutMs?: number; intervalMs?: number; signal?: AbortSignal },
+): Promise<void> {
+	assertTerminalAvailable();
+	return waitForHerdrShellReady(paneId, options);
 }
 
 export async function waitForPaneAbsence(

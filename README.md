@@ -78,12 +78,6 @@ pi
 
 herdr is the only supported terminal environment. The extension requires `HERDR_ENV=1` and the `herdr` CLI to be available.
 
-If your shell startup is slow and subagent commands sometimes get dropped before the prompt is ready, set `PI_SUBAGENT_SHELL_READY_DELAY_MS` to a higher value (defaults to `500`):
-
-```bash
-export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500
-```
-
 ### Troubleshooting completion delivery
 
 If a child finishes but the parent returns an empty or unrelated response, first verify that the result reached the parent session:
@@ -429,7 +423,7 @@ herdr_workflow({ action: "cancel", runId: "run-1" });
 
 - Cancel claims a process-global terminal gate. Completion, failure, interruption, and cancellation cannot each produce a terminal outcome.
 - Queued `agent()` calls resolve as cancelled; no later reviewer or synthesizer starts.
-- Active panes are queried through Herdr process-info before close so foreground process identities can be waited on.
+- New panes are queried through Herdr process-info until their interactive shell is ready before launch. Active panes are queried again before close so foreground process identities can be waited on.
 - After synchronous pane close, cancel waits for pane absence and captured process exit before disposing the reader checkout.
 - If process identity cannot be captured for an active pane, the pane remains present after close, or any captured process still lives after the bounded wait, the checkout is retained and the run ends `failed` with `cancel_termination_failed`. Successful cancellation is not reported in that case.
 - A successful cancel writes one `cancelled` terminal journal event and one result-free delivery. Repeated cancel is idempotent and returns the authoritative terminal outcome (including a prior fail-closed result).

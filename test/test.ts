@@ -4296,37 +4296,6 @@ describe("subagent status renderer", () => {
 	});
 });
 
-describe("subagent startup delay", () => {
-	it("defaults to 500ms when no env var is set", () => {
-		const testApi = (subagentsModule as any).__test__;
-		assert.ok(testApi, "expected subagents test helpers to be exported");
-		assert.equal(typeof testApi.getShellReadyDelayMs, "function");
-
-		const original = process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS;
-		delete process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS;
-		try {
-			assert.equal(testApi.getShellReadyDelayMs(), 500);
-		} finally {
-			if (original == null) delete process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS;
-			else process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS = original;
-		}
-	});
-
-	it("uses PI_SUBAGENT_SHELL_READY_DELAY_MS when it is set", () => {
-		const testApi = (subagentsModule as any).__test__;
-		assert.ok(testApi, "expected subagents test helpers to be exported");
-		assert.equal(typeof testApi.getShellReadyDelayMs, "function");
-
-		const original = process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS;
-		process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS = "2500";
-		try {
-			assert.equal(testApi.getShellReadyDelayMs(), 2500);
-		} finally {
-			if (original == null) delete process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS;
-			else process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS = original;
-		}
-	});
-});
 describe("subagents widget rendering", () => {
 	it("projects Claude agents as running and counts them as active", () => {
 		const testApi = (subagentsModule as any).__test__;
@@ -4651,6 +4620,14 @@ describe("herdr.ts", () => {
 	});
 
 	describe("herdr command construction", () => {
+		it("uses caller context when discovering the current pane", () => {
+			assert.deepEqual(__herdrTest__.buildCurrentPaneArgs(), [
+				"pane",
+				"current",
+				"--current",
+			]);
+		});
+
 		it("targets the current workspace when creating a subagent tab", () => {
 			assert.deepEqual(
 				__herdrTest__.buildTabCreateArgs("reviewer", "/repo", "workspace-2"),
@@ -4825,6 +4802,27 @@ describe("herdr.ts", () => {
 				agent: "pi",
 				agentStatus: "unknown",
 			});
+		});
+
+		it("recognizes an interactive shell as ready", () => {
+			assert.equal(
+				__herdrTest__.isHerdrShellReady({
+					paneId: "w1:p9",
+					shellPid: 100,
+					foregroundProcessGroupId: 100,
+					pids: [100],
+				}),
+				true,
+			);
+			assert.equal(
+				__herdrTest__.isHerdrShellReady({
+					paneId: "w1:p9",
+					shellPid: 100,
+					foregroundProcessGroupId: 200,
+					pids: [100, 200],
+				}),
+				false,
+			);
 		});
 
 		it("parses pane process-info identities", () => {

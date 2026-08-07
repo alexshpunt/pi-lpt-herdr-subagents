@@ -252,10 +252,14 @@ for (const backend of backends) {
         "agent_started",
         "agent_started",
         "agent_started",
+        "agent_completed",
         "agent_result",
+        "agent_completed",
         "agent_result",
+        "agent_completed",
         "agent_result",
         "agent_started",
+        "agent_completed",
         "agent_result",
         "reader_checkout_disposed",
         "completed",
@@ -271,7 +275,7 @@ for (const backend of backends) {
 					["architecture", "standards", "skeptic", "synthesizer"],
 				);
 				assert.equal(
-					events.findIndex((event) => event.type === "agent_result"),
+					events.findIndex((event) => event.type === "agent_completed"),
 					6,
 					"all reviewers start before one completes",
 				);
@@ -304,6 +308,38 @@ for (const backend of backends) {
 				cleanupTestEnv(env);
 			}
     });
+
+		it("reports an empty successful child completion as missing review evidence", async () => {
+			const env = createTestEnv(backend);
+			try {
+				const id = uniqueId();
+				const runId = `workflow-empty-${id}`;
+				const root = realpathSync(env.dir);
+				const baseSha = initFixture(root, ["architecture", "standards", "skeptic", "synthesizer"]);
+				const workflowPath = writeWorkflow(root, runId, baseSha, "EMPTY_COMPLETION");
+				const approval = `APPROVE ${createHash("sha256").update(readFileSync(workflowPath)).digest("hex").slice(0, 8)}`;
+				const journal = join(root, ".pi", "plans", runId, "run.jsonl");
+				const surface = createTrackedSurface(env, `workflow-empty-${id}`);
+				await waitForPaneReady(surface);
+				startPi(surface, root, [
+					"Call herdr_workflow exactly once to prepare this workflow:", workflowPath,
+					"Do not start it until the user sends its exact approval.",
+					"After the user sends that approval, call herdr_workflow start with this run ID:", runId,
+					"Then wait for the final workflow result.",
+				].join("\n"), { model: TEST_MODEL });
+				await waitForScreen(surface, /Prepared workflow/, PI_TIMEOUT);
+				runInPane(surface, approval);
+				const events = (await waitForFile(journal, PI_TIMEOUT, /"type":"delivery"/))
+					.trim().split("\n").map((line) => JSON.parse(line));
+				const results = events.filter((event) => event.type === "agent_result").map((event) => event.result);
+				assert.equal(results.every((result) => result.ok === false && result.code === "empty_completion"), true);
+				const completions = events.filter((event) => event.type === "agent_completed");
+				assert.equal(completions.length, 4);
+				assert.equal(completions.every((event) => event.exitCode === 0 && event.sessionExists && event.finalAssistantContentLength === 0 && event.finalAssistantStopReason === "stop"), true);
+			} finally {
+				cleanupTestEnv(env);
+			}
+		});
 
 		it("keeps ownership and delivers once across reload during review and synthesis", async () => {
 			const env = createTestEnv(backend);

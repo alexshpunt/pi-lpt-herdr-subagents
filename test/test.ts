@@ -34,6 +34,7 @@ import {
 	getLeafId,
 	getNewEntries,
 	findLastAssistantMessage,
+	inspectFinalAssistantMessage,
 	findObservedSessionRuntime,
 	appendBranchSummary,
 	copySessionFile,
@@ -386,7 +387,7 @@ describe("session.ts", () => {
 			assert.equal(findLastAssistantMessage([]), null);
 		});
 
-		it("skips empty assistant messages and returns real content above", () => {
+		it("reports an empty final completion instead of reusing an earlier assistant message", () => {
 			const realMsg = {
 				type: "message",
 				message: {
@@ -399,10 +400,16 @@ describe("session.ts", () => {
 				message: {
 					role: "assistant",
 					content: [],
+					stopReason: "stop",
 				},
 			};
 			const entries = [realMsg, emptyMsg] as any[];
 			assert.equal(findLastAssistantMessage(entries), "Real summary content.");
+			assert.deepEqual(inspectFinalAssistantMessage(entries), {
+				text: null,
+				contentLength: 0,
+				stopReason: "stop",
+			});
 		});
 
 		it("surfaces errorMessage when last assistant ended with stopReason=error and no text", () => {

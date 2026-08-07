@@ -25,6 +25,7 @@ interface ToolCall {
 
 interface ResponsePlan {
 	text?: string;
+	emptyCompletion?: boolean;
 	toolCalls?: ToolCall[];
 }
 
@@ -280,7 +281,10 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 			return { toolCalls: [{ name: "bash", arguments: { command } }] };
 	}
 
-	return { text: markerText(source) ?? "completed" };
+	const marker = markerText(source);
+	return marker === "EMPTY_COMPLETION"
+		? { emptyCompletion: true }
+		: { text: marker ?? "completed" };
 }
 
 function writeEvent(
@@ -334,7 +338,9 @@ function writeResponse(
 		writeEvent(
 			response,
 			request,
-			{ role: "assistant", content: plan.text ?? "completed" },
+			plan.emptyCompletion
+				? { role: "assistant" }
+				: { role: "assistant", content: plan.text ?? "completed" },
 			null,
 		);
 		writeEvent(response, request, {}, "stop");

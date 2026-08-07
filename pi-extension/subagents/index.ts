@@ -85,6 +85,7 @@ import {
 
 import {
 	findLastAssistantMessage,
+	inspectFinalAssistantMessage,
 	findObservedSessionRuntime,
 	getNewEntries,
 	seedSubagentSessionFile,
@@ -3033,18 +3034,43 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			if (childController.signal.aborted || watched.error === "cancelled") {
 				return workflowFailure("cancelled", "Workflow cancelled.");
 			}
-			const childEntries = existsSync(sessionFile)
+			const sessionExists = existsSync(sessionFile);
+			const childEntries = sessionExists
 				? getNewEntries(sessionFile, 0)
 				: [];
-			const summary = findLastAssistantMessage(childEntries);
-			if (watched.exitCode !== 0 || watched.errorMessage || !summary) {
+			const finalAssistant = inspectFinalAssistantMessage(childEntries);
+			journal.append("agent_completed", {
+				id,
+				role: roleName,
+				sessionFile,
+				sessionExists,
+				exitCode: watched.exitCode,
+				...(watched.errorMessage
+					? { errorMessage: watched.errorMessage }
+					: {}),
+				finalAssistantContentLength: finalAssistant.contentLength,
+				...(finalAssistant.stopReason
+					? { finalAssistantStopReason: finalAssistant.stopReason }
+					: {}),
+			});
+			if (watched.exitCode !== 0 || watched.errorMessage) {
 				return workflowFailure(
 					"child_error",
 					watched.errorMessage ??
-						summary ??
 						`Workflow child exited with code ${watched.exitCode}`,
 				);
 			}
+			if (!finalAssistant.text) {
+				return workflowFailure(
+					"empty_completion",
+					`Workflow child completed without assistant text${
+						finalAssistant.stopReason
+							? ` (stopReason: ${finalAssistant.stopReason})`
+							: ""
+					}.`,
+				);
+			}
+			const summary = finalAssistant.text;
 			const observed = findObservedSessionRuntime(childEntries);
 			const observedModel =
 				observed.provider && observed.modelId

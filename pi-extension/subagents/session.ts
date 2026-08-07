@@ -136,6 +136,39 @@ export function findObservedSessionRuntime(entries: SessionEntry[]): ObservedSes
   return observed;
 }
 
+export interface FinalAssistantMessage {
+  text: string | null;
+  contentLength: number;
+  stopReason?: string;
+}
+
+/** Inspect only the final assistant message for workflow completion evidence. */
+export function inspectFinalAssistantMessage(
+  entries: SessionEntry[],
+): FinalAssistantMessage {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.type !== "message") continue;
+    const msg = entry as MessageEntry;
+    if (msg.message.role !== "assistant") continue;
+
+    const texts = msg.message.content
+      .filter(
+        (block) =>
+          block.type === "text" && typeof block.text === "string",
+      )
+      .map((block) => block.text as string);
+    const text = texts.join("\n");
+    const stopReason = (msg.message as { stopReason?: unknown }).stopReason;
+    return {
+      text: text.trim() ? text : null,
+      contentLength: text.length,
+      ...(typeof stopReason === "string" ? { stopReason } : {}),
+    };
+  }
+  return { text: null, contentLength: 0 };
+}
+
 export function findLastAssistantMessage(entries: SessionEntry[]): string | null {
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];

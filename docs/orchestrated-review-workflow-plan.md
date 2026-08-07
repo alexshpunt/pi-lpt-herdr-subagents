@@ -317,12 +317,17 @@ The full bounded `RunEnvelope` exists exactly once, inside the single terminal e
 ```text
 approved
 started
+reader_checkout_ready | reader_checkout_retained | reader_checkout_disposed
 agent_started
+agent_completed
 agent_result
+pane_close_failed
 workflow_log
 completed | failed | cancelled | interrupted
 delivery
 ```
+
+`agent_completed` records the observed child exit, session availability, final assistant-text length, and (when present) final stop reason before the corresponding `agent_result` records the workflow-facing success or failure envelope.
 
 `delivery` follows the terminal event and contains only its terminal-event ID/state, target parent session, attempt time, and `sent | failed` delivery status. It never duplicates the task result. Evidence readers obtain the result from the referenced terminal event. Do not add mutable snapshots, locks, leases, backups, call caching, or replay.
 

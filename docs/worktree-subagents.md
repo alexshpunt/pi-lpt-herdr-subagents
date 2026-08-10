@@ -121,7 +121,27 @@ The parent receives the normal child summary plus:
 
 `clean` means there are no staged, unstaged, or untracked files. It does **not** mean the branch has no commits or diff relative to its base.
 
-If Git inspection fails, SHA/count/state/file fields are reported as unknown rather than guessed, and the warning is included in the handoff. Inspect the retained workspace directly before integrating or deleting it.
+If Git inspection fails, SHA/count/state/file fields are reported as unknown rather than guessed, and the warning is included in the handoff. Inspect the retained workspace directly before integrating or deleting it. Every retained handoff also includes the exact `herdr worktree remove --workspace <workspace-id>` command, but run it only after useful state is preserved.
+
+## Parallel pull-request review without new worktrees
+
+For parallel read-only review, prepare one stable existing checkout of the pull request or retained worker result. Do not create one managed worktree per reviewer.
+
+1. The parent records the exact base and head SHAs and makes sure no writer changes the checkout while review runs.
+2. Start each read-only child in an ordinary pane with `cwd` set to that checkout. Omit `worktree`.
+3. Give every reviewer the same exact base and head SHAs. Require it to report `git rev-parse HEAD` before its review result.
+4. Before the parent reports or publishes the review, recheck the checkout SHA. If it changed, treat the prior reviews as stale and review the new commit again.
+
+```typescript
+subagent({
+  name: "PR reviewer",
+  agent: "reviewer",
+  cwd: "/path/to/pr-checkout",
+  task: "Review base <base-sha> through head <head-sha>. First report git rev-parse HEAD. Do not modify files.",
+});
+```
+
+A retained worker worktree can be this checkout. The parent owns any final report, PR action, integration, and cleanup.
 
 ## Review and integration
 

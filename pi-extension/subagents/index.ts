@@ -791,7 +791,7 @@ function resolveEffectiveInteractive(
 function loadAgentDefaults(
 	agentName: string,
 	pi?: Pick<ExtensionAPI, "events">,
-): AgentDefaults | null {
+): ListedAgentDefinition | null {
 	return (
 		discoverAgentCatalog(pi).agents.find((agent) => agent.name === agentName) ??
 		null
@@ -954,6 +954,32 @@ function shouldRetainSubagentSurface(
 	running: Pick<RunningSubagent, "worktree"> | { worktree?: unknown },
 ): boolean {
 	return !!running.worktree;
+}
+
+const BUNDLED_WORKTREE_WARNINGS: Readonly<Record<string, string>> = {
+	scout:
+		"The bundled scout role is read-only and normally does not need a new worktree. " +
+		"Use an ordinary pane instead; to inspect an existing worker result, start it in the retained worktree path. " +
+		"Herdr worktree workspaces persist until explicitly removed.",
+	reviewer:
+		"The bundled reviewer role is read-only and normally does not need a new worktree. " +
+		"Use an ordinary pane instead; to review an existing worker result, start it in the retained worktree path. " +
+		"Herdr worktree workspaces persist until explicitly removed.",
+	"adversarial-reviewer":
+		"The bundled adversarial-reviewer coordinates read-only reviewers and writes review artifacts. " +
+		"It normally uses an ordinary pane, not a new worktree. " +
+		"Herdr worktree workspaces persist until explicitly removed.",
+};
+
+function resolveWorktreeLaunchWarning(
+	params: Pick<Static<typeof SubagentParams>, "agent" | "worktree">,
+	pi?: Pick<ExtensionAPI, "events">,
+): string | undefined {
+	if (!params.worktree || !params.agent) return undefined;
+	const warning = BUNDLED_WORKTREE_WARNINGS[params.agent];
+	return warning && loadAgentDefaults(params.agent, pi)?.source === "package"
+		? warning
+		: undefined;
 }
 
 function runSubagentScript(
@@ -1126,6 +1152,10 @@ function formatWorktreeHandoff(worktree: WorktreeHandoff): string {
 		lines.push(`Untracked: ${worktree.untrackedFiles.join(", ")}`);
 	if (worktree.gitError)
 		lines.push(`Git inspection warning: ${worktree.gitError}`);
+	lines.push(
+		"After review and preservation, remove the workspace with:",
+		`  herdr worktree remove --workspace ${worktree.workspaceId}`,
+	);
 	return lines.join("\n");
 }
 
@@ -1994,6 +2024,7 @@ export const __test__ = {
 	sendSubagentResult,
 	resolveResumeLaunchBehavior,
 	shouldRetainSubagentSurface,
+	resolveWorktreeLaunchWarning,
 	captureWorktreeHandoff,
 	runSubagentScript,
 	writeWorktreeManifest,
@@ -3743,6 +3774,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					ctx,
 					parentThinking,
 				);
+				const worktreeLaunchWarning = resolveWorktreeLaunchWarning(
+					params,
+					runtime.pi,
+				);
 				const { running, index: initialPlanIndex } = await launchSubagentWithFallbacks(
 					params,
 					ctx,
@@ -3870,6 +3905,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 								(running.worktree
 									? ` in worktree ${running.worktree.path} on branch ${running.worktree.branch}. `
 									: ". ") +
+								(worktreeLaunchWarning
+									? `Warning: ${worktreeLaunchWarning} `
+									: "") +
 								`Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. ` +
 								`The results will be delivered to you automatically as a steer message when the sub-agent finishes. ` +
 								`Until then, move on to other work or tell the user you're waiting.`,
@@ -3886,6 +3924,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 						thinking: running.runtimePlan?.thinking,
 						runtimePlan: running.runtimePlan,
 						...(running.worktree ? { worktree: running.worktree } : {}),
+						...(worktreeLaunchWarning
+							? { warning: worktreeLaunchWarning }
+							: {}),
 						status: "started",
 					},
 				};

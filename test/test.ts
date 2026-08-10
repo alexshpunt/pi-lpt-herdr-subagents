@@ -3158,6 +3158,40 @@ describe("tool registration", () => {
 		assert.match(subagentTool.description, /retain.*parent review/i);
 	});
 
+	it("warns when an effective bundled role normally uses an ordinary pane", async () => {
+		const testApi = (subagentsModule as any).__test__;
+		const worktree = { branch: "review/unneeded-worktree" };
+
+		await withIsolatedAgentEnv(async ({ projectAgentsDir }) => {
+			for (const [agent, expected] of [
+				["scout", /bundled scout role is read-only/i],
+				["reviewer", /bundled reviewer role is read-only/i],
+				[
+					"adversarial-reviewer",
+					/bundled adversarial-reviewer coordinates read-only reviewers/i,
+				],
+			] as const) {
+				assert.match(
+					testApi.resolveWorktreeLaunchWarning({ agent, worktree }) ?? "",
+					expected,
+				);
+			}
+
+			writeAgentFile(
+				projectAgentsDir,
+				"reviewer",
+				"description: Project-specific reviewer\ntools: read, bash",
+			);
+			assert.equal(
+				testApi.resolveWorktreeLaunchWarning({
+					agent: "reviewer",
+					worktree,
+				}),
+				undefined,
+			);
+		});
+	});
+
 	it("renders partial subagent tool-call args without throwing", () => {
 		const { api, registeredTools } = createMockExtensionApi();
 		(subagentsModule as any).default(api);
@@ -3866,6 +3900,14 @@ describe("subagent interruption", () => {
 		assert.match(presentation, /State: dirty · 2 commits ahead/);
 		assert.match(presentation, /Changed: src\/auth\.ts, test\/auth\.test\.ts/);
 		assert.match(presentation, /Untracked: notes\.txt/);
+		assert.match(
+			presentation,
+			/After review and preservation, remove the workspace with:/,
+		);
+		assert.match(
+			presentation,
+			/herdr worktree remove --workspace w9/,
+		);
 		assert.equal(testApi.shouldRetainSubagentSurface({ worktree }), true);
 		assert.equal(testApi.shouldRetainSubagentSurface({}), false);
 	});

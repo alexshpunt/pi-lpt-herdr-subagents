@@ -1,11 +1,11 @@
 # ADR-0002: Adopt the agent, workflow, skill, and runtime taxonomy
 
-- **Status:** Accepted
+- **Status:** Accepted in part; external CLI provisions superseded
 - **Date:** 2026-08-02
 - **Decision owners:** `acrnm`
 - **Scope:** `giuseppecrj/pi-herdr-agents`
 - **Historical tracking:** legacy issues #4 and #5 (not carried into the clean repository)
-- **Superseded in part by:** ADR-0008 removes the external CLI runtime adapter; implementation is pending
+- **Superseded in part by:** ADR-0008 removes the external CLI runtime adapter
 
 ## Decision
 
@@ -23,10 +23,8 @@ Use these terms consistently:
 - **Skill** — A Pi-native instruction set that teaches the current agent a
   reusable procedure. It may invoke workflows or roles. Owned by Pi or the
   skill author and user-facing.
-- **Runtime** — How a role executes: Pi or an external CLI, plus model and
-  thinking selection. Owned by invocation/configuration and not user-facing.
-- **Adapter** — A local or optional runtime-specific role for direct invocation.
-  Owned by the caller or local configuration and not user-facing.
+- **Runtime** — The authenticated Pi provider/model and thinking selection for
+  one invocation. Owned by invocation/configuration and not user-facing.
 
 An agent role is **not** a workflow merely because it can spawn other agents.
 A coordinator role is allowed when it owns an interactive or multi-stage child
@@ -40,8 +38,8 @@ surface:
 - Agent definitions are discovered from package, global, and project folders,
   with project definitions overriding global and bundled definitions.
 - The bundled list includes reusable roles (`scout`, `worker`, `reviewer`) and
-  a multi-stage orchestration (`adversarial-reviewer`). Runtime-specific
-  implementations are local optional adapters, not bundled definitions.
+  a multi-stage orchestration (`adversarial-reviewer`). Every definition runs
+  through Pi.
 - The extension can request Pi skills, select model defaults, and start
   sessions, but it has no first-class workflow definition or agent-definition
   schema validation.
@@ -131,42 +129,34 @@ the package's `/plan` workflow, not as a second kind of subagent definition.
 
 ### 4. Runtimes are selected by policy, not role identity
 
-A role describes the work; a runtime describes how one invocation performs it.
-For Pi-backed agents, the current model-resolution chain is the correct
-foundation: explicit invocation choice, agent default, per-agent configuration,
-global configuration, then the parent model. A local Claude CLI adapter instead
-uses `cli` and `cli-model`; do not set a Pi `model` on an adapter expecting it
-to select the CLI model.
+A role describes the work; a runtime describes which authenticated Pi
+provider/model and thinking level one invocation uses. The model-resolution
+chain is explicit invocation choice, agent default, per-agent configuration,
+global configuration, then the parent model.
 
 Apply these rules:
 
 1. Prefer per-invocation `model` and `thinking` for a workflow's deliberate
    diversity or cost/quality policy.
 2. Use ignored local `config.json` for a person's durable role preferences.
-3. Leave bundled Pi-role `model` unset unless a particular model is a functional
+3. Leave bundled role `model` unset unless a particular model is a functional
    prerequisite.
-4. Treat `cli` and `cli-model` as a runtime adapter concern, not a review or
-   planning policy.
-5. State runtime prerequisites before launch and fail closed when a required
-   runtime is unavailable.
+4. State runtime prerequisites before launch and fail closed when a required
+   Pi runtime is unavailable.
+5. Reject legacy role definitions that contain `cli` before Herdr resource
+   creation; do not reinterpret them as Pi roles.
 
 This preserves the useful multi-model review behavior without baking a
 particular vendor choice into the generic `reviewer` role. Adversarial review
 selects three distinct exact authenticated Pi model IDs at runtime, preferring
 provider diversity, and launches generic `reviewer` children.
 
-### 5. Local adapters are hidden from task discovery
+### 5. Subagent execution is Pi-only
 
-An adapter exists to satisfy a workflow's runtime contract, not to ask a user
-what they want to do. It is a local or optional definition, must use
-`disable-model-invocation: true`, and should have a name that makes its internal
-nature clear. Hidden adapters remain explicitly invokable by exact name.
-
-The package preserves its existing external CLI launch path for local adapters;
-it does not bundle vendor-specific adapters, provide an adapter registry, or add
-Cursor/OpenCode support. Move callers that invoke `claude-reviewer` by exact
-name to `$PI_CODING_AGENT_DIR/agents/claude-reviewer.md` or
-`.pi/agents/claude-reviewer.md` with the same hidden frontmatter.
+Every visible or hidden role executes through Pi. Claude models remain available
+through normal Pi provider/model routing. A legacy role that contains `cli`
+receives a migration diagnostic and cannot create a Herdr pane or worktree.
+There is no runtime adapter registry or compatibility path.
 
 ### 6. Agent frontmatter is a constrained contract
 
@@ -183,10 +173,9 @@ validation that does not exist yet.
 For a future validation pass, require at least `name` and `description`, reject
 unknown package-owned fields, validate tool/skill list syntax, and report the
 source path in errors. The authoring template must cover the complete existing
-README frontmatter reference (`tools`, `deny-tools`, `thinking`, `system-prompt`,
-`spawning`, `auto-exit`, `interactive`, `session-mode`, `cwd`, `cli`,
-`cli-model`, and `disable-model-invocation`) rather than introduce a partial
-second schema. Keep extension fields separate from arbitrary prompt metadata so
+README frontmatter reference (`tools`, `deny-tools`, `thinking`, `system-prompt`, `spawning`, `auto-exit`,
+`interactive`, `session-mode`, `cwd`, and `disable-model-invocation`) rather
+than introduce a partial second schema. Keep extension fields separate from arbitrary prompt metadata so
 project authors can still add their own namespaced fields.
 
 ## Current mapping
@@ -200,8 +189,8 @@ project authors can still add their own namespaced fields.
   engineering responsibility remains intentional.
 - `visual-tester` — Leaf agent role with skill prerequisite. Keep its
   `chrome-cdp` dependency declared through canonical `skills` metadata.
-- `claude-reviewer` — No longer bundled. Callers that need this exact local
-  Claude CLI adapter must provide it in a global or project agent directory.
+- `claude-reviewer` — Removed. Use the generic `reviewer` role with an
+  authenticated Claude model through Pi provider/model routing.
 - `adversarial-reviewer` — Workflow implementation pending a workflow surface.
   It selects three distinct exact authenticated Pi model IDs at runtime,
   preferring provider diversity, and launches generic `reviewer` children. Do
@@ -229,8 +218,8 @@ not a general workflow registry.
    policy in one place. Adversarial review selects three distinct exact
    authenticated Pi model IDs at runtime, prefers provider diversity, and uses
    generic `reviewer` children.
-5. Remove bundled `claude-reviewer`; exact-name callers supply the hidden local
-   adapter from their global or project agent directory.
+5. Remove bundled `claude-reviewer`; callers use the generic `reviewer` role
+   with Pi provider/model routing.
 
 ### Phase 2 — improve discovery without a new framework
 
@@ -252,7 +241,7 @@ language before that repeated need exists.
 
 - A user can distinguish a workflow from a directly runnable role before
   launching either.
-- `subagents_list` does not advertise internal runtime adapters as peer tasks.
+- Legacy external CLI roles fail with a migration diagnostic before launch.
 - A role author can create and smoke-test a valid definition from one documented
   template; schema-level frontmatter errors remain a deferred validation pass.
 - A workflow can select different authenticated runtimes per child without
@@ -272,4 +261,4 @@ This decision is based on the current implementation:
   defaults; launch-time arguments remain the appropriate workflow override.
 - `README.md` documents `/plan`, `/iterate`, `/btw`, agent discovery,
   frontmatter, and runtime precedence.
-- `agents/` contains the mixed role/coordinator/adapter set mapped above.
+- `agents/` contains the role/coordinator set mapped above.

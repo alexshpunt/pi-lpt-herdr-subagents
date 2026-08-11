@@ -69,7 +69,6 @@ export interface WorkflowRole {
 	sessionMode?: string;
 	cwd?: string;
 	disableModelInvocation?: boolean;
-	cli?: string;
 }
 
 interface WorkflowMetadataRole {
@@ -383,7 +382,7 @@ function resolveRolePolicies(
 	const available = new Map(roles.map((role) => [role.name, role]));
 	return metadata.roles.map((declared) => {
 		const role = available.get(declared.role);
-		if (!role || role.disableModelInvocation || role.cli)
+		if (!role || role.disableModelInvocation)
 			fail(`workflow role ${JSON.stringify(declared.role)} is unavailable`);
 		const model = parseExactModelRef(declared.model);
 		if (!model || declared.model !== `${model.provider}/${model.modelId}`) {
@@ -436,7 +435,6 @@ function resolveRolePolicies(
 				interactive: role.interactive,
 				sessionMode: role.sessionMode,
 				cwd: role.cwd,
-				cli: role.cli,
 			},
 			runtime: { model: declared.model, thinking: declared.thinking },
 			tools,

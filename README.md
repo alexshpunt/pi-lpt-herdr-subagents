@@ -65,7 +65,7 @@ Use `pi install -l npm:pi-herdr-agents` for a project-local installation, or try
 pi -e npm:pi-herdr-agents
 ```
 
-Pi packages execute with your user account's full system access. Review the package source before installation. A locally installed Claude CLI adapter launches with `--dangerously-skip-permissions`, so those runs skip Claude's interactive permission prompts.
+Pi packages execute with your user account's full system access. Review the package source before installation.
 
 After the one-time first-package bootstrap, changing the `package.json` version on `main` automatically publishes to npm and creates the matching Git tag and GitHub Release. For bootstrap authentication, versioning, verification, and troubleshooting, see [RELEASING.md](RELEASING.md).
 
@@ -136,9 +136,8 @@ This package uses five distinct concepts:
   artifacts, and runtime policy.
 - A **skill** is a Pi-native procedure loaded into the current agent. Skills are
   dependencies of roles or workflows, not subagent definitions.
-- A **runtime** is how an invocation executes: Pi or an external CLI, plus its
-  model and thinking policy.
-- An **adapter** is a hidden runtime-specific definition supplied locally or optionally used by a workflow.
+- A **runtime** is the authenticated Pi provider/model and thinking policy used
+  for one invocation.
 
 See [ADR-0002](docs/adr/0002-agent-workflow-skill-runtime-taxonomy.md) for the
 accepted decision, rationale, migration boundaries, and evidence.
@@ -165,13 +164,10 @@ The current workflow inventory is:
 | **poteto** | Coordinator agent role | Config, then parent | Autonomously investigates, edits minimally, delegates independent work, and verifies. |
 | **adversarial-reviewer** | Transitional workflow implementation | Three distinct authenticated Pi model IDs, preferring provider diversity | Runs evidence-backed Optimizer and Skeptic review passes through generic `reviewer` children. |
 
-Bundled definitions are portable Pi roles. Vendor-specific external CLI adapters
-are local or optional definitions, not bundled roles. The existing external CLI
-path supports a local hidden Claude adapter (`cli: claude`) and always adds
-`--dangerously-skip-permissions`; it does not provide an adapter registry or
-Cursor/OpenCode support. Put an adapter in
-`$PI_CODING_AGENT_DIR/agents/` or `.pi/agents/` with
-`disable-model-invocation: true` when direct exact-name invocation needs it.
+All subagents execute through Pi. Claude models remain available through normal
+Pi provider/model routing. Legacy role definitions that contain `cli` fail before
+Herdr creates a pane or worktree; remove `cli` and `cli-model`, then select an
+authenticated Pi `provider/model-id`.
 
 Optional prerequisites fail closed and are not bundled:
 
@@ -357,10 +353,9 @@ subagent({
 | `agent`                | string  | —              | Load defaults from agent definition                                                               |
 | `fork`                 | boolean | `false`        | Force the full-context fork mode for this spawn, overriding any agent `session-mode` frontmatter  |
 | `interactive`          | boolean | derived        | Mark this spawn as interactive (don't wake the parent on stall/recovery). Defaults to the agent's `interactive` frontmatter, otherwise the inverse of `auto-exit`. |
-| `model`                | string  | configured or parent | Exact authenticated `provider/model-id`, or an ordered comma-separated Pi fallback list; unavailable for Claude CLI and worktree spawns. Resolution is tool argument → agent frontmatter → per-agent config → global config → parent |
+| `model`                | string  | configured or parent | Exact authenticated `provider/model-id`, or an ordered comma-separated Pi fallback list; fallback lists are unavailable for worktree spawns. Resolution is tool argument → agent frontmatter → per-agent config → global config → parent |
 | `thinking`             | string  | parent level   | Pi thinking level (`off` through `max`); omit to inherit the parent                                |
-| `systemPrompt`         | string  | —              | Role/system-prompt text for a bare spawn; overrides the body for Claude CLI agents, while named Pi agents keep their definition body |
-| `resumeSessionId`      | string  | —              | Claude CLI session ID to resume; separate from the Pi `subagent_resume` tool                       |
+| `systemPrompt`         | string  | —              | Role/system-prompt text for a bare spawn; named agents keep their definition body                  |
 | `skills`               | string  | —              | Comma-separated skill names                                                                       |
 | `tools`                | string  | —              | Comma-separated tool names                                                                        |
 | `cwd`                  | string  | —              | Working directory, or source repository when `worktree` is set (see [Role Folders](#role-folders)) |
@@ -395,8 +390,6 @@ subagent_interrupt({ name: "Scout" });
 This sends Escape to the child pane, cancelling the in-progress model turn. The subagent session stays alive — the pane, session file, and background polling all remain intact. After the interrupt, the widget immediately labels the child as `interrupted` (counted as **open**, not active processing). Stale pre-interrupt activity snapshots are ignored so a lagging Herdr/`active` reading cannot overwrite the interrupt. The process elapsed timer keeps running because the pane is still open; only the interrupted-state duration freezes relative to the interrupt request. If the child starts work later, newer observations return it to `active`; completion, failure, and `caller_ping` still flow through normally.
 
 This is a turn-level interrupt, not a method for forcibly terminating a subagent session.
-
-> **Note:** Only Pi-backed subagents are supported. Claude-backed runs will return an error.
 
 ---
 
@@ -687,10 +680,8 @@ and verify them with `/subagent list` plus a smoke launch.
 | `name`        | string  | Optional explicit agent name used in `agent: "my-agent"`; defaults to the filename stem and must match it in role packs                                                                                                                                                                                            |
 | `description` | string  | Shown in `subagents_list` output                                                                                                                                                                                                                                            |
 | `model`       | string  | Optional exact authenticated Pi model default or ordered comma-separated fallback list; omit to use per-agent config, global config, then the parent                                                                                                                       |
-| `cli`         | string  | Set to `claude` to launch the Claude CLI instead of Pi                                                                                                                                                                                                                       |
-| `cli-model`   | string  | Optional model name passed to a Claude CLI agent; separate from Pi model routing                                                                                                                                                                             |
-| `thinking`    | string  | Optional Pi thinking default (`off` through `max`); omit to inherit the parent. Thinking overrides are not supported for Claude CLI agents                                                                                                                                   |
-| `system-prompt` | string | `append` passes the agent body through Pi's appended system prompt; `replace` replaces Pi's default system prompt. Without this field, the body is included in the task wrapper. Claude CLI agents always append their body/override                                                                                                                                                                                                                                 |
+| `thinking`    | string  | Optional Pi thinking default (`off` through `max`); omit to inherit the parent                                                                                                                                   |
+| `system-prompt` | string | `append` passes the agent body through Pi's appended system prompt; `replace` replaces Pi's default system prompt. Without this field, the body is included in the task wrapper                                                                                                                                                                                                                                 |
 | `tools`       | string  | Comma-separated Pi `--tools` allowlist; may contain any registered built-in, extension, or custom tool name                                                                                                                                                                 |
 | `skills`      | string  | Comma-separated installed skill names to auto-load. Use this plural form for new definitions; legacy project/global definitions using singular `skill` remain compatible. |
 | `session-mode` | string | Default child-session mode: `standalone`, `lineage-only`, or `fork` |
@@ -699,7 +690,7 @@ and verify them with `/subagent list` plus a smoke launch.
 | `auto-exit`   | boolean | Auto-shutdown when the agent finishes its turn — no `subagent_done` call needed. If the user sends any input, auto-exit is permanently disabled and the user takes over the session. Recommended for autonomous agents (scout, worker); not for interactive ones (planner). Also determines the default value of `interactive` (see below). |
 | `interactive` | boolean | Override whether stall/recovery transitions wake the parent session. Defaults to the inverse of `auto-exit`: autonomous agents (`auto-exit: true`) are non-interactive and get stall pings; agents without `auto-exit` are interactive and stay quiet. Explicit values take precedence. |
 | `cwd`         | string  | Default working directory. Absolute paths are unambiguous; relative agent-frontmatter paths resolve from Pi's agent config directory (`PI_CODING_AGENT_DIR` or `~/.pi/agent`), not the project root                                                                                                                                                                                                            |
-| `disable-model-invocation` | boolean | Hide an internal adapter from discovery surfaces like `subagents_list`. The definition remains directly invocable by exact name via `subagent({ agent: "name", ... })`. |
+| `disable-model-invocation` | boolean | Hide a role from discovery surfaces like `subagents_list`. The definition remains directly invocable by exact name via `subagent({ agent: "name", ... })`. |
 
 ---
 
@@ -867,7 +858,7 @@ herdr
 pi
 ```
 
-Other multiplexers and terminal backends are not supported. Worktrees provide Git checkout isolation only, not process or security isolation; child agents and installed Pi packages run with your user's filesystem and command permissions. Locally configured Claude CLI adapters always launch with `--dangerously-skip-permissions` and therefore skip Claude's interactive permission prompts.
+Other multiplexers and terminal backends are not supported. Worktrees provide Git checkout isolation only, not process or security isolation; child agents and installed Pi packages run with your user's filesystem and command permissions.
 
 ---
 

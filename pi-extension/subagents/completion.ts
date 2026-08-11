@@ -21,7 +21,6 @@ export interface CompletionOptions {
     observedAt: number,
   ) => void;
   sessionFile?: string;
-  sentinelFile?: string;
   onTick?: (elapsedSeconds: number) => void;
 }
 
@@ -83,12 +82,7 @@ function terminalExitCode(screen: string): number | null {
 }
 
 function completionArtifact(options: CompletionOptions): CompletionResult | null {
-  const sidecar = consumeExitSidecar(options.sessionFile);
-  if (sidecar) return sidecar;
-  if (options.sentinelFile && existsSync(options.sentinelFile)) {
-    return { reason: "sentinel", exitCode: 0 };
-  }
-  return null;
+  return consumeExitSidecar(options.sessionFile);
 }
 
 async function waitForDisappearanceArtifacts(
@@ -136,10 +130,6 @@ export async function waitForCompletion(
 
     const sidecarResult = consumeExitSidecar(options.sessionFile);
     if (sidecarResult) return sidecarResult;
-
-    if (options.sentinelFile && existsSync(options.sentinelFile)) {
-      return { reason: "sentinel", exitCode: 0 };
-    }
 
     try {
       const exitCode = terminalExitCode(await options.readTerminalTail());

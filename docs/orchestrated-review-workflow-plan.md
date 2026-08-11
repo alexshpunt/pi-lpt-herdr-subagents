@@ -417,7 +417,7 @@ All slices are sequential because they touch the same runtime and lifecycle seam
 
 - Metadata header must be first, valid JSON, version 1, strict, and within hard caps.
 - Paths outside `.pi/plans/<run>/workflow.js`, symlinks, reused journals, and missing files fail.
-- Unknown, duplicate, Claude-backed, unauthenticated, or non-review roles fail.
+- Unknown, duplicate, legacy external-CLI, unauthenticated, or non-review roles fail.
 - Script syntax failure does not evaluate code.
 - Prepare records exact bytes, full hash, base SHA, session identity/leaf, role-policy fingerprints, runtimes, and effective tools in pending memory without creating the journal.
 - A matching later user message in the same session starts; assistant text, pre-prepare or other-session user text, malformed text, uppercase/short/long prefixes, and surrounding whitespace fail.

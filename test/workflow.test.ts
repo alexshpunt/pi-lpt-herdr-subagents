@@ -645,13 +645,6 @@ describe("workflow preparation", () => {
 				]),
 			"empty read-only tools",
 		);
-		assert.throws(
-			() =>
-				prepare(root, writeWorkflow(root, workflow(baseSha), "non-pi-role"), [
-					{ ...roles[0], cli: "claude" },
-				]),
-			"workflow roles are Pi-only",
-		);
 	});
 
 	it("executes JSON results in a worker and terminates bad asynchronous scripts", async () => {

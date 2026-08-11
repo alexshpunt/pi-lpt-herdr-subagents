@@ -26,13 +26,13 @@ Workflow preparation, exact approval, Worker execution, isolated read-only child
 | ADR | Status | Decision |
 | --- | --- | --- |
 | [`0001`](adr/0001-btw-ephemeral-side-questions.md) | Accepted | Add `/btw` as an ephemeral side-question child. |
-| [`0002`](adr/0002-agent-workflow-skill-runtime-taxonomy.md) | Accepted | Keep agent execution, workflows, skills, and runtimes distinct. |
+| [`0002`](adr/0002-agent-workflow-skill-runtime-taxonomy.md) | Accepted in part; external CLI provisions superseded | Keep agent execution, workflows, skills, and Pi runtimes distinct. |
 | [`0003`](adr/0003-installable-role-packs.md) | Accepted | Discover installable role packs through Pi's event bus. |
 | [`0004`](adr/0004-require-active-user-approval-for-workflow-execution.md) | Accepted | Require active approval for exact workflow-script execution. |
 | [`0005`](adr/0005-parent-owns-workflow-script-authority.md) | Accepted | Keep workflow-script authority with the parent. |
 | [`0006`](adr/0006-limit-v1-execution-effects-to-isolated-worktrees.md) | Accepted | Limit the first workflow to read-only effects. |
 | [`0007`](adr/0007-require-fresh-review-for-workflow-scripts.md) | Accepted | Require fresh review in skill-authored review workflows. |
-| [`0008`](adr/0008-adopt-pi-only-subagent-execution.md) | Accepted; implementation pending | Remove the external CLI adapter and make subagent execution Pi-only. |
+| [`0008`](adr/0008-adopt-pi-only-subagent-execution.md) | Accepted; implemented | Remove the external CLI adapter and make subagent execution Pi-only. |
 
 ## Research
 

@@ -17,24 +17,16 @@ The JSON block at the start of a workflow script that the runner parses and vali
 _Avoid_: Evaluated metadata, inferred policy
 
 **Approved runtime**:
-A mandatory exact `provider/model` reference and thinking level declared in workflow metadata; every execution node must resolve to one of these approved runtimes. Missing values fail preparation rather than inheriting parent or role defaults. The first workflow supports Pi-backed agents only; existing public Claude subagents remain unchanged.
-_Avoid_: Runtime tiers, silent fallback, inherited runtime, v1 Claude workflow adapter
+A mandatory exact `provider/model` reference and thinking level declared in workflow metadata; every execution node must resolve to one of these approved runtimes. Missing values fail preparation rather than inheriting parent or role defaults. All subagent and workflow execution is Pi-backed.
+_Avoid_: Runtime tiers, external CLI adapter, silent fallback, inherited runtime
 
-**External CLI runtime adapter**:
-A runtime-specific module selected by a known local role `cli` value. The MVP dispatches `cli: claude` to the built-in Claude adapter; a future registry needs a proven second CLI.
-_Avoid_: Raw flag template, plugin system before a second CLI
+**Pi subagent runtime**:
+The single execution path for fresh and resumed children. `launchPiSubagent()` owns the complete Pi and Herdr launch transaction; completion uses Pi sidecar evidence first and the terminal exit marker as fallback.
+_Avoid_: Runtime dispatch, adapter registry, split launch ownership
 
-**Adapter permission policy**:
-The runtime adapter owns its fixed vendor flags for the MVP. A local role selects the CLI, not raw flags or a policy profile.
-_Avoid_: Implied permission bypass, raw flag values
-
-**Adapter seam**:
-`index.ts` retains pane, worktree, lifecycle, and delivery ownership. The Claude adapter owns Claude command construction, completion/result extraction, transcript copying, and workspace cleanup.
-_Avoid_: Vendor behavior in the shared lifecycle
-
-**Runtime dispatch**:
-The core validates a role's `cli` value before pane creation and dispatches each known value to its internal adapter. The MVP recognizes `claude` only; unknown values fail closed.
-_Avoid_: Silent Pi fallback, speculative runtime registry
+**Legacy external CLI role**:
+An old role definition that contains `cli`. Discovery reports a migration diagnostic, and launch fails before Herdr creates a pane or worktree. Remove `cli` and `cli-model`, then select the model through Pi provider/model routing.
+_Avoid_: Silent Pi reinterpretation, compatibility adapter
 
 **Run journal**:
 The runner-owned append-only `run.jsonl` that starts with approval binding the workflow-script hash, canonical repository identity, and committed base, then records observed node calls and results. Exactly one terminal event contains the bounded runtime envelope; a following delivery event references it without duplicating the task result.

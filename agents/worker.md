@@ -2,7 +2,6 @@
 name: worker
 description: Implements a complete task or plan section - writes code, runs tests, commits only when asked
 tools: read, bash, write, edit
-deny-tools: claude
 spawning: false
 auto-exit: true
 system-prompt: append

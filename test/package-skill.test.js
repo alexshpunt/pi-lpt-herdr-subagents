@@ -66,11 +66,11 @@ describe("bundled orchestration skill", () => {
 			"agents/worker.md",
 			"pi-extension/subagents/plan-skill.md",
 			"pi-extension/subagents/workflow-worker.js",
-			"pi-extension/subagents/plugin/.claude-plugin/plugin.json",
-			"pi-extension/subagents/plugin/hooks/hooks.json",
-			"pi-extension/subagents/plugin/hooks/on-stop.sh",
 		]) {
 			assert.equal(packageFiles.has(path), true, `missing package file: ${path}`);
+		}
+		for (const path of packageFiles) {
+			assert.doesNotMatch(path, /(^|\/)(?:claude\.ts|plugin)(?:\/|$)/);
 		}
 		assert.equal(packageFiles.has("agents/claude-reviewer.md"), false);
 		for (const path of packageFiles) {

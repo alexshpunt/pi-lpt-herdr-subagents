@@ -18,10 +18,6 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
-import {
-	buildClaudeLaunchCommand,
-	requireClaudeAdapter,
-} from "../pi-extension/subagents/claude.ts";
 import rolePackExample from "../examples/role-pack/extension.ts";
 import {
 	cleanupSubagentsForShutdown,
@@ -106,35 +102,6 @@ after(() => {
 	else process.env.PI_SUBAGENT_ID = inheritedSubagentId;
 	if (inheritedDenyTools == null) delete process.env.PI_DENY_TOOLS;
 	else process.env.PI_DENY_TOOLS = inheritedDenyTools;
-});
-
-describe("Claude CLI adapter", () => {
-	it("builds the established unattended Claude command", () => {
-		requireClaudeAdapter("claude");
-		const command = buildClaudeLaunchCommand({
-			cwd: "/tmp/project",
-			sentinelFile: "/tmp/claude-done",
-			pluginDir: "/tmp/no-plugin",
-			model: "sonnet",
-			systemPrompt: "Review this change.",
-			resumeSessionId: "session-123",
-			task: "Review the diff",
-		});
-
-		assert.match(command, /PI_CLAUDE_SENTINEL='\/tmp\/claude-done'/);
-		assert.match(command, /claude --dangerously-skip-permissions/);
-		assert.match(command, /--model 'sonnet'/);
-		assert.match(command, /--append-system-prompt 'Review this change\.'/);
-		assert.match(command, /--resume 'session-123'/);
-		assert.match(command, /'Review the diff'; echo '__SUBAGENT_DONE_'\$\?'__'/);
-	});
-
-	it("rejects unknown CLI values before launch", () => {
-		assert.throws(
-			() => requireClaudeAdapter("opencode"),
-			/Unsupported subagent CLI "opencode"/,
-		);
-	});
 });
 
 // --- Helpers ---
@@ -848,7 +815,7 @@ describe("status.ts", () => {
 	});
 
 	it("keeps a missing snapshot as starting until the fixed watchdog threshold", () => {
-		let state = createStatusState({ source: "pi", startTimeMs: 0 });
+		let state = createStatusState({ startTimeMs: 0 });
 		state = observeStatus(state, { snapshot: "missing" }, 1_000);
 
 		assert.equal(classifyStatus(state, 60_999).kind, "starting");
@@ -858,7 +825,7 @@ describe("status.ts", () => {
 	});
 
 	it("classifies active snapshots without aging into stalled", () => {
-		let state = createStatusState({ source: "pi", startTimeMs: 0 });
+		let state = createStatusState({ startTimeMs: 0 });
 		state = observeStatus(
 			state,
 			{
@@ -882,7 +849,7 @@ describe("status.ts", () => {
 	});
 
 	it("classifies waiting snapshots as healthy idle without becoming stalled", () => {
-		let state = createStatusState({ source: "pi", startTimeMs: 0 });
+		let state = createStatusState({ startTimeMs: 0 });
 		state = observeStatus(
 			state,
 			{
@@ -901,16 +868,8 @@ describe("status.ts", () => {
 		assert.equal(snapshot.waitingDurationText, "3m");
 	});
 
-	it("uses elapsed-only fallback for claude-backed subagents", () => {
-		const state = createStatusState({ source: "claude", startTimeMs: 0 });
-		const snapshot = classifyStatus(state, 125_000);
-
-		assert.equal(snapshot.kind, "running");
-		assert.equal(snapshot.elapsedText, "2m");
-	});
-
 	it("detects stalled transitions and recovery", () => {
-		let state = createStatusState({ source: "pi", startTimeMs: 0 });
+		let state = createStatusState({ startTimeMs: 0 });
 		state = observeStatus(state, { snapshot: "missing" }, 1_000);
 
 		let advanced = advanceStatusState(state, 95_000);
@@ -935,7 +894,7 @@ describe("status.ts", () => {
 	});
 
 	it("keeps the last healthy kind during transient snapshot loss", () => {
-		let state = createStatusState({ source: "pi", startTimeMs: 0 });
+		let state = createStatusState({ startTimeMs: 0 });
 		state = observeStatus(
 			state,
 			{
@@ -959,7 +918,7 @@ describe("status.ts", () => {
 
 	it("forces an active state to waiting after interrupt", () => {
 		const now = 20_000;
-		let state = createStatusState({ source: "pi", startTimeMs: 0 });
+		let state = createStatusState({ startTimeMs: 0 });
 		state = observeStatus(
 			state,
 			{
@@ -987,7 +946,7 @@ describe("status.ts", () => {
 	});
 
 	it("orders same-millisecond snapshots by sequence", () => {
-		let state = createStatusState({ source: "pi", startTimeMs: 0 });
+		let state = createStatusState({ startTimeMs: 0 });
 		state = observeStatus(
 			state,
 			{
@@ -1022,7 +981,7 @@ describe("status.ts", () => {
 	});
 
 	it("recovers from a transient snapshot read failure with the same valid snapshot", () => {
-		let state = createStatusState({ source: "pi", startTimeMs: 0 });
+		let state = createStatusState({ startTimeMs: 0 });
 		state = observeStatus(
 			state,
 			{
@@ -1061,7 +1020,7 @@ describe("status.ts", () => {
 	});
 
 	it("ignores stale and exact old snapshots after interrupt and accepts newer snapshots", () => {
-		let state = createStatusState({ source: "pi", startTimeMs: 0 });
+		let state = createStatusState({ startTimeMs: 0 });
 		state = observeStatus(
 			state,
 			{
@@ -1136,12 +1095,12 @@ describe("status.ts", () => {
 	it("normalizes and truncates long newline-heavy names", () => {
 		const longName = `Worker\n\n${"very-long-name-".repeat(12)}`;
 		const stalledState = observeStatus(
-			createStatusState({ source: "pi", startTimeMs: 0 }),
+			createStatusState({ startTimeMs: 0 }),
 			{ snapshot: "missing" },
 			1_000,
 		);
 		const activeState = observeStatus(
-			createStatusState({ source: "pi", startTimeMs: 0 }),
+			createStatusState({ startTimeMs: 0 }),
 			{
 				snapshot: "present",
 				updatedAt: 299_000,
@@ -1178,7 +1137,7 @@ describe("status.ts", () => {
 
 	it("caps visible status lines and reports overflow consistently", () => {
 		const waitingState = observeStatus(
-			createStatusState({ source: "pi", startTimeMs: 0 }),
+			createStatusState({ startTimeMs: 0 }),
 			{
 				snapshot: "present",
 				updatedAt: 180_000,
@@ -1189,7 +1148,7 @@ describe("status.ts", () => {
 			180_000,
 		);
 		const activeState = observeStatus(
-			createStatusState({ source: "pi", startTimeMs: 0 }),
+			createStatusState({ startTimeMs: 0 }),
 			{
 				snapshot: "present",
 				updatedAt: 419_000,
@@ -2039,39 +1998,78 @@ describe("subagent discovery", () => {
 		);
 	});
 
-	it("hides a local external CLI adapter while preserving exact-name loading", async () => {
-		await withIsolatedAgentEnv(async ({ globalAgentsDir }) => {
-			writeAgentFile(
-				globalAgentsDir,
-				"external-cli-reviewer",
-				[
-					"description: Hidden external CLI review adapter",
-					"cli: claude",
-					"cli-model: sonnet",
-					"disable-model-invocation: true",
-				].join("\n"),
-			);
-			const { api, registeredTools } = createMockExtensionApi();
-			(subagentsModule as any).default(api);
+	it("rejects legacy external CLI roles before launch", async () => {
+		await withIsolatedAgentEnv(
+			async ({ globalAgentsDir, projectAgentsDir }) => {
+				writeAgentFile(
+					globalAgentsDir,
+					"external-cli-reviewer",
+					[
+						"description: Legacy external CLI review adapter",
+						"cli: claude",
+						"cli-model: sonnet",
+						"disable-model-invocation: true",
+					].join("\n"),
+				);
+				writeAgentFile(
+					projectAgentsDir,
+					"scout",
+					["description: Legacy scout override", "cli: claude"].join("\n"),
+				);
+				const { api, registeredTools } = createMockExtensionApi();
+				(subagentsModule as any).default(api);
 
-			const tool = registeredTools.find(
-				(tool) => tool.name === "subagents_list",
-			);
-			assert.ok(tool, "expected subagents_list to be registered");
+				const tool = registeredTools.find(
+					(tool) => tool.name === "subagents_list",
+				);
+				assert.ok(tool, "expected subagents_list to be registered");
 
-			const result = await tool.execute();
-			const agents = result.details?.agents ?? [];
-			assert.equal(
-				agents.some((agent: any) => agent.name === "external-cli-reviewer"),
-				false,
-			);
-			assert.doesNotMatch(result.content[0].text, /external-cli-reviewer/);
+				const result = await tool.execute();
+				assert.equal(
+					result.details.agents.some(
+						(agent: any) =>
+							agent.name === "external-cli-reviewer" || agent.name === "scout",
+					),
+					false,
+				);
+				assert.equal(
+					result.details.diagnostics.some(
+						(diagnostic: any) =>
+							diagnostic.agentName === "external-cli-reviewer" &&
+							diagnostic.code === "external-cli-unsupported",
+					),
+					true,
+				);
+				assert.match(result.content[0].text, /Pi-only/i);
+				assert.match(result.content[0].text, /remove.*cli/i);
+				assert.equal(testApi.loadAgentDefaults("external-cli-reviewer"), null);
 
-			const adapter = testApi.loadAgentDefaults("external-cli-reviewer");
-			assert.equal(adapter?.cli, "claude");
-			assert.equal(adapter?.cliModel, "sonnet");
-			assert.equal(adapter?.disableModelInvocation, true);
-		});
+				const subagentTool = registeredTools.find(
+					(tool) => tool.name === "subagent",
+				);
+				assert.ok(subagentTool, "expected subagent to be registered");
+				const previousHerdrEnv = process.env.HERDR_ENV;
+				delete process.env.HERDR_ENV;
+				try {
+					const launch = await subagentTool.execute(
+						"call-1",
+						{
+							name: "Legacy",
+							task: "Review this branch",
+							agent: "external-cli-reviewer",
+							worktree: { branch: "must-not-be-created" },
+						},
+						new AbortController().signal,
+						() => {},
+						{},
+					);
+					assert.equal(launch.details.error, "external-cli-unsupported");
+					assert.match(launch.content[0].text, /Pi-only/i);
+				} finally {
+					restoreEnvVar("HERDR_ENV", previousHerdrEnv);
+				}
+			},
+		);
 	});
 
 	it("hides disable-model-invocation agents from listings but keeps direct loading", async () => {
@@ -2748,22 +2746,6 @@ describe("completion.ts", () => {
 			readTerminalTail: async () => "output\n__SUBAGENT_DONE_17__\n",
 		});
 		assert.deepEqual(result, { reason: "sentinel", exitCode: 17 });
-	});
-
-	it("returns when an external sentinel file appears", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "completion-sentinel-"));
-		const sentinelFile = join(dir, "done");
-		writeFileSync(sentinelFile, "complete");
-		try {
-			const result = await waitForCompletion(new AbortController().signal, {
-				intervalMs: 1,
-				sentinelFile,
-				readTerminalTail: async () => "",
-			});
-			assert.deepEqual(result, { reason: "sentinel", exitCode: 0 });
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
 	});
 
 	it("retries transient terminal read failures and reports ticks", async () => {
@@ -3767,34 +3749,6 @@ describe("subagent interruption", () => {
 		}
 	});
 
-	it("rejects Claude-backed interrupt requests before delivery", () => {
-		const testApi = (subagentsModule as any).__test__;
-		const runningMap = testApi.runningSubagents as Map<string, any>;
-		let delivered = false;
-		runningMap.clear();
-
-		try {
-			runningMap.set("a1", makeRunning({ cli: "claude" }));
-
-			const result = testApi.handleSubagentInterrupt({ name: "Worker" }, () => {
-				delivered = true;
-			});
-
-			assert.equal(delivered, false);
-			assert.match(
-				result.content[0].text,
-				/currently supported only for Pi-backed subagents/i,
-			);
-			assert.deepEqual(result.details, {
-				error: "claude interrupt unsupported",
-				id: "a1",
-				name: "Worker",
-			});
-		} finally {
-			runningMap.clear();
-		}
-	});
-
 	it("formats exit code 130 as an ordinary failure", () => {
 		const testApi = (subagentsModule as any).__test__;
 		const presentation = testApi.resolveResultPresentation(
@@ -4345,43 +4299,6 @@ describe("subagent status renderer", () => {
 });
 
 describe("subagents widget rendering", () => {
-	it("projects Claude agents as running and counts them as active", () => {
-		const testApi = (subagentsModule as any).__test__;
-		const originalNow = Date.now;
-		Date.now = () => 30_000;
-		try {
-			const lines = testApi.renderSubagentWidgetLines(
-				[
-					{
-						id: "c1",
-						name: "Claude",
-						task: "",
-						surface: "s1",
-						startTime: 5_000,
-						sessionFile: "sess1",
-						cli: "claude",
-						lifecycle: {
-							...createLifecycle(5_000),
-							process: {
-								kind: "running",
-								startedAt: 5_000,
-								confirmedAt: 5_000,
-							},
-						},
-						interactive: false,
-					},
-				],
-				64,
-			);
-
-			assert.match(lines[0], /1 active/);
-			assert.ok(lines[0].includes("\x1b[38;2;77;163;255m"));
-			assert.match(lines[1], /running/);
-		} finally {
-			Date.now = originalNow;
-		}
-	});
-
 	it("shows interrupted agents as open while process runtime continues", () => {
 		const testApi = (subagentsModule as any).__test__;
 		const interruptedAt = 20_000;
@@ -4426,7 +4343,7 @@ describe("subagents widget rendering", () => {
 		const testApi = (subagentsModule as any).__test__;
 		const doneAt = 20_000;
 		const legacyDone = observeStatus(
-			createStatusState({ source: "pi", startTimeMs: 5_000 }),
+			createStatusState({ startTimeMs: 5_000 }),
 			{
 				snapshot: "present",
 				updatedAt: doneAt,

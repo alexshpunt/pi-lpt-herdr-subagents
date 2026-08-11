@@ -1,6 +1,6 @@
 # ADR-0008: Adopt Pi-only subagent execution
 
-- **Status:** Accepted (implementation pending)
+- **Status:** Accepted (implemented)
 - **Date:** 2026-08-10
 - **Scope:** `giuseppecrj/pi-herdr-agents`
 - **Supersedes:** The external CLI runtime-adapter provisions of ADR-0002
@@ -19,4 +19,4 @@ The Claude terminal path duplicates launch, completion, transcript, cleanup, sta
 
 ## Consequences
 
-This is an immediate pre-1.0 breaking change; no deprecation adapter will remain. The agent/workflow/skill/runtime taxonomy in ADR-0002 remains accepted, but its external CLI adapter rules no longer apply. Shipped-behavior documentation and `CONTEXT.md` remain unchanged until implementation lands, when they must be updated with the code and tests.
+This is an immediate pre-1.0 breaking change; no deprecation adapter remains. The agent/workflow/skill/runtime taxonomy in ADR-0002 remains accepted, but its external CLI adapter rules no longer apply. Shipped-behavior documentation and `CONTEXT.md` now describe the Pi-only contract.

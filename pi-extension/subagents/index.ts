@@ -18,7 +18,6 @@ import {
 	readdirSync,
 	readFileSync,
 	realpathSync,
-	writeFileSync,
 	existsSync,
 	mkdirSync,
 	rmSync,
@@ -123,7 +122,7 @@ import {
 } from "./lifecycle.ts";
 import {
 	captureWorktreeHandoff,
-	launchFreshPiSubagent,
+	launchPiSubagent,
 	persistWorktreeResult,
 	runSubagentScript,
 	writeWorktreeManifest,
@@ -1765,14 +1764,6 @@ function startStatusRefresh(pi: ExtensionAPI) {
 	(globalThis as any)[STATUS_INTERVAL_KEY] = statusInterval;
 }
 
-function resolveResumeLaunchBehavior(params: { autoExit?: boolean }): {
-	autoExit: boolean;
-	interactive: boolean;
-} {
-	const autoExit = params.autoExit ?? true;
-	return { autoExit, interactive: !autoExit };
-}
-
 function buildBtwLaunchCommand(params: {
 	cwd: string;
 	sessionFile: string;
@@ -1868,7 +1859,6 @@ export const __test__ = {
 	resolveResultPresentation,
 	resolveUnexpectedErrorPresentation,
 	sendSubagentResult,
-	resolveResumeLaunchBehavior,
 	shouldRetainSubagentSurface,
 	resolveWorktreeLaunchWarning,
 	captureWorktreeHandoff,
@@ -1960,7 +1950,8 @@ async function launchSubagent(
 	if (!parentSessionFile) throw new Error("No session file");
 
 	if (agentDefs?.cli !== "claude") {
-		const running = await launchFreshPiSubagent({
+		const running = await launchPiSubagent({
+			kind: "fresh",
 			id,
 			name: params.name,
 			task: params.task,
@@ -3900,8 +3891,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				const name = params.name ?? "Resume";
-				const { autoExit, interactive } = resolveResumeLaunchBehavior(params);
-				const startTime = Date.now();
 				const id = Math.random().toString(16).slice(2, 10);
 
 				if (!isTerminalAvailable()) {
@@ -3923,107 +3912,18 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				// Record entry count before resuming so we can extract new messages
 				const entryCountBefore = getNewEntries(params.sessionPath, 0).length;
 
-				const surface = createSubagentPane(name);
-				await waitForShellReady(surface);
-
-				// Build pi resume command
-				const parts = ["pi", "--session", shellQuote(params.sessionPath)];
-
-				// Load subagent-done extension so the agent can self-terminate if needed
-				const subagentDonePath = join(SUBAGENTS_DIR, "subagent-done.ts");
-				parts.push("-e", shellQuote(subagentDonePath));
-
-				const sessionId = ctx.sessionManager.getSessionId();
-				const artifactDir = getArtifactDir(
-					ctx.sessionManager.getSessionDir(),
-					sessionId,
-				);
-				const activityFile = getSubagentActivityFile(artifactDir, id);
-				mkdirSync(dirname(activityFile), { recursive: true });
-
-				let resumeMsgFile: string | undefined;
-				if (params.message) {
-					const msgTimestamp = new Date()
-						.toISOString()
-						.replace(/[:.]/g, "-")
-						.slice(0, 19);
-					resumeMsgFile = join(
-						artifactDir,
-						"subagent-resume",
-						`${
-							name
-								.toLowerCase()
-								.replace(/[^a-z0-9\s-]/g, "")
-								.replace(/\s+/g, "-")
-								.replace(/-+/g, "-")
-								.replace(/^-|-$/g, "") || "resume"
-						}-${msgTimestamp}.md`,
-					);
-					mkdirSync(dirname(resumeMsgFile), { recursive: true });
-					writeFileSync(resumeMsgFile, params.message, "utf8");
-					parts.push(shellQuote(`@${resumeMsgFile}`));
-				}
-
-				// Build env prefix — propagate PI_CODING_AGENT_DIR for config isolation
-				const resumeEnvParts: string[] = [];
-				if (process.env.PI_CODING_AGENT_DIR) {
-					resumeEnvParts.push(
-						`PI_CODING_AGENT_DIR=${shellQuote(process.env.PI_CODING_AGENT_DIR)}`,
-					);
-				}
-				resumeEnvParts.push(`PI_SUBAGENT_NAME=${shellQuote(name)}`);
-				resumeEnvParts.push(
-					`PI_SUBAGENT_SESSION=${shellQuote(params.sessionPath)}`,
-				);
-				resumeEnvParts.push(`PI_SUBAGENT_ID=${shellQuote(id)}`);
-				resumeEnvParts.push(
-					`PI_SUBAGENT_ACTIVITY_FILE=${shellQuote(activityFile)}`,
-				);
-				if (autoExit) {
-					resumeEnvParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
-				}
-				const resumeEnvPrefix = resumeEnvParts.join(" ") + " ";
-
-				const command = `${resumeEnvPrefix}${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
-				const launchScriptFile = join(
-					artifactDir,
-					"subagent-scripts",
-					`${
-						name
-							.toLowerCase()
-							.replace(/[^a-z0-9\s-]/g, "")
-							.replace(/\s+/g, "-")
-							.replace(/-+/g, "-")
-							.replace(/^-|-$/g, "") || "resume"
-					}-resume-${Date.now()}.sh`,
-				);
-				runScriptInPane(surface, command, {
-					scriptPath: launchScriptFile,
-					scriptPreamble: [
-						`# Subagent resume script for ${name}`,
-						`# Generated: ${new Date().toISOString()}`,
-						`# Session: ${params.sessionPath}`,
-						`# Surface: ${surface}`,
-						...(resumeMsgFile
-							? [`# Resume message file: ${resumeMsgFile}`]
-							: []),
-					].join("\n"),
-				});
-
-				// Register as a running subagent for widget tracking
-				const running: RunningSubagent = {
+				const running: RunningSubagent = await launchPiSubagent({
+					kind: "resume",
 					id,
 					name,
-					task: params.message ?? "resumed session",
-					surface,
-					startTime,
 					sessionFile: params.sessionPath,
-					launchScriptFile,
-					activityFile,
-					interactive,
-					runtimePlan: undefined,
-					lifecycle: createLifecycle(startTime),
-				};
+					message: params.message,
+					parent: {
+						sessionId: ctx.sessionManager.getSessionId(),
+						sessionDir: ctx.sessionManager.getSessionDir(),
+					},
+					behavior: { autoExit: params.autoExit },
+				});
 				runningSubagents.set(id, running);
 				startWidgetRefresh();
 				startStatusRefresh(pi);
@@ -4121,7 +4021,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 						id,
 						name,
 						sessionPath: params.sessionPath,
-						launchScriptFile,
+						launchScriptFile: running.launchScriptFile,
 						status: "started",
 					},
 				};

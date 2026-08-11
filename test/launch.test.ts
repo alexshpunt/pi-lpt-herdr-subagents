@@ -11,9 +11,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
-	launchFreshPiSubagent,
-	type FreshPiLaunchOperations,
+	launchPiSubagent,
 	type FreshPiLaunchRequest,
+	type PiLaunchOperations,
+	type ResumePiLaunchRequest,
 } from "../pi-extension/subagents/launch.ts";
 
 function fixture() {
@@ -30,6 +31,7 @@ function fixture() {
 	);
 
 	const request: FreshPiLaunchRequest = {
+		kind: "fresh",
 		id: "child-1",
 		name: "Worker",
 		task: "Implement the bounded change.",
@@ -72,7 +74,7 @@ function withFixture(
 	});
 }
 
-describe("fresh Pi launch", () => {
+describe("Pi launch", () => {
 	it("launches an ordinary child through one transaction", async () => {
 		await withFixture(async ({ request, project, agentDir }) => {
 			const projectAgentDir = join(project, ".pi", "agent");
@@ -80,7 +82,7 @@ describe("fresh Pi launch", () => {
 			const events: string[] = [];
 			let command = "";
 			let scriptPath = "";
-			const operations: FreshPiLaunchOperations = {
+			const operations: PiLaunchOperations = {
 				createPane(name) {
 					assert.equal(name, "Worker");
 					events.push("create");
@@ -102,7 +104,7 @@ describe("fresh Pi launch", () => {
 				},
 			};
 
-			const running = await launchFreshPiSubagent(request, operations);
+			const running = await launchPiSubagent(request, operations);
 
 			assert.deepEqual(events, ["create", "ready", "run"]);
 			assert.equal(running.id, "child-1");
@@ -138,6 +140,132 @@ describe("fresh Pi launch", () => {
 		});
 	});
 
+	it("resumes a session through the launch transaction", async () => {
+		await withFixture(async ({ root, sessionDir }) => {
+			const sessionFile = join(root, "child.jsonl");
+			writeFileSync(sessionFile, "existing session\n");
+			const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+			process.env.PI_CODING_AGENT_DIR = join(root, "isolated-agent");
+			try {
+				const events: string[] = [];
+				let command = "";
+				let scriptPath = "";
+				let scriptPreamble = "";
+				const request: ResumePiLaunchRequest = {
+					kind: "resume",
+					id: "resume-1",
+					name: "Resume worker",
+					sessionFile,
+					message: "Use the approved schema.",
+					parent: { sessionId: "parent", sessionDir },
+				};
+				const operations: PiLaunchOperations = {
+					createPane(name) {
+						assert.equal(name, "Resume worker");
+						events.push("create");
+						return "pane-resume";
+					},
+					createWorktree() {
+						throw new Error("a resume must not create a worktree");
+					},
+					async waitForShellReady(surface) {
+						assert.equal(surface, "pane-resume");
+						events.push("ready");
+					},
+					runScript(surface, value, options) {
+						assert.equal(surface, "pane-resume");
+						events.push("run");
+						command = value;
+						scriptPath = options.scriptPath;
+						scriptPreamble = options.scriptPreamble;
+						return options.scriptPath;
+					},
+				};
+
+				const running = await launchPiSubagent(request, operations);
+
+				assert.deepEqual(events, ["create", "ready", "run"]);
+				assert.equal(running.id, "resume-1");
+				assert.equal(running.name, "Resume worker");
+				assert.equal(running.task, "Use the approved schema.");
+				assert.equal(running.surface, "pane-resume");
+				assert.equal(running.sessionFile, sessionFile);
+				assert.equal(running.launchScriptFile, scriptPath);
+				assert.equal(running.interactive, false);
+				assert.equal(running.runtimePlan, undefined);
+				assert.equal(running.worktree, undefined);
+				assert.match(
+					command,
+					new RegExp(
+						`^PI_CODING_AGENT_DIR='${process.env.PI_CODING_AGENT_DIR}' `,
+					),
+				);
+				assert.match(command, new RegExp(`pi --session '${sessionFile}' -e `));
+				assert.match(command, /PI_SUBAGENT_NAME='Resume worker'/);
+				assert.match(
+					command,
+					new RegExp(`PI_SUBAGENT_SESSION='${sessionFile}'`),
+				);
+				assert.match(command, /PI_SUBAGENT_ID='resume-1'/);
+				assert.match(command, /PI_SUBAGENT_ACTIVITY_FILE='/);
+				assert.match(command, /PI_SUBAGENT_AUTO_EXIT=1/);
+				assert.doesNotMatch(command, /--model|--thinking|^cd /);
+				const messagePath = command.match(/'@([^']+\.md)'/)?.[1];
+				assert.ok(messagePath, "expected artifact-backed follow-up message");
+				assert.equal(
+					readFileSync(messagePath, "utf8"),
+					"Use the approved schema.",
+				);
+				assert.match(
+					scriptPreamble,
+					/# Subagent resume script for Resume worker/,
+				);
+				assert.match(
+					scriptPreamble,
+					new RegExp(`# Resume message file: ${messagePath}`),
+				);
+			} finally {
+				if (previousAgentDir === undefined)
+					delete process.env.PI_CODING_AGENT_DIR;
+				else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+			}
+		});
+	});
+
+	it("keeps a resumed session interactive when auto-exit is disabled", async () => {
+		await withFixture(async ({ root, sessionDir }) => {
+			const sessionFile = join(root, "interactive.jsonl");
+			writeFileSync(sessionFile, "existing session\n");
+			let command = "";
+			const running = await launchPiSubagent(
+				{
+					kind: "resume",
+					id: "resume-interactive",
+					name: "Interactive resume",
+					sessionFile,
+					parent: { sessionId: "parent", sessionDir },
+					behavior: { autoExit: false },
+				},
+				{
+					createPane: () => "pane-interactive",
+					createWorktree: () => {
+						throw new Error("a resume must not create a worktree");
+					},
+					waitForShellReady: async () => {},
+					runScript: (_surface, value, options) => {
+						command = value;
+						return options.scriptPath;
+					},
+				},
+			);
+
+			assert.equal(running.task, "resumed session");
+			assert.equal(running.interactive, true);
+			assert.doesNotMatch(command, /PI_SUBAGENT_AUTO_EXIT/);
+			assert.doesNotMatch(command, /'@[^']+\.md'/);
+		});
+	});
+
 	it("records worktree ownership before creation and targets its root pane", async () => {
 		await withFixture(async ({ request, project, sessionDir, root }) => {
 			execFileSync("git", ["init", "-q"], { cwd: project });
@@ -166,7 +294,7 @@ describe("fresh Pi launch", () => {
 			);
 			const events: string[] = [];
 			let command = "";
-			const operations: FreshPiLaunchOperations = {
+			const operations: PiLaunchOperations = {
 				createPane() {
 					throw new Error("unexpected pane creation");
 				},
@@ -199,7 +327,7 @@ describe("fresh Pi launch", () => {
 				},
 			};
 
-			const running = await launchFreshPiSubagent(worktreeRequest, operations);
+			const running = await launchPiSubagent(worktreeRequest, operations);
 
 			assert.deepEqual(events, ["create", "ready", "run"]);
 			assert.equal(running.worktree?.baseSha, baseSha);
@@ -231,7 +359,7 @@ describe("fresh Pi launch", () => {
 				"worktree-runs",
 				"child-1.json",
 			);
-			const operations: FreshPiLaunchOperations = {
+			const operations: PiLaunchOperations = {
 				createPane() {
 					throw new Error("unexpected pane creation");
 				},
@@ -253,7 +381,7 @@ describe("fresh Pi launch", () => {
 			};
 
 			await assert.rejects(
-				launchFreshPiSubagent(
+				launchPiSubagent(
 					{ ...request, worktree: { branch: "issue/7-failed" } },
 					operations,
 				),

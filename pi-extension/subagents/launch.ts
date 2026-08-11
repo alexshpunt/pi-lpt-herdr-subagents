@@ -49,6 +49,7 @@ export interface WorktreeHandoff extends WorktreeLaunch {
 }
 
 export interface FreshPiLaunchRequest {
+	kind: "fresh";
 	id?: string;
 	name: string;
 	task: string;
@@ -79,7 +80,25 @@ export interface FreshPiLaunchRequest {
 	};
 }
 
-export interface FreshPiRunningChild {
+export interface ResumePiLaunchRequest {
+	kind: "resume";
+	id?: string;
+	name: string;
+	sessionFile: string;
+	message?: string;
+	parent: {
+		sessionId: string;
+		sessionDir: string;
+	};
+	behavior?: {
+		autoExit?: boolean;
+		interactive?: boolean;
+	};
+}
+
+export type PiLaunchRequest = FreshPiLaunchRequest | ResumePiLaunchRequest;
+
+export interface PiRunningChild {
 	id: string;
 	name: string;
 	task: string;
@@ -90,12 +109,12 @@ export interface FreshPiRunningChild {
 	launchScriptFile: string;
 	activityFile: string;
 	interactive: boolean;
-	runtimePlan: ResolvedRuntimePlan;
+	runtimePlan: ResolvedRuntimePlan | undefined;
 	worktree?: WorktreeLaunch;
 	lifecycle: SubagentLifecycle;
 }
 
-export interface FreshPiLaunchOperations {
+export interface PiLaunchOperations {
 	createPane(name: string): string;
 	createWorktree(
 		name: string,
@@ -111,7 +130,7 @@ export interface FreshPiLaunchOperations {
 	): string;
 }
 
-const defaultOperations: FreshPiLaunchOperations = {
+const defaultOperations: PiLaunchOperations = {
 	createPane: createSubagentPane,
 	createWorktree: createSubagentWorktree,
 	waitForShellReady,
@@ -149,13 +168,22 @@ interface PreparedArtifacts extends PreparedSession {
 }
 
 /**
- * Launch one validated fresh Pi-backed request. Lifecycle watching and parent
+ * Launch one validated Pi-backed request. Lifecycle watching and parent
  * delivery begin only after this transaction returns the running child.
  */
-export async function launchFreshPiSubagent(
+export async function launchPiSubagent(
+	request: PiLaunchRequest,
+	operations: PiLaunchOperations = defaultOperations,
+): Promise<PiRunningChild> {
+	return request.kind === "resume"
+		? launchResumedPiSubagent(request, operations)
+		: launchFreshPiSubagent(request, operations);
+}
+
+async function launchFreshPiSubagent(
 	request: FreshPiLaunchRequest,
-	operations: FreshPiLaunchOperations = defaultOperations,
-): Promise<FreshPiRunningChild> {
+	operations: PiLaunchOperations,
+): Promise<PiRunningChild> {
 	const resolved = resolveLaunchRequest(request);
 	const surface = prepareLaunchSurface(resolved, operations);
 
@@ -224,7 +252,7 @@ function resolveLaunchRequest(request: FreshPiLaunchRequest): ResolvedLaunch {
 
 function prepareLaunchSurface(
 	resolved: ResolvedLaunch,
-	operations: FreshPiLaunchOperations,
+	operations: PiLaunchOperations,
 ): PreparedSurface {
 	const { request } = resolved;
 	if (!request.worktree) {
@@ -332,7 +360,7 @@ function prepareChildSession(
 
 async function confirmShellReady(
 	session: PreparedSession,
-	operations: FreshPiLaunchOperations,
+	operations: PiLaunchOperations,
 ): Promise<void> {
 	await operations.waitForShellReady(session.surface);
 }
@@ -457,7 +485,7 @@ function startPiProcess(
 	resolved: ResolvedLaunch,
 	artifacts: PreparedArtifacts,
 	command: string,
-	operations: FreshPiLaunchOperations,
+	operations: PiLaunchOperations,
 ): string {
 	const launchScriptFile = join(
 		resolved.artifactDir,
@@ -481,7 +509,7 @@ function createRunningChild(
 	resolved: ResolvedLaunch,
 	artifacts: PreparedArtifacts,
 	launchScriptFile: string,
-): FreshPiRunningChild {
+): PiRunningChild {
 	return {
 		id: resolved.id,
 		name: resolved.request.name,
@@ -496,6 +524,87 @@ function createRunningChild(
 		runtimePlan: resolved.request.runtimePlan,
 		worktree: artifacts.worktree,
 		lifecycle: createLifecycle(resolved.startTime),
+	};
+}
+
+async function launchResumedPiSubagent(
+	request: ResumePiLaunchRequest,
+	operations: PiLaunchOperations,
+): Promise<PiRunningChild> {
+	const id = request.id ?? Math.random().toString(16).slice(2, 10);
+	const autoExit = request.behavior?.autoExit ?? true;
+	const interactive = request.behavior?.interactive ?? !autoExit;
+	const startTime = Date.now();
+	const artifactDir = join(
+		request.parent.sessionDir,
+		"artifacts",
+		request.parent.sessionId,
+	);
+	const surface = operations.createPane(request.name);
+	await operations.waitForShellReady(surface);
+	const activityFile = getSubagentActivityFile(artifactDir, id);
+	mkdirSync(dirname(activityFile), { recursive: true });
+
+	let messageFile: string | undefined;
+	if (request.message) {
+		messageFile = join(
+			artifactDir,
+			"subagent-resume",
+			`${safeName(request.name) || "resume"}-${timestampForFile(false)}.md`,
+		);
+		mkdirSync(dirname(messageFile), { recursive: true });
+		writeFileSync(messageFile, request.message, "utf8");
+	}
+
+	const env = [
+		...(process.env.PI_CODING_AGENT_DIR
+			? [`PI_CODING_AGENT_DIR=${shellQuote(process.env.PI_CODING_AGENT_DIR)}`]
+			: []),
+		`PI_SUBAGENT_NAME=${shellQuote(request.name)}`,
+		`PI_SUBAGENT_SESSION=${shellQuote(request.sessionFile)}`,
+		`PI_SUBAGENT_ID=${shellQuote(id)}`,
+		`PI_SUBAGENT_ACTIVITY_FILE=${shellQuote(activityFile)}`,
+		...(autoExit ? ["PI_SUBAGENT_AUTO_EXIT=1"] : []),
+	];
+	const command = [
+		...env,
+		"pi",
+		"--session",
+		shellQuote(request.sessionFile),
+		"-e",
+		shellQuote(join(SUBAGENTS_DIR, "subagent-done.ts")),
+		...(messageFile ? [shellQuote(`@${messageFile}`)] : []),
+	].join(" ");
+	const launchScriptFile = operations.runScript(
+		surface,
+		`${command}; echo '__SUBAGENT_DONE_'$?'__'`,
+		{
+			scriptPath: join(
+				artifactDir,
+				"subagent-scripts",
+				`${safeName(request.name) || "resume"}-resume-${Date.now()}.sh`,
+			),
+			scriptPreamble: [
+				`# Subagent resume script for ${request.name}`,
+				`# Generated: ${new Date().toISOString()}`,
+				`# Session: ${request.sessionFile}`,
+				`# Surface: ${surface}`,
+				...(messageFile ? [`# Resume message file: ${messageFile}`] : []),
+			].join("\n"),
+		},
+	);
+	return {
+		id,
+		name: request.name,
+		task: request.message ?? "resumed session",
+		surface,
+		startTime,
+		sessionFile: request.sessionFile,
+		launchScriptFile,
+		activityFile,
+		interactive,
+		runtimePlan: undefined,
+		lifecycle: createLifecycle(startTime),
 	};
 }
 

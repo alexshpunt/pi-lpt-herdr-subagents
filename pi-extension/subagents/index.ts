@@ -18,11 +18,9 @@ import {
 	readdirSync,
 	readFileSync,
 	realpathSync,
-	writeFileSync,
 	existsSync,
 	mkdirSync,
 	rmSync,
-	renameSync,
 	statSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -122,6 +120,15 @@ import {
 	type SubagentLifecycle,
 	type PaneInspection,
 } from "./lifecycle.ts";
+import {
+	captureWorktreeHandoff,
+	launchPiSubagent,
+	persistWorktreeResult,
+	runSubagentScript,
+	writeWorktreeManifest,
+	type WorktreeHandoff,
+	type WorktreeLaunch,
+} from "./launch.ts";
 
 /** Absolute path to `pi-extension/subagents`. https://github.com/nodejs/node/issues/37845 */
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -834,122 +841,6 @@ function resolveGitCommit(cwd: string, ref: string): string {
 	}).trim();
 }
 
-function writeWorktreeManifest(
-	path: string,
-	value: Record<string, unknown>,
-): void {
-	mkdirSync(dirname(path), { recursive: true });
-	let existing: Record<string, unknown> = {};
-	if (existsSync(path)) {
-		try {
-			existing = JSON.parse(readFileSync(path, "utf8"));
-		} catch {
-			// Replace malformed legacy state with a fresh manifest below.
-			existing = {};
-		}
-	}
-	const tempPath = `${path}.tmp`;
-	writeFileSync(
-		tempPath,
-		`${JSON.stringify(
-			{
-				...existing,
-				...value,
-				version: 1,
-				kind: "worktree-run",
-				owner: "pi-herdr-subagents",
-				updatedAt: Date.now(),
-			},
-			null,
-			2,
-		)}\n`,
-	);
-	renameSync(tempPath, path);
-}
-
-function gitPathList(cwd: string, args: string[]): string[] {
-	return execFileSync("git", args, { cwd, encoding: "utf8" })
-		.split("\0")
-		.filter(Boolean);
-}
-
-function captureWorktreeHandoff(worktree: WorktreeLaunch): WorktreeHandoff {
-	try {
-		const headSha = resolveGitCommit(worktree.path, "HEAD");
-		const status = execFileSync(
-			"git",
-			["status", "--porcelain=v1", "--untracked-files=all", "-z"],
-			{ cwd: worktree.path, encoding: "utf8" },
-		);
-		const untrackedFiles = gitPathList(worktree.path, [
-			"ls-files",
-			"--others",
-			"--exclude-standard",
-			"-z",
-		]);
-		const conflictedFiles = gitPathList(worktree.path, [
-			"diff",
-			"--name-only",
-			"--diff-filter=U",
-			"-z",
-		]);
-		const changedFiles = new Set([
-			...gitPathList(worktree.path, [
-				"diff",
-				"--name-only",
-				"-z",
-				`${worktree.baseSha}...HEAD`,
-			]),
-			...gitPathList(worktree.path, ["diff", "--name-only", "-z"]),
-			...gitPathList(worktree.path, ["diff", "--cached", "--name-only", "-z"]),
-			...untrackedFiles,
-		]);
-		const commitsAhead = Number.parseInt(
-			execFileSync(
-				"git",
-				["rev-list", "--count", `${worktree.baseSha}..HEAD`],
-				{
-					cwd: worktree.path,
-					encoding: "utf8",
-				},
-			).trim(),
-			10,
-		);
-		return {
-			...worktree,
-			headSha,
-			commitsAhead: Number.isFinite(commitsAhead) ? commitsAhead : 0,
-			clean: status.length === 0,
-			conflicted: conflictedFiles.length > 0,
-			changedFiles: [...changedFiles].sort(),
-			untrackedFiles: untrackedFiles.sort(),
-		};
-	} catch (error: any) {
-		return {
-			...worktree,
-			headSha: null,
-			commitsAhead: null,
-			clean: null,
-			conflicted: null,
-			changedFiles: null,
-			untrackedFiles: null,
-			gitError: error?.message ?? String(error),
-		};
-	}
-}
-
-function persistWorktreeResult(
-	worktree: WorktreeLaunch,
-	state: "running" | "ready_for_review" | "failed" | "needs_help",
-	handoff?: WorktreeHandoff,
-): void {
-	writeWorktreeManifest(worktree.manifestFile, {
-		state,
-		...worktree,
-		...handoff,
-	});
-}
-
 function shouldRetainSubagentSurface(
 	running: Pick<RunningSubagent, "worktree"> | { worktree?: unknown },
 ): boolean {
@@ -980,31 +871,6 @@ function resolveWorktreeLaunchWarning(
 	return warning && loadAgentDefaults(params.agent, pi)?.source === "package"
 		? warning
 		: undefined;
-}
-
-function runSubagentScript(
-	surface: string,
-	command: string,
-	options: Parameters<typeof runScriptInPane>[2],
-	worktree?: WorktreeLaunch,
-	run: typeof runScriptInPane = runScriptInPane,
-): string {
-	if (worktree) persistWorktreeResult(worktree, "running");
-	try {
-		return run(surface, command, options);
-	} catch (error: any) {
-		if (!worktree) throw error;
-		const handoff = captureWorktreeHandoff(worktree);
-		try {
-			persistWorktreeResult(worktree, "failed", handoff);
-		} catch {
-			// The launch error remains authoritative when manifest persistence fails.
-		}
-		throw new Error(
-			`Failed to launch subagent; worktree retained at ${worktree.path} ` +
-				`(workspace ${worktree.workspaceId}): ${error?.message ?? String(error)}`,
-		);
-	}
 }
 
 function finalizeSubagentSurface(
@@ -1202,27 +1068,6 @@ function resolveResultPresentation(
 		? `\n\nRuntime warning: ${runtimeMismatch}`
 		: "";
 	return boundResultPresentation(body, sessionRef + runtimeWarning);
-}
-
-interface WorktreeLaunch {
-	path: string;
-	workspaceId: string;
-	paneId: string;
-	branch: string;
-	baseRef: string;
-	baseSha: string;
-	manifestFile: string;
-	sessionFile?: string;
-}
-
-interface WorktreeHandoff extends WorktreeLaunch {
-	headSha: string | null;
-	commitsAhead: number | null;
-	clean: boolean | null;
-	conflicted: boolean | null;
-	changedFiles: string[] | null;
-	untrackedFiles: string[] | null;
-	gitError?: string;
 }
 
 /**
@@ -1919,14 +1764,6 @@ function startStatusRefresh(pi: ExtensionAPI) {
 	(globalThis as any)[STATUS_INTERVAL_KEY] = statusInterval;
 }
 
-function resolveResumeLaunchBehavior(params: { autoExit?: boolean }): {
-	autoExit: boolean;
-	interactive: boolean;
-} {
-	const autoExit = params.autoExit ?? true;
-	return { autoExit, interactive: !autoExit };
-}
-
 function buildBtwLaunchCommand(params: {
 	cwd: string;
 	sessionFile: string;
@@ -2022,7 +1859,6 @@ export const __test__ = {
 	resolveResultPresentation,
 	resolveUnexpectedErrorPresentation,
 	sendSubagentResult,
-	resolveResumeLaunchBehavior,
 	shouldRetainSubagentSurface,
 	resolveWorktreeLaunchWarning,
 	captureWorktreeHandoff,
@@ -2108,9 +1944,46 @@ async function launchSubagent(
 	const effectiveModel = runtimePlan.model;
 	const effectiveTools = params.tools ?? agentDefs?.tools;
 	const effectiveSkills = params.skills ?? agentDefs?.skills;
-	const effectiveThinking = runtimePlan.thinking;
 	const effectiveAutoExit = resolveEffectiveAutoExit(params, agentDefs);
 	const effectiveInteractive = resolveEffectiveInteractive(params, agentDefs);
+	const parentSessionFile = ctx.sessionManager.getSessionFile();
+	if (!parentSessionFile) throw new Error("No session file");
+
+	if (agentDefs?.cli !== "claude") {
+		const running = await launchPiSubagent({
+			kind: "fresh",
+			id,
+			name: params.name,
+			task: params.task,
+			agent: params.agent,
+			cwd: params.cwd,
+			worktree: params.worktree,
+			fork: params.fork,
+			surface: options?.surface,
+			parent: {
+				cwd: ctx.cwd,
+				invocationCwd: process.cwd(),
+				sessionFile: parentSessionFile,
+				sessionId: ctx.sessionManager.getSessionId(),
+				sessionDir: ctx.sessionManager.getSessionDir(),
+				agentDir: getAgentConfigDir(),
+			},
+			runtimePlan,
+			behavior: {
+				tools: effectiveTools,
+				skills: effectiveSkills,
+				deniedTools: [...resolveDenyTools(agentDefs)],
+				autoExit: effectiveAutoExit,
+				interactive: effectiveInteractive,
+				identity: agentDefs?.body ?? params.systemPrompt,
+				systemPromptMode: agentDefs?.systemPromptMode,
+				sessionMode: resolveEffectiveSessionMode(params, agentDefs),
+				cwd: agentDefs?.cwd,
+			},
+		});
+		runningSubagents.set(id, running);
+		return running;
+	}
 
 	if (
 		agentDefs?.cli === "claude" &&
@@ -2122,8 +1995,7 @@ async function launchSubagent(
 		);
 	}
 
-	const sessionFile = ctx.sessionManager.getSessionFile();
-	if (!sessionFile) throw new Error("No session file");
+	const sessionFile = parentSessionFile;
 	const sessionId = ctx.sessionManager.getSessionId();
 	const artifactDir = getArtifactDir(
 		ctx.sessionManager.getSessionDir(),
@@ -2131,7 +2003,6 @@ async function launchSubagent(
 	);
 
 	const resolvedPaths = resolveSubagentPaths(params, agentDefs);
-	let localAgentDir = resolvedPaths.localAgentDir;
 	let effectiveAgentDir = resolvedPaths.effectiveAgentDir;
 	const sourceCwd = resolvedPaths.effectiveCwd ?? ctx.cwd;
 	let targetCwdForSession = sourceCwd;
@@ -2200,10 +2071,7 @@ async function launchSubagent(
 
 		const isolatedAgentDir = join(created.path, ".pi", "agent");
 		if (existsSync(isolatedAgentDir)) {
-			localAgentDir = isolatedAgentDir;
 			effectiveAgentDir = isolatedAgentDir;
-		} else {
-			localAgentDir = null;
 		}
 	} else {
 		surface = options?.surface ?? createSubagentPane(params.name);
@@ -2253,28 +2121,8 @@ async function launchSubagent(
 
 	const activityFile = getSubagentActivityFile(artifactDir, id);
 	mkdirSync(dirname(activityFile), { recursive: true });
-	const { inheritsConversationContext } = launchBehavior;
-
-	// Build the task message
-	// Only full-context fork mode inherits prior conversation state.
-	// Blank-session modes need the wrapper instructions and artifact-backed handoff.
-	const modeHint = effectiveAutoExit
-		? "Complete your task autonomously."
-		: "Complete your task. When finished, call the subagent_done tool. The user can interact with you at any time.";
-	const summaryInstruction = effectiveAutoExit
-		? "Your FINAL assistant message should summarize what you accomplished."
-		: "Your FINAL assistant message (before calling subagent_done or before the user exits) should summarize what you accomplished.";
-	const denySet = resolveDenyTools(agentDefs);
-	const identity = agentDefs?.body ?? params.systemPrompt ?? null;
-	const systemPromptMode = agentDefs?.systemPromptMode;
-	const identityInSystemPrompt = systemPromptMode && identity;
-	const roleBlock =
-		identity && !identityInSystemPrompt ? `\n\n${identity}` : "";
-	const fullTask = inheritsConversationContext
-		? params.task
-		: `${roleBlock}\n\n${modeHint}\n\n${params.task}\n\n${summaryInstruction}`;
 	// ── Claude Code CLI path ──
-	if (agentDefs?.cli === "claude") {
+	{
 		const sentinelFile = `/tmp/pi-claude-${id}-done`;
 		const pluginDir = join(SUBAGENTS_DIR, "plugin");
 
@@ -2338,168 +2186,6 @@ async function launchSubagent(
 		runningSubagents.set(id, running);
 		return running;
 	}
-
-	// ── Pi CLI path ──
-
-	// Build pi command
-	const parts: string[] = ["pi"];
-	parts.push("--session", shellQuote(subagentSessionFile));
-
-	const subagentDonePath = join(SUBAGENTS_DIR, "subagent-done.ts");
-	parts.push("-e", shellQuote(subagentDonePath));
-
-	if (effectiveModel) {
-		parts.push("--model", shellQuote(effectiveModel));
-	}
-	if (effectiveThinking) {
-		parts.push("--thinking", shellQuote(effectiveThinking));
-	}
-
-	// Pass agent body as system prompt via file to avoid shell escaping issues
-	// with multiline content. Pi's --append-system-prompt and --system-prompt
-	// auto-detect file paths and read their contents.
-	if (identityInSystemPrompt && identity) {
-		const flag =
-			systemPromptMode === "replace"
-				? "--system-prompt"
-				: "--append-system-prompt";
-		const spTimestamp = new Date()
-			.toISOString()
-			.replace(/[:.]/g, "-")
-			.slice(0, 19);
-		const spSafeName = params.name
-			.toLowerCase()
-			.replace(/[^a-z0-9\s-]/g, "")
-			.replace(/\s+/g, "-")
-			.replace(/-+/g, "-")
-			.replace(/^-|-$/g, "");
-		const syspromptPath = join(
-			artifactDir,
-			`context/${spSafeName || "subagent"}-sysprompt-${spTimestamp}.md`,
-		);
-		mkdirSync(dirname(syspromptPath), { recursive: true });
-		writeFileSync(syspromptPath, identity, "utf8");
-		parts.push(flag, shellQuote(syspromptPath));
-	}
-
-	const toolAllowlist = buildSubagentToolAllowlist(effectiveTools);
-	if (toolAllowlist) {
-		parts.push("--tools", shellQuote(toolAllowlist));
-	}
-
-	// Build env prefix: denied tools + subagent identity + config dir propagation
-	const envParts: string[] = [];
-
-	// If the target cwd has its own .pi/agent/, use that as the config root.
-	// Otherwise propagate the current/global agent dir.
-	if (localAgentDir && existsSync(localAgentDir)) {
-		envParts.push(`PI_CODING_AGENT_DIR=${shellQuote(localAgentDir)}`);
-	} else if (process.env.PI_CODING_AGENT_DIR) {
-		envParts.push(
-			`PI_CODING_AGENT_DIR=${shellQuote(process.env.PI_CODING_AGENT_DIR)}`,
-		);
-	}
-
-	if (denySet.size > 0) {
-		envParts.push(`PI_DENY_TOOLS=${shellQuote([...denySet].join(","))}`);
-	}
-	envParts.push(`PI_SUBAGENT_NAME=${shellQuote(params.name)}`);
-	if (params.agent) {
-		envParts.push(`PI_SUBAGENT_AGENT=${shellQuote(params.agent)}`);
-	}
-	if (effectiveAutoExit) {
-		envParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
-	}
-	envParts.push(`PI_SUBAGENT_SESSION=${shellQuote(subagentSessionFile)}`);
-	envParts.push(`PI_SUBAGENT_ID=${shellQuote(id)}`);
-	envParts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellQuote(activityFile)}`);
-	envParts.push(`PI_SUBAGENT_SURFACE=${shellQuote(surface)}`);
-	const envPrefix = envParts.join(" ") + " ";
-
-	// Pass task and skill prompts to the sub-agent.
-	// Only full-context fork mode gets a direct task argument because it already
-	// inherits the parent conversation. Blank-session modes use artifact-backed
-	// handoff so the wrapper instructions arrive as the initial user message.
-	let taskArg: string;
-	if (launchBehavior.taskDelivery === "direct") {
-		taskArg = fullTask;
-	} else {
-		const timestamp = new Date()
-			.toISOString()
-			.replace(/[:.]/g, "-")
-			.slice(0, 19);
-		const safeName = params.name
-			.toLowerCase()
-			.replace(/[^a-z0-9\s-]/g, "") // strip everything except alphanumeric, spaces, hyphens
-			.replace(/\s+/g, "-") // spaces to hyphens
-			.replace(/-+/g, "-") // collapse multiple hyphens
-			.replace(/^-|-$/g, ""); // trim leading/trailing hyphens
-		const artifactName = `context/${safeName || "subagent"}-${timestamp}.md`;
-		const artifactPath = join(artifactDir, artifactName);
-		mkdirSync(dirname(artifactPath), { recursive: true });
-		writeFileSync(artifactPath, fullTask, "utf8");
-		taskArg = `@${artifactPath}`;
-	}
-
-	for (const promptArg of buildPiPromptArgs({
-		effectiveSkills,
-		taskDelivery: launchBehavior.taskDelivery,
-		taskArg,
-	})) {
-		parts.push(shellQuote(promptArg));
-	}
-
-	// Session placement, PI_CODING_AGENT_DIR, and command cwd must agree.
-	const cdPrefix = `cd ${shellQuote(targetCwdForSession)} && `;
-
-	const piCommand = cdPrefix + envPrefix + parts.join(" ");
-	const command = `${piCommand}; echo '__SUBAGENT_DONE_'$?'__'`;
-	const launchScriptName = `${
-		(params.name || "subagent")
-			.toLowerCase()
-			.replace(/[^a-z0-9\s-]/g, "")
-			.replace(/\s+/g, "-")
-			.replace(/-+/g, "-")
-			.replace(/^-|-$/g, "") || "subagent"
-	}-${id}.sh`;
-	const launchScriptFile = join(
-		artifactDir,
-		"subagent-scripts",
-		launchScriptName,
-	);
-	runSubagentScript(
-		surface,
-		command,
-		{
-			scriptPath: launchScriptFile,
-			scriptPreamble: [
-				`# Subagent launch script for ${params.name}`,
-				`# Generated: ${new Date().toISOString()}`,
-				`# Session: ${subagentSessionFile}`,
-				`# Surface: ${surface}`,
-			].join("\n"),
-		},
-		worktree,
-	);
-
-	const running: RunningSubagent = {
-		id,
-		name: params.name,
-		task: params.task,
-		agent: params.agent,
-		surface,
-		startTime,
-		sessionFile: subagentSessionFile,
-		launchScriptFile,
-		activityFile,
-		interactive: effectiveInteractive,
-		runtimePlan,
-		worktree,
-		lifecycle: createLifecycle(startTime),
-	};
-
-	runningSubagents.set(id, running);
-	return running;
 }
 
 /**
@@ -4205,8 +3891,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				const name = params.name ?? "Resume";
-				const { autoExit, interactive } = resolveResumeLaunchBehavior(params);
-				const startTime = Date.now();
 				const id = Math.random().toString(16).slice(2, 10);
 
 				if (!isTerminalAvailable()) {
@@ -4228,107 +3912,18 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				// Record entry count before resuming so we can extract new messages
 				const entryCountBefore = getNewEntries(params.sessionPath, 0).length;
 
-				const surface = createSubagentPane(name);
-				await waitForShellReady(surface);
-
-				// Build pi resume command
-				const parts = ["pi", "--session", shellQuote(params.sessionPath)];
-
-				// Load subagent-done extension so the agent can self-terminate if needed
-				const subagentDonePath = join(SUBAGENTS_DIR, "subagent-done.ts");
-				parts.push("-e", shellQuote(subagentDonePath));
-
-				const sessionId = ctx.sessionManager.getSessionId();
-				const artifactDir = getArtifactDir(
-					ctx.sessionManager.getSessionDir(),
-					sessionId,
-				);
-				const activityFile = getSubagentActivityFile(artifactDir, id);
-				mkdirSync(dirname(activityFile), { recursive: true });
-
-				let resumeMsgFile: string | undefined;
-				if (params.message) {
-					const msgTimestamp = new Date()
-						.toISOString()
-						.replace(/[:.]/g, "-")
-						.slice(0, 19);
-					resumeMsgFile = join(
-						artifactDir,
-						"subagent-resume",
-						`${
-							name
-								.toLowerCase()
-								.replace(/[^a-z0-9\s-]/g, "")
-								.replace(/\s+/g, "-")
-								.replace(/-+/g, "-")
-								.replace(/^-|-$/g, "") || "resume"
-						}-${msgTimestamp}.md`,
-					);
-					mkdirSync(dirname(resumeMsgFile), { recursive: true });
-					writeFileSync(resumeMsgFile, params.message, "utf8");
-					parts.push(shellQuote(`@${resumeMsgFile}`));
-				}
-
-				// Build env prefix — propagate PI_CODING_AGENT_DIR for config isolation
-				const resumeEnvParts: string[] = [];
-				if (process.env.PI_CODING_AGENT_DIR) {
-					resumeEnvParts.push(
-						`PI_CODING_AGENT_DIR=${shellQuote(process.env.PI_CODING_AGENT_DIR)}`,
-					);
-				}
-				resumeEnvParts.push(`PI_SUBAGENT_NAME=${shellQuote(name)}`);
-				resumeEnvParts.push(
-					`PI_SUBAGENT_SESSION=${shellQuote(params.sessionPath)}`,
-				);
-				resumeEnvParts.push(`PI_SUBAGENT_ID=${shellQuote(id)}`);
-				resumeEnvParts.push(
-					`PI_SUBAGENT_ACTIVITY_FILE=${shellQuote(activityFile)}`,
-				);
-				if (autoExit) {
-					resumeEnvParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
-				}
-				const resumeEnvPrefix = resumeEnvParts.join(" ") + " ";
-
-				const command = `${resumeEnvPrefix}${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
-				const launchScriptFile = join(
-					artifactDir,
-					"subagent-scripts",
-					`${
-						name
-							.toLowerCase()
-							.replace(/[^a-z0-9\s-]/g, "")
-							.replace(/\s+/g, "-")
-							.replace(/-+/g, "-")
-							.replace(/^-|-$/g, "") || "resume"
-					}-resume-${Date.now()}.sh`,
-				);
-				runScriptInPane(surface, command, {
-					scriptPath: launchScriptFile,
-					scriptPreamble: [
-						`# Subagent resume script for ${name}`,
-						`# Generated: ${new Date().toISOString()}`,
-						`# Session: ${params.sessionPath}`,
-						`# Surface: ${surface}`,
-						...(resumeMsgFile
-							? [`# Resume message file: ${resumeMsgFile}`]
-							: []),
-					].join("\n"),
-				});
-
-				// Register as a running subagent for widget tracking
-				const running: RunningSubagent = {
+				const running: RunningSubagent = await launchPiSubagent({
+					kind: "resume",
 					id,
 					name,
-					task: params.message ?? "resumed session",
-					surface,
-					startTime,
 					sessionFile: params.sessionPath,
-					launchScriptFile,
-					activityFile,
-					interactive,
-					runtimePlan: undefined,
-					lifecycle: createLifecycle(startTime),
-				};
+					message: params.message,
+					parent: {
+						sessionId: ctx.sessionManager.getSessionId(),
+						sessionDir: ctx.sessionManager.getSessionDir(),
+					},
+					behavior: { autoExit: params.autoExit },
+				});
 				runningSubagents.set(id, running);
 				startWidgetRefresh();
 				startStatusRefresh(pi);
@@ -4426,7 +4021,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 						id,
 						name,
 						sessionPath: params.sessionPath,
-						launchScriptFile,
+						launchScriptFile: running.launchScriptFile,
 						status: "started",
 					},
 				};

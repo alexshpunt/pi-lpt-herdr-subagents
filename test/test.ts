@@ -3121,19 +3121,6 @@ describe("tool registration", () => {
 		}
 	});
 
-	it("defaults resumed subagents to auto-exit and non-interactive tracking", () => {
-		const testApi = (subagentsModule as any).__test__;
-
-		assert.deepEqual(testApi.resolveResumeLaunchBehavior({}), {
-			autoExit: true,
-			interactive: false,
-		});
-		assert.deepEqual(testApi.resolveResumeLaunchBehavior({ autoExit: false }), {
-			autoExit: false,
-			interactive: true,
-		});
-	});
-
 	it("expands spawning false to deny subagent interruption", () => {
 		const testApi = (subagentsModule as any).__test__;
 		const denied = testApi.resolveDenyTools({ spawning: false });

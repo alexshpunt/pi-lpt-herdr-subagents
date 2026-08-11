@@ -1618,8 +1618,14 @@ describe("subagent discovery", () => {
 			/select three distinct exact authenticated model IDs/i,
 		);
 		assert.match(instructions, /prefer different\s+providers/i);
-		assert.match(instructions, /reuse the same three model IDs for the Skeptic/i);
-		assert.match(instructions, /final assistant message is its complete report/i);
+		assert.match(
+			instructions,
+			/reuse the same three model IDs for the Skeptic/i,
+		);
+		assert.match(
+			instructions,
+			/final assistant message is its complete report/i,
+		);
 		assert.doesNotMatch(instructions, /tools:\s*["']read,bash,write["']/);
 	});
 
@@ -1912,7 +1918,7 @@ describe("subagent discovery", () => {
 			assert.deepEqual(
 				new Set(
 					result.details.diagnostics.map((diagnostic: any) => diagnostic.code),
-					),
+				),
 				new Set(["duplicate-package-role", "bundled-role-collision"]),
 			);
 			assert.match(result.content[0].text, /multiple role packs/i);
@@ -3891,10 +3897,7 @@ describe("subagent interruption", () => {
 			presentation,
 			/After review and preservation, remove the workspace with:/,
 		);
-		assert.match(
-			presentation,
-			/herdr worktree remove --workspace w9/,
-		);
+		assert.match(presentation, /herdr worktree remove --workspace w9/);
 		assert.equal(testApi.shouldRetainSubagentSurface({ worktree }), true);
 		assert.equal(testApi.shouldRetainSubagentSurface({}), false);
 	});
@@ -4880,8 +4883,8 @@ describe("herdr.ts", () => {
 				shellPid: 100,
 				foregroundProcessGroupId: 200,
 				pids: [100, 200, 201],
-	});
-});
+			});
+		});
 	});
 
 	describe("process exit confirmation", () => {

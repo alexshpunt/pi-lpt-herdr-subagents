@@ -1907,7 +1907,11 @@ async function launchSubagent(
 		};
 	},
 	parentThinking: ThinkingLevel,
-	options?: { surface?: string; runtimePlan?: ResolvedRuntimePlan; id?: string },
+	options?: {
+		surface?: string;
+		runtimePlan?: ResolvedRuntimePlan;
+		id?: string;
+	},
 ): Promise<RunningSubagent> {
 	const startTime = Date.now();
 	const id = options?.id ?? Math.random().toString(16).slice(2, 10);
@@ -2209,7 +2213,8 @@ function resolveSubagentRuntimePlans(
 			diagnostic?.message ?? `Agent "${params.agent}" was not found.`,
 		);
 	}
-	if (!ctx.model) throw new Error("Subagent launch requires a resolved parent model");
+	if (!ctx.model)
+		throw new Error("Subagent launch requires a resolved parent model");
 	const plans = resolveRuntimePlans(
 		{ model: params.model, thinking: params.thinking },
 		{
@@ -2224,10 +2229,14 @@ function resolveSubagentRuntimePlans(
 		wrapPiModelRegistry(ctx.modelRegistry),
 	);
 	if (agentDefs?.cli === "claude" && plans.length > 1) {
-		throw new Error("Model fallbacks are supported only for Pi-backed subagents.");
+		throw new Error(
+			"Model fallbacks are supported only for Pi-backed subagents.",
+		);
 	}
 	if (params.worktree && plans.length > 1) {
-		throw new Error("Model fallbacks are not supported for worktree subagents.");
+		throw new Error(
+			"Model fallbacks are not supported for worktree subagents.",
+		);
 	}
 	return plans;
 }
@@ -2242,11 +2251,15 @@ async function launchSubagentWithFallbacks(
 	for (const [index, plan] of plans.entries()) {
 		try {
 			return {
-				running: await launchSubagent(params, ctx, parentThinking, { runtimePlan: plan }),
+				running: await launchSubagent(params, ctx, parentThinking, {
+					runtimePlan: plan,
+				}),
 				index,
 			};
 		} catch (error) {
-			failures.push(`${plan.model}: ${error instanceof Error ? error.message : String(error)}`);
+			failures.push(
+				`${plan.model}: ${error instanceof Error ? error.message : String(error)}`,
+			);
 		}
 	}
 	throw new Error(
@@ -2752,9 +2765,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				return workflowFailure("cancelled", "Workflow cancelled.");
 			}
 			const sessionExists = existsSync(sessionFile);
-			const childEntries = sessionExists
-				? getNewEntries(sessionFile, 0)
-				: [];
+			const childEntries = sessionExists ? getNewEntries(sessionFile, 0) : [];
 			const finalAssistant = inspectFinalAssistantMessage(childEntries);
 			journal.append("agent_completed", {
 				id,
@@ -2762,9 +2773,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				sessionFile,
 				sessionExists,
 				exitCode: watched.exitCode,
-				...(watched.errorMessage
-					? { errorMessage: watched.errorMessage }
-					: {}),
+				...(watched.errorMessage ? { errorMessage: watched.errorMessage } : {}),
 				finalAssistantContentLength: finalAssistant.contentLength,
 				...(finalAssistant.stopReason
 					? { finalAssistantStopReason: finalAssistant.stopReason }
@@ -3464,12 +3473,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					params,
 					runtime.pi,
 				);
-				const { running, index: initialPlanIndex } = await launchSubagentWithFallbacks(
-					params,
-					ctx,
-					parentThinking,
-					runtimePlans,
-				);
+				const { running, index: initialPlanIndex } =
+					await launchSubagentWithFallbacks(
+						params,
+						ctx,
+						parentThinking,
+						runtimePlans,
+					);
 
 				// Create a separate AbortController for the watcher
 				// (the tool's signal completes when we return)
@@ -3492,12 +3502,18 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				)
 					.then(({ running: completedRunning, result }) => {
 						if (!shouldDeliverSubagentCompletion(completedRunning)) {
-							completedRunning.lifecycle = markDelivery(completedRunning.lifecycle, "suppressed");
+							completedRunning.lifecycle = markDelivery(
+								completedRunning.lifecycle,
+								"suppressed",
+							);
 							runningSubagents.delete(completedRunning.id);
 							updateWidget();
 							return;
 						}
-						completedRunning.lifecycle = markDelivery(completedRunning.lifecycle, "delivered");
+						completedRunning.lifecycle = markDelivery(
+							completedRunning.lifecycle,
+							"delivered",
+						);
 						runningSubagents.delete(completedRunning.id);
 						updateWidget();
 						const completionApi = selectCompletionApi(pi, runtime.pi);

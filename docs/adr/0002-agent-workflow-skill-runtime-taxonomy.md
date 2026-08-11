@@ -5,6 +5,7 @@
 - **Decision owners:** `acrnm`
 - **Scope:** `giuseppecrj/pi-herdr-agents`
 - **Historical tracking:** legacy issues #4 and #5 (not carried into the clean repository)
+- **Superseded in part by:** ADR-0008 removes the external CLI runtime adapter; implementation is pending
 
 ## Decision
 

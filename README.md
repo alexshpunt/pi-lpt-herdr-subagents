@@ -223,7 +223,7 @@ Multiple subagents run concurrently — each steers its result back independentl
 ╰─────────────────────────────────────────────────────────╯
 ```
 
-Completion messages render with a colored background and are expandable with `Ctrl+O`. Results larger than 16,000 characters are abbreviated in the parent context while preserving their beginning, conclusion, and session path; the complete result remains in the child session. The extension includes that bounded result directly in the user message that wakes Pi, avoiding empty turns caused by a separate context-free follow-up. Completed rows are removed from the widget as soon as their result is delivered or suppressed.
+Completion messages render with a colored background and are expandable with `Ctrl+O`. Results larger than 16,000 characters are abbreviated in the parent context while preserving their beginning, conclusion, and session path; the complete result remains in the child session. The extension includes that bounded result and a continuation instruction directly in the single custom `subagent_result` message that triggers or steers Pi, avoiding empty turns caused by a separate context-free wake-up. The renderer uses the unadorned bounded result from structured details. Completed rows are removed from the widget as soon as their result is delivered or suppressed.
 
 ### In-progress status updates
 

@@ -4128,24 +4128,35 @@ describe("subagent interruption", () => {
 		);
 	});
 
-	it("delivers bounded fresh and resumed results before a user-message wake-up", () => {
+	it("delivers bounded fresh and resumed results through one custom message", () => {
 		const testApi = (subagentsModule as any).__test__;
 
 		for (const name of ["fresh", "resumed"]) {
 			const { api, sentMessages, sentUserMessages } = createMockExtensionApi();
 			const sessionFile = `/tmp/${name}.jsonl`;
+			const details = {
+				name,
+				sessionFile,
+				fallbackAttempts: ["fake/primary", "fake/secondary"],
+				errorMessage: "provider failed",
+				runtimePlan: { model: "fake/secondary" },
+				worktree: { path: "/tmp/worktree" },
+			};
 			testApi.sendSubagentResult(
 				api,
 				`HEAD-${"x".repeat(18_000)}-TAIL\n\nSession: ${sessionFile}\nResume: pi --session ${sessionFile}`,
-				{ name, sessionFile },
+				details,
 			);
 
 			assert.equal(sentMessages.length, 1);
 			const delivered = sentMessages[0];
 			assert.equal(delivered.message.customType, "subagent_result");
-			assert.equal(
+			assert.ok(delivered.message.content.length <= 16_000);
+			assert.match(delivered.message.content, /HEAD-/);
+			assert.match(delivered.message.content, /-TAIL/);
+			assert.match(
 				delivered.message.content,
-				"Subagent completion follows in the next user message.",
+				/Parent action: Continue the parent task using this result/,
 			);
 			const resultContent = delivered.message.details.resultContent;
 			assert.ok(resultContent.length <= 16_000);
@@ -4156,19 +4167,15 @@ describe("subagent interruption", () => {
 				new RegExp(`Session: ${sessionFile.replace(".", "\\.")}`),
 			);
 			assert.doesNotMatch(resultContent, /Parent action:/);
-			assert.equal(delivered.message.details.sessionFile, sessionFile);
+			assert.deepEqual(delivered.message.details, {
+				...details,
+				resultContent,
+			});
 			assert.deepEqual(delivered.options, {
-				triggerTurn: false,
+				triggerTurn: true,
 				deliverAs: "steer",
 			});
-			assert.equal(sentUserMessages.length, 1);
-			assert.ok(sentUserMessages[0].length <= 16_000);
-			assert.match(sentUserMessages[0], /HEAD-/);
-			assert.match(sentUserMessages[0], /-TAIL/);
-			assert.match(
-				sentUserMessages[0],
-				/Parent action: Continue the parent task using this result/,
-			);
+			assert.equal(sentUserMessages.length, 0);
 		}
 	});
 });
@@ -4239,7 +4246,9 @@ describe("subagent status renderer", () => {
 			.renderer(
 				{
 					customType: "subagent_result",
-					content: "Subagent completion follows in the next user message.",
+					content:
+						'Sub-agent "Reviewer" completed (1s).\n\nDECISIVE_RESULT\n\n' +
+						"Parent action: Continue the parent task using this result.",
 					details: {
 						name: "Reviewer",
 						elapsed: 1,
@@ -4254,7 +4263,7 @@ describe("subagent status renderer", () => {
 			.join("\n");
 
 		assert.match(rendered, /DECISIVE_RESULT/);
-		assert.doesNotMatch(rendered, /completion follows/);
+		assert.doesNotMatch(rendered, /Parent action:/);
 	});
 
 	it("renders only capped lines plus overflow", () => {

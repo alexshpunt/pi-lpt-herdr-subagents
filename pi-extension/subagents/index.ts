@@ -911,8 +911,6 @@ const MAX_RESULT_PRESENTATION_CHARS = 16_000;
 const MAX_SESSION_REFERENCE_CHARS = 10_000;
 const RESULT_CONTINUATION_PROMPT =
 	"Parent action: Continue the parent task using this result; do not return an empty response.";
-const RESULT_UI_CONTEXT =
-	"Subagent completion follows in the next user message.";
 
 function abbreviateMiddle(
 	value: string,
@@ -971,7 +969,7 @@ function resolveUnexpectedErrorPresentation(
 }
 
 function sendSubagentResult(
-	api: Pick<ExtensionAPI, "sendMessage" | "sendUserMessage">,
+	api: Pick<ExtensionAPI, "sendMessage">,
 	content: string,
 	details: Record<string, unknown>,
 ): void {
@@ -983,13 +981,12 @@ function sendSubagentResult(
 	api.sendMessage(
 		{
 			customType: "subagent_result",
-			content: RESULT_UI_CONTEXT,
+			content: promptContent,
 			display: true,
 			details: { ...details, resultContent },
 		},
-		{ triggerTurn: false, deliverAs: "steer" },
+		{ triggerTurn: true, deliverAs: "steer" },
 	);
-	api.sendUserMessage(promptContent, { deliverAs: "steer" });
 }
 
 function formatWorktreeHandoff(worktree: WorktreeHandoff): string {

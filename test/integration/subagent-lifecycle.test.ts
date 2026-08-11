@@ -196,7 +196,9 @@ for (const backend of backends) {
 				let childScreen = "<pane unavailable>";
 				try {
 					childScreen = readPane(secondBtwPane, 200);
-				} catch {}
+				} catch {
+					// Keep the original wait error when diagnostic screen capture fails.
+				}
 				throw new Error(
 					`${error instanceof Error ? error.message : String(error)}\n` +
 						`Parent screen:\n${readPane(surface, 200)}\n` +
@@ -269,6 +271,86 @@ for (const backend of backends) {
 				);
 				assert.ok(header.id, "Session header should have an id");
 			}
+		});
+
+		it("delivers one model-visible custom completion message", async () => {
+			const id = uniqueId();
+			const childMarker = `CHILD_RESULT_${id}`;
+			const parentMarker = `PARENT_CONTINUED_${id}`;
+			const parentSession = join(env.dir, `single-result-parent-${id}.jsonl`);
+			const surface = createTrackedSurface(env, `single-result-${id}`);
+			await waitForPaneReady(surface);
+
+			startPi(
+				surface,
+				env.dir,
+				[
+					"Call the subagent tool with these EXACT parameters:",
+					`  name: "SingleResult-${id}"`,
+					'  agent: "test-echo"',
+					`  task: "Return exactly ${childMarker}"`,
+					"Do not do anything else. Just call the subagent tool once.",
+					`After you receive the subagent result, say ${parentMarker}.`,
+				].join("\n"),
+				{ extraArgs: `--session ${shellQuote(parentSession)}` },
+			);
+
+			let entries: any[] = [];
+			let customIndex = -1;
+			let continued = false;
+			const deadline = Date.now() + PI_TIMEOUT;
+			while (!continued && Date.now() < deadline) {
+				if (existsSync(parentSession)) {
+					entries = readFileSync(parentSession, "utf8")
+						.trim()
+						.split("\n")
+						.filter(Boolean)
+						.map((line) => JSON.parse(line));
+					customIndex = entries.findIndex(
+						(entry) =>
+							entry.type === "custom_message" &&
+							entry.customType === "subagent_result",
+					);
+					continued =
+						customIndex >= 0 &&
+						entries
+							.slice(customIndex + 1)
+							.some(
+								(entry) =>
+									entry.type === "message" &&
+									entry.message?.role === "assistant" &&
+									JSON.stringify(entry.message.content).includes(parentMarker),
+							);
+				}
+				if (!continued) await sleep(50);
+			}
+
+			assert.equal(continued, true, readPane(surface, 300));
+			const customResults = entries.filter(
+				(entry) =>
+					entry.type === "custom_message" &&
+					entry.customType === "subagent_result",
+			);
+			assert.equal(customResults.length, 1);
+			assert.match(customResults[0].content, new RegExp(childMarker));
+			assert.match(customResults[0].content, /Parent action:/);
+			assert.match(
+				customResults[0].details.resultContent,
+				new RegExp(childMarker),
+			);
+			assert.doesNotMatch(
+				customResults[0].details.resultContent,
+				/Parent action:/,
+			);
+			assert.equal(
+				entries
+					.slice(customIndex + 1)
+					.some(
+						(entry) =>
+							entry.type === "message" && entry.message?.role === "user",
+					),
+				false,
+			);
 		});
 
 		it("runs a writing subagent in a retained Herdr worktree", async () => {

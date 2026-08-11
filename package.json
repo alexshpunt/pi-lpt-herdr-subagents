@@ -29,10 +29,17 @@
   },
   "type": "module",
   "scripts": {
+    "changelog": "auto-changelog",
     "lint": "oxlint pi-extension test",
     "test": "node --experimental-strip-types --test test/test.ts test/launch.test.ts test/runtime-routing.test.ts test/release-workflow.test.ts test/workflow.test.ts test/package-skill.test.js",
     "test:integration": "node --experimental-strip-types --test --test-concurrency=1 test/integration/*.test.ts",
-    "test:integration:live": "PI_TEST_LIVE=1 node --experimental-strip-types --test --test-concurrency=1 test/integration/*.test.ts"
+    "test:integration:live": "PI_TEST_LIVE=1 node --experimental-strip-types --test --test-concurrency=1 test/integration/*.test.ts",
+    "version": "auto-changelog --package && git add CHANGELOG.md"
+  },
+  "auto-changelog": {
+    "commitLimit": false,
+    "template": "keepachangelog",
+    "unreleased": true
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -53,6 +60,7 @@
     "@earendil-works/pi-coding-agent": "^0.84.0",
     "@earendil-works/pi-tui": "^0.84.0",
     "@sinclair/typebox": "^0.34.52",
+    "auto-changelog": "^2.6.0",
     "oxlint": "^1.73.0"
   }
 }

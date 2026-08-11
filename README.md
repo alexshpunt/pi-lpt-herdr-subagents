@@ -67,7 +67,7 @@ pi -e npm:pi-herdr-agents
 
 Pi packages execute with your user account's full system access. Review the package source before installation.
 
-After the one-time first-package bootstrap, changing the `package.json` version on `main` automatically publishes to npm and creates the matching Git tag and GitHub Release. For bootstrap authentication, versioning, verification, and troubleshooting, see [RELEASING.md](RELEASING.md).
+The documented `npm version` release step updates [CHANGELOG.md](CHANGELOG.md). Pushing that version change to `main` publishes to npm and creates the matching Git tag and GitHub Release. For bootstrap authentication, versioning, verification, and troubleshooting, see [RELEASING.md](RELEASING.md).
 
 Start herdr, then run pi inside it:
 

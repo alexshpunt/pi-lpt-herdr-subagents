@@ -40,7 +40,7 @@ The optional live-provider smoke test is not a release gate:
 PI_TEST_MODEL="openai-codex/gpt-5.6-luna" PI_TEST_TIMEOUT=180000 npm run test:integration:live
 ```
 
-Do not release from skipped Herdr tests. Confirm the package preview includes `README.md`, `AGENTS.md`, `docs/`, `agents/`, `skills/orchestrate/SKILL.md`, and `pi-extension/subagents/workflow-worker.js`. Confirm it excludes plans, journals, sessions, prototypes, generated evidence, and local `config.json`, and that the worktree integration tests leave no test workspace behind.
+Do not release from skipped Herdr tests. Confirm the package preview includes `README.md`, `CHANGELOG.md`, `AGENTS.md`, `docs/`, `agents/`, `skills/orchestrate/SKILL.md`, and `pi-extension/subagents/workflow-worker.js`. Confirm it excludes plans, journals, sessions, prototypes, generated evidence, and local `config.json`, and that the worktree integration tests leave no test workspace behind.
 
 ## npm authentication
 
@@ -75,11 +75,14 @@ Choose the semantic version increment:
 Create the version commit without a local tag:
 
 ```bash
+git fetch --tags --prune
 npm version patch --no-git-tag-version
-git add package.json package-lock.json
+git add package.json package-lock.json CHANGELOG.md
 git commit -m "chore: release v$(node -p \"require('./package.json').version\")"
 git push origin main
 ```
+
+The `npm version` hook regenerates `CHANGELOG.md` with `auto-changelog`. Use `npm run changelog` to regenerate it without changing the version.
 
 Replace `patch` with `minor` or `major` when appropriate. The push triggers the **Release** workflow, which installs dependencies, runs lint and unit tests, previews package contents, publishes to npm with provenance, creates and pushes the version tag, and creates the GitHub Release.
 

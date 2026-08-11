@@ -131,6 +131,22 @@ function subagentCalls(source: string): ToolCall[] {
 	});
 }
 
+function subagentResumeCall(source: string): ToolCall | null {
+	const sessionPath = quotedValue(source, "sessionPath");
+	if (!sessionPath) return null;
+	const name = quotedValue(source, "name");
+	const message = quotedValue(source, "message");
+	return {
+		name: "subagent_resume",
+		arguments: {
+			sessionPath,
+			...(name ? { name } : {}),
+			...(message ? { message } : {}),
+			...(/\bautoExit:\s*false\b/.test(source) ? { autoExit: false } : {}),
+		},
+	};
+}
+
 function bashCommand(source: string): string | undefined {
 	const commandStart = source.search(/\becho\s+['"]/);
 	if (commandStart === -1) return undefined;
@@ -138,9 +154,10 @@ function bashCommand(source: string): string | undefined {
 		.slice(commandStart)
 		.split(/\n(?:After|Do not|Just|Use the|Then |You must|First,|Call )/)[0]
 		.trim();
-	// The status test needs a real long-running bash call; other delays only slow the suite.
+	// Lifecycle tests with observable START_/STATUS_ markers need the real delay;
+	// other delays only slow the suite.
 	return (
-		(command.includes("STATUS_")
+		(command.includes("STATUS_") || command.includes("START_")
 			? command
 			: command.replace(/\bsleep\s+\d+;?\s*/g, "")) || undefined
 	);
@@ -180,6 +197,10 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 	const user = lastUserText(request);
 	const lastRole = request.messages?.at(-1)?.role;
 
+	const resumed = !/Call the subagent_resume tool/i.test(user)
+		? user.match(/RESUME_FOLLOWUP_INPUT:\s*([a-z0-9]+)/i)?.[1]
+		: undefined;
+	if (resumed) return { text: `RESUME_RESULT_${resumed}` };
 	const btw = btwText(source);
 	if (btw) return { text: btw };
 
@@ -275,7 +296,21 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 		return { text: "WORKFLOW_PARENT_COMPLETE" };
 	}
 
+	if (
+		names.has("subagent_resume") &&
+		!/Session "[^"]+" resumed\./.test(source)
+	) {
+		const resumeCall = subagentResumeCall(user);
+		if (resumeCall) return { toolCalls: [resumeCall] };
+	}
+
 	if (names.has("subagent")) {
+		if (/Sub-agent "[^"]+" launched and is now running in the background/.test(source)) {
+			const continuation = source.match(
+				/\b(?:say|respond with)\s+([A-Z][A-Za-z0-9_]*)/,
+			)?.[1];
+			return { text: continuation ?? "completed" };
+		}
 		const calls = subagentCalls(source);
 		if (calls.length > 0) {
 			return {

@@ -36,6 +36,7 @@ import {
 	waitForScreen,
 	waitForFile,
 	waitForPaneReady,
+	waitForPiExit,
 	sleep,
 	uniqueId,
 	trackTempFile,
@@ -636,6 +637,42 @@ for (const backend of backends) {
 				/needs help|PING/i.test(screen),
 				`Screen should show ping notification. Got:\n${screen.slice(-800)}`,
 			);
+		});
+
+		it("resumes a Pi session and delivers its new result to the parent", async () => {
+			const id = uniqueId();
+			const sessionFile = join(env.dir, `resume-child-${id}.jsonl`);
+			const seedSurface = createTrackedSurface(env, `resume-seed-${id}`);
+			await waitForPaneReady(seedSurface);
+			startPi(seedSurface, env.dir, "BTW question: Say FIRST", {
+				extraArgs: `--print --session ${shellQuote(sessionFile)}`,
+			});
+			await waitForScreen(seedSurface, /FIRST/);
+			assert.equal(await waitForPiExit(seedSurface), 0);
+			assert.equal(existsSync(sessionFile), true);
+
+			const resultMarker = `RESUME_RESULT_${id}`;
+			const parentSurface = createTrackedSurface(env, `resume-parent-${id}`);
+			await waitForPaneReady(parentSurface);
+			startPi(
+				parentSurface,
+				env.dir,
+				[
+					"Call the subagent_resume tool with these EXACT parameters:",
+					`  sessionPath: "${sessionFile}"`,
+					`  name: "Resume-${id}"`,
+					`  message: "RESUME_FOLLOWUP_INPUT: ${id}"`,
+					"  autoExit: true",
+					"Call the tool once and wait for its asynchronous result.",
+				].join("\n"),
+			);
+
+			const screen = await waitForScreen(
+				parentSurface,
+				new RegExp(resultMarker),
+				PI_TIMEOUT,
+			);
+			assert.match(screen, new RegExp(resultMarker));
 		});
 
 		// ── Agent discovery ──

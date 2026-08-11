@@ -348,7 +348,7 @@ subagent({
 
 | Parameter              | Type    | Default        | Description                                                                                       |
 | ---------------------- | ------- | -------------- | ------------------------------------------------------------------------------------------------- |
-| `name`                 | string  | required       | Display name (shown in widget and pane title)                                                     |
+| `name`                 | string  | required       | Short stable child label; coordinated groups use `<task>-<role>[-n]` (widget and pane title)      |
 | `task`                 | string  | required       | Task prompt for the sub-agent                                                                     |
 | `agent`                | string  | —              | Load defaults from agent definition                                                               |
 | `fork`                 | boolean | `false`        | Force the full-context fork mode for this spawn, overriding any agent `session-mode` frontmatter  |
@@ -360,6 +360,15 @@ subagent({
 | `tools`                | string  | —              | Comma-separated tool names                                                                        |
 | `cwd`                  | string  | —              | Working directory, or source repository when `worktree` is set (see [Role Folders](#role-folders)) |
 | `worktree`             | object  | —              | Isolated Herdr-managed Git worktree; requires `branch`, with optional `base` (committed `HEAD` by default) |
+
+### Naming coordinated children
+
+Before launching a new group, choose a short task slug and label each new child
+`<task>-<role>[-n]`, such as `login-api` or `login-test2`. Roles are `plan`,
+`research`, `ui`, `api`, `build`, `test`, `review`, `browser`, `security`,
+`perf`, and `merge`. Leave existing labels unchanged. After the final launch,
+print `name | agent kind | role | model | worktree` and use each name in
+prompts, handoffs, and results.
 
 ### Isolated worktree runs
 

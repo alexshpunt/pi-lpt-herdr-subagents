@@ -168,6 +168,7 @@ function buildSubagentRoutingGuidelines(catalog?: string): string[] {
 		"For subagent model and thinking selection, inherit the parent runtime by omitting both fields unless the task warrants an override.",
 		"For subagent tasks, prefer changing thinking before changing models: minimal/low for bounded mechanical work, medium for ordinary implementation or review, and high+ for architecture, concurrency, security, or hard diagnosis.",
 		"When overriding a subagent model, use an exact authenticated provider/model-id from the live catalog below. Do not invent aliases or fuzzy names.",
+		"Before launching a new group of subagents, choose a short task slug and name each new child <task>-<role>[-n], for example login-api or login-test2. Use only plan, research, ui, api, build, test, review, browser, security, perf, or merge as roles; leave existing names unchanged. After the final launch, print name | agent kind | role | model | worktree, then use each name in prompts, handoffs, and results.",
 		catalog ??
 			"Authenticated subagent model catalog becomes available after session start.",
 	];
@@ -184,7 +185,10 @@ const ThinkingLevelSchema = Type.Union(
 );
 
 const SubagentParams = Type.Object({
-	name: Type.String({ description: "Display name for the subagent" }),
+	name: Type.String({
+		description:
+			"Short stable label for the subagent; for a new coordinated group use <task>-<role>[-n] (shown in the widget and pane title)",
+	}),
 	task: Type.String({ description: "Task/prompt for the sub-agent" }),
 	agent: Type.Optional(
 		Type.String({

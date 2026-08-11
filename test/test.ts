@@ -3063,6 +3063,7 @@ describe("tool registration", () => {
 			subagent.promptGuidelines.join("\n"),
 			/inherit the parent runtime/,
 		);
+		assert.match(subagent.promptGuidelines.join("\n"), /login-test2/);
 	});
 
 	it("ignores an inherited deny list in a parent process", () => {

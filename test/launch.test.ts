@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
 	launchPiSubagent,
+	launchPiWorktreeHandoff,
 	type FreshPiLaunchRequest,
 	type PiLaunchOperations,
 	type ResumePiLaunchRequest,
@@ -115,10 +116,7 @@ describe("Pi launch", () => {
 			assert.match(command, new RegExp(`^cd '${project}' && `));
 			assert.match(command, /--model 'fake\/worker'/);
 			assert.match(command, /--thinking 'high'/);
-			assert.match(
-				command,
-				/--tools 'read,bash,caller_ping,subagent_done'/,
-			);
+			assert.match(command, /--tools 'read,bash,caller_ping,subagent_done'/);
 			assert.match(command, /PI_DENY_TOOLS='subagent,subagent_resume'/);
 			assert.match(command, /PI_SUBAGENT_AUTO_EXIT=1/);
 			assert.match(command, /'' '\/skill:tdd' '@[^']+\.md'/);
@@ -303,11 +301,18 @@ describe("Pi launch", () => {
 					assert.equal(cwd, project);
 					assert.equal(branch, "issue/7");
 					assert.equal(base, baseSha);
-					assert.equal(JSON.parse(readFileSync(manifestFile, "utf8")).state, "provisioning");
+					assert.equal(
+						JSON.parse(readFileSync(manifestFile, "utf8")).state,
+						"provisioning",
+					);
 					events.push("create");
-					execFileSync("git", ["worktree", "add", "-q", "-b", branch, worktreePath, base], {
-						cwd: project,
-					});
+					execFileSync(
+						"git",
+						["worktree", "add", "-q", "-b", branch, worktreePath, base],
+						{
+							cwd: project,
+						},
+					);
 					return {
 						path: worktreePath,
 						branch,
@@ -341,6 +346,138 @@ describe("Pi launch", () => {
 		});
 	});
 
+	it("forks the active conversation and focuses after launch", async () => {
+		await withFixture(async ({ request, project, sessionDir, root }) => {
+			const timestamp = new Date().toISOString();
+			writeFileSync(
+				request.parent.sessionFile,
+				[
+					{
+						type: "session",
+						version: 3,
+						id: "parent",
+						timestamp,
+						cwd: project,
+					},
+					{
+						type: "message",
+						id: "user-1",
+						parentId: null,
+						timestamp,
+						message: {
+							role: "user",
+							content: [{ type: "text", text: "Start the feature" }],
+							timestamp: 1,
+						},
+					},
+					{
+						type: "message",
+						id: "assistant-1",
+						parentId: "user-1",
+						timestamp,
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: "Continue" }],
+							api: "test",
+							provider: "fake",
+							model: "worker",
+							usage: {},
+							stopReason: "stop",
+							timestamp: 2,
+						},
+					},
+				]
+					.map((entry) => JSON.stringify(entry))
+					.join("\n") + "\n",
+			);
+			execFileSync("git", ["init", "-q"], { cwd: project });
+			execFileSync("git", ["config", "user.email", "test@example.com"], {
+				cwd: project,
+			});
+			execFileSync("git", ["config", "user.name", "Test"], { cwd: project });
+			writeFileSync(join(project, "base.txt"), "base\n");
+			execFileSync("git", ["add", "base.txt"], { cwd: project });
+			execFileSync("git", ["commit", "-qm", "base"], { cwd: project });
+			const parentBefore = readFileSync(request.parent.sessionFile, "utf8");
+			const worktreePath = join(root, "handoff-tree");
+			const events: string[] = [];
+			let command = "";
+			const operations: PiLaunchOperations = {
+				createPane() {
+					throw new Error("unexpected pane creation");
+				},
+				createWorktree(_name, cwd, branch, base) {
+					assert.equal(cwd, project);
+					assert.equal(branch, "handoff/feature");
+					assert.equal(
+						base,
+						execFileSync("git", ["rev-parse", "HEAD"], {
+							cwd,
+							encoding: "utf8",
+						}).trim(),
+					);
+					execFileSync(
+						"git",
+						["worktree", "add", "-q", "-b", branch, worktreePath, base],
+						{ cwd },
+					);
+					events.push("create");
+					return {
+						path: worktreePath,
+						branch,
+						workspaceId: "workspace-handoff",
+						paneId: "pane-handoff",
+					};
+				},
+				async waitForShellReady() {
+					events.push("ready");
+				},
+				runScript(_surface, value, options) {
+					command = value;
+					events.push("run");
+					return options.scriptPath;
+				},
+				focusWorkspace(workspaceId) {
+					assert.equal(workspaceId, "workspace-handoff");
+					events.push("focus");
+				},
+			};
+
+			const result = await launchPiWorktreeHandoff(
+				{
+					...request,
+					name: "Handoff",
+					worktree: { branch: "handoff/feature" },
+					handoff: { leafId: "assistant-1" },
+				},
+				operations,
+			);
+
+			assert.deepEqual(events, ["create", "ready", "run", "focus"]);
+			assert.equal(result.focusError, undefined);
+			assert.equal(
+				readFileSync(request.parent.sessionFile, "utf8"),
+				parentBefore,
+			);
+			assert.match(command, new RegExp(`^cd '${worktreePath}' && `));
+			assert.doesNotMatch(command, /subagent-done|PI_SUBAGENT_|__SUBAGENT_DONE_/);
+			assert.doesNotMatch(command, /Implement the bounded change/);
+			const child = JSON.parse(
+				readFileSync(result.running.sessionFile, "utf8").split("\n")[0],
+			);
+			assert.equal(child.cwd, worktreePath);
+			const childText = readFileSync(result.running.sessionFile, "utf8");
+			assert.match(childText, /pi-herdr-worktree-handoff/);
+			assert.match(childText, /handoff\/feature/);
+			assert.match(childText, /Implement the bounded change\./);
+			assert.equal(
+				readFileSync(join(worktreePath, "base.txt"), "utf8"),
+				"base\n",
+			);
+			assert.ok(sessionDir);
+		});
+	});
+
 	it("retains an explicit failed worktree handoff when process start fails", async () => {
 		await withFixture(async ({ request, project, sessionDir, root }) => {
 			execFileSync("git", ["init", "-q"], { cwd: project });
@@ -351,6 +488,33 @@ describe("Pi launch", () => {
 			writeFileSync(join(project, "base.txt"), "base\n");
 			execFileSync("git", ["add", "base.txt"], { cwd: project });
 			execFileSync("git", ["commit", "-qm", "base"], { cwd: project });
+			writeFileSync(
+				request.parent.sessionFile,
+				[
+					{ type: "session", version: 3, id: "parent", cwd: project },
+					{
+						type: "message",
+						id: "failure-user",
+						parentId: null,
+						message: { role: "user", content: [{ type: "text", text: "start" }], timestamp: 1 },
+					},
+					{
+						type: "message",
+						id: "failure-assistant",
+						parentId: "failure-user",
+						message: {
+							role: "assistant",
+						content: [{ type: "text", text: "ready" }],
+							api: "test",
+							provider: "fake",
+							model: "worker",
+							usage: {},
+							stopReason: "stop",
+							timestamp: 2,
+						},
+					},
+				].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+			);
 			const worktreePath = join(root, "failed-tree");
 			const manifestFile = join(
 				sessionDir,
@@ -364,9 +528,13 @@ describe("Pi launch", () => {
 					throw new Error("unexpected pane creation");
 				},
 				createWorktree(_name, cwd, branch, base) {
-					execFileSync("git", ["worktree", "add", "-q", "-b", branch, worktreePath, base], {
-						cwd,
-					});
+					execFileSync(
+						"git",
+						["worktree", "add", "-q", "-b", branch, worktreePath, base],
+						{
+							cwd,
+						},
+					);
 					return {
 						path: worktreePath,
 						branch,
@@ -382,7 +550,11 @@ describe("Pi launch", () => {
 
 			await assert.rejects(
 				launchPiSubagent(
-					{ ...request, worktree: { branch: "issue/7-failed" } },
+					{
+						...request,
+						worktree: { branch: "issue/7-failed" },
+						handoff: { leafId: "failure-assistant" },
+					},
 					operations,
 				),
 				/worktree retained.*pane rejected command/i,
@@ -390,6 +562,7 @@ describe("Pi launch", () => {
 			const manifest = JSON.parse(readFileSync(manifestFile, "utf8"));
 			assert.equal(manifest.state, "failed");
 			assert.equal(manifest.path, worktreePath);
+			assert.equal(manifest.sourceSessionFile, request.parent.sessionFile);
 			assert.equal(manifest.clean, true);
 		});
 	});

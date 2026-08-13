@@ -46,6 +46,8 @@ For a worktree launch:
 - Uncommitted and untracked files from the parent checkout are not copied. Commit anything the child must see before spawning it, or pass the needed context in the task.
 - Worktree creation does not steal terminal focus.
 
+For an explicit interactive handoff, use `/handoff-worktree <branch> [--base <ref>] [task]`. It forks the active conversation branch into the target-cwd session, launches a normal long-lived Pi process in the returned root pane, and focuses the destination workspace only after the launch command is accepted. The original process and session remain intact; pane movement is not used to change a running shell's cwd.
+
 `worktree` cannot be set in agent frontmatter and is not exposed by the `/subagent <agent> <task>` shorthand. It is selected per call to the `subagent` tool. Ordered model fallback lists are not supported for worktree subagents: a failed attempt retains its worktree and branch for review, so a retry cannot safely reuse the requested branch.
 
 ## Parent and worker responsibilities

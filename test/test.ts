@@ -37,6 +37,7 @@ import {
 	mergeNewEntries,
 	seedSubagentSessionFile,
 	createBtwSessionSnapshot,
+	createWorktreeSessionFork,
 } from "../pi-extension/subagents/session.ts";
 
 import {
@@ -566,6 +567,145 @@ describe("session.ts", () => {
 				entries.some((entry) => entry.type === "message"),
 				false,
 			);
+		});
+	});
+
+	describe("createWorktreeSessionFork", () => {
+		it("preserves the active branch, target cwd, and parent immutability", () => {
+			const timestamp = "2026-07-31T00:00:00.000Z";
+			const parentFile = createSessionFile(dir, [
+				{
+					type: "session",
+					version: 3,
+					id: "handoff-parent",
+					timestamp,
+					cwd: dir,
+				},
+				{
+					type: "message",
+					id: "root-user",
+					parentId: null,
+					timestamp,
+					message: {
+						role: "user",
+						content: [{ type: "text", text: "root" }],
+						timestamp: 1,
+					},
+				},
+				{
+					type: "message",
+					id: "root-assistant",
+					parentId: "root-user",
+					timestamp,
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "base" }],
+						timestamp: 2,
+					},
+				},
+				{
+					type: "message",
+					id: "abandoned-user",
+					parentId: "root-assistant",
+					timestamp,
+					message: {
+						role: "user",
+						content: [{ type: "text", text: "abandoned" }],
+						timestamp: 3,
+					},
+				},
+				{
+					type: "message",
+					id: "active-user",
+					parentId: "root-assistant",
+					timestamp,
+					message: {
+						role: "user",
+						content: [{ type: "text", text: "active" }],
+						timestamp: 4,
+					},
+				},
+				{
+					type: "message",
+					id: "active-assistant",
+					parentId: "active-user",
+					timestamp,
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "current" }],
+						timestamp: 5,
+					},
+				},
+			]);
+			const parentBefore = readFileSync(parentFile, "utf8");
+			const childFile = join(dir, "handoff-child.jsonl");
+
+			createWorktreeSessionFork({
+				parentSessionFile: parentFile,
+				leafId: "active-assistant",
+				childSessionFile: childFile,
+				childCwd: "/tmp/handoff-worktree",
+				handoffMessage: "Continue in the worktree.",
+			});
+
+			const child = SessionManager.open(childFile);
+			assert.equal(child.getHeader()?.cwd, "/tmp/handoff-worktree");
+			assert.equal(child.getHeader()?.parentSession, parentFile);
+			assert.deepEqual(
+				child
+					.getBranch()
+					.map((entry) => entry.id)
+					.slice(0, 4),
+				["root-user", "root-assistant", "active-user", "active-assistant"],
+			);
+			assert.equal(readFileSync(parentFile, "utf8"), parentBefore);
+			assert.equal(
+				(child.getLeafEntry() as any).content,
+				"Continue in the worktree.",
+			);
+		});
+
+		it("preserves compaction entries on the active branch", () => {
+			const timestamp = "2026-07-31T00:00:00.000Z";
+			const parentFile = createSessionFile(dir, [
+				{ type: "session", version: 3, id: "compaction-parent", timestamp, cwd: dir },
+				{
+					type: "message",
+					id: "compaction-user",
+					parentId: null,
+					timestamp,
+					message: { role: "user", content: [{ type: "text", text: "start" }], timestamp: 1 },
+				},
+				{
+					type: "message",
+					id: "compaction-assistant",
+					parentId: "compaction-user",
+					timestamp,
+					message: { role: "assistant", content: [{ type: "text", text: "summary follows" }], timestamp: 2 },
+				},
+				{
+					type: "compaction",
+					id: "compaction-entry",
+					parentId: "compaction-assistant",
+					timestamp,
+					summary: "Earlier context summary",
+					firstKeptEntryId: "compaction-assistant",
+					tokensBefore: 100,
+				},
+			]);
+			const childFile = join(dir, "compaction-child.jsonl");
+
+			createWorktreeSessionFork({
+				parentSessionFile: parentFile,
+				leafId: "compaction-entry",
+				childSessionFile: childFile,
+				childCwd: "/tmp/compaction-worktree",
+				handoffMessage: "Continue after compaction.",
+			});
+
+			const child = SessionManager.open(childFile);
+			assert.equal(child.getEntry("compaction-entry")?.type, "compaction");
+			assert.equal(child.getHeader()?.cwd, "/tmp/compaction-worktree");
 		});
 	});
 

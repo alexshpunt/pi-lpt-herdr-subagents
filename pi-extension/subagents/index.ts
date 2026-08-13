@@ -112,6 +112,7 @@ import {
 import {
 	captureWorktreeHandoff,
 	launchPiSubagent,
+	launchPiWorktreeHandoff,
 	persistWorktreeResult,
 	runSubagentScript,
 	writeWorktreeManifest,
@@ -3832,6 +3833,103 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				ctx.ui.notify(
 					`Could not close BTW session: ${error instanceof Error ? error.message : String(error)}`,
 					"warning",
+				);
+			}
+		},
+	});
+
+	// /iterate command — fork the session into a subagent
+	pi.registerCommand("handoff-worktree", {
+		description: "Launch an interactive Pi session in a new managed worktree",
+		handler: async (args, ctx) => {
+			const parts = args.trim().split(/\s+/).filter(Boolean);
+			const branch = parts.shift();
+			if (!branch) {
+				ctx.ui.notify(
+					"Usage: /handoff-worktree <branch> [--base <ref>] [task]",
+					"warning",
+				);
+				return;
+			}
+			if (!isTerminalAvailable()) {
+				ctx.ui.notify(terminalSetupHint(), "error");
+				return;
+			}
+
+			try {
+				await ctx.waitForIdle();
+				const sessionFile = ctx.sessionManager.getSessionFile();
+				const leafId = ctx.sessionManager.getLeafId();
+				if (!sessionFile || !leafId) {
+					throw new Error(
+						"Start pi with a completed persistent session before handing off",
+					);
+				}
+				if (!ctx.model) throw new Error("No parent model is selected");
+				const thinking = pi.getThinkingLevel();
+				if (!isThinkingLevel(thinking)) {
+					throw new Error(`Unsupported parent thinking level: ${thinking}`);
+				}
+				let base = "HEAD";
+				if (parts[0] === "--base") {
+					base = parts[1] ?? "";
+					parts.splice(0, 2);
+					if (!base) throw new Error("--base requires a Git revision");
+				} else if (parts[0]?.startsWith("--base=")) {
+					const option = parts.shift() ?? "";
+					base = option.slice("--base=".length);
+					if (!base) throw new Error("--base requires a Git revision");
+				}
+				const task =
+					parts.join(" ") ||
+					"Continue the current work in the new worktree.";
+				const runtimePlan = resolveRuntimePlan(
+					{},
+					{},
+					{
+						provider: ctx.model.provider,
+						modelId: ctx.model.id,
+						thinking,
+					},
+					wrapPiModelRegistry(ctx.modelRegistry),
+				);
+				const result = await launchPiWorktreeHandoff({
+					kind: "fresh",
+					name: `Handoff: ${branch}`,
+					task,
+					cwd: ctx.cwd,
+					worktree: { branch, base },
+					handoff: { leafId },
+					parent: {
+						cwd: ctx.cwd,
+						invocationCwd: process.cwd(),
+						sessionFile,
+						sessionId: ctx.sessionManager.getSessionId(),
+						sessionDir: ctx.sessionManager.getSessionDir(),
+						agentDir: getAgentConfigDir(),
+					},
+					runtimePlan,
+					behavior: {
+						deniedTools: [],
+						autoExit: false,
+						interactive: true,
+						sessionMode: "standalone",
+					},
+				});
+				const worktree = result.running.worktree;
+				if (!worktree) {
+					throw new Error("Worktree handoff did not return worktree metadata");
+				}
+				ctx.ui.notify(
+					result.focusError
+						? `Handoff launched, but workspace focus failed: ${result.focusError}\nWorktree: ${worktree.path}`
+						: `Handoff launched in ${worktree.path} (workspace ${worktree.workspaceId}).`,
+					result.focusError ? "warning" : "info",
+				);
+			} catch (error) {
+				ctx.ui.notify(
+					`Worktree handoff failed: ${error instanceof Error ? error.message : String(error)}`,
+					"error",
 				);
 			}
 		},

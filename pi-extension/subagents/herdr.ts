@@ -572,6 +572,10 @@ export function renameHerdrWorkspace(title: string): void {
   herdrExec(["workspace", "rename", workspaceId, title]);
 }
 
+export function focusHerdrWorkspace(workspaceId: string): void {
+  herdrExec(["workspace", "focus", workspaceId]);
+}
+
 export const __herdrTest__ = {
   buildCurrentPaneArgs,
   buildTabCreateArgs,

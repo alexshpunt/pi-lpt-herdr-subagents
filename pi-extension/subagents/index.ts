@@ -3843,8 +3843,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 		description:
 			"Fork this session into a worktree; use /worktree list to inspect them",
 		handler: async (args, ctx) => {
-			const parts = args.trim().split(/\s+/).filter(Boolean);
-			if (parts[0] === "list") {
+			const trimmed = args.trim();
+			const parts = trimmed.split(/\s+/).filter(Boolean);
+			if (trimmed === "list") {
 				if (!isTerminalAvailable()) {
 					ctx.ui.notify(terminalSetupHint(), "error");
 					return;
@@ -3870,7 +3871,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			}
 
 			const branch = parts.shift();
-			if (!branch) {
+			if (!branch || branch === "list") {
 				ctx.ui.notify(
 					"Usage: /worktree <name> [task] | /worktree list",
 					"warning",
@@ -3897,8 +3898,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					throw new Error(`Unsupported parent thinking level: ${thinking}`);
 				}
 				const task =
-					parts.join(" ") ||
-					"Continue the current work in the new worktree.";
+					parts.join(" ") || "Continue the current work in the new worktree.";
 				const runtimePlan = resolveRuntimePlan(
 					{},
 					{},

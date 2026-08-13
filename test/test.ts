@@ -668,20 +668,34 @@ describe("session.ts", () => {
 		it("preserves compaction entries on the active branch", () => {
 			const timestamp = "2026-07-31T00:00:00.000Z";
 			const parentFile = createSessionFile(dir, [
-				{ type: "session", version: 3, id: "compaction-parent", timestamp, cwd: dir },
+				{
+					type: "session",
+					version: 3,
+					id: "compaction-parent",
+					timestamp,
+					cwd: dir,
+				},
 				{
 					type: "message",
 					id: "compaction-user",
 					parentId: null,
 					timestamp,
-					message: { role: "user", content: [{ type: "text", text: "start" }], timestamp: 1 },
+					message: {
+						role: "user",
+						content: [{ type: "text", text: "start" }],
+						timestamp: 1,
+					},
 				},
 				{
 					type: "message",
 					id: "compaction-assistant",
 					parentId: "compaction-user",
 					timestamp,
-					message: { role: "assistant", content: [{ type: "text", text: "summary follows" }], timestamp: 2 },
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "summary follows" }],
+						timestamp: 2,
+					},
 				},
 				{
 					type: "compaction",
@@ -3109,13 +3123,19 @@ describe("commands", () => {
 		);
 
 		const notifications: Array<{ message: string; level: string }> = [];
-		await worktree.handler("", {
+		const ctx = {
 			ui: {
 				notify: (message: string, level: string) =>
 					notifications.push({ message, level }),
 			},
-		});
+		};
+		await worktree.handler("", ctx);
+		await worktree.handler("list extra", ctx);
 		assert.deepEqual(notifications, [
+			{
+				message: "Usage: /worktree <name> [task] | /worktree list",
+				level: "warning",
+			},
 			{
 				message: "Usage: /worktree <name> [task] | /worktree list",
 				level: "warning",
@@ -4790,6 +4810,24 @@ describe("herdr.ts", () => {
 			);
 		});
 
+		it("parses the recovered root pane for a worktree workspace", () => {
+			assert.deepEqual(
+				__herdrTest__.parseHerdrPaneList(
+					JSON.stringify({
+						result: {
+							type: "pane_list",
+							panes: [
+								{ pane_id: "w9:p1", workspace_id: "w9" },
+								{ pane_id: "other:p1", workspace_id: "other" },
+							],
+						},
+					}),
+					"w9",
+				),
+				["w9:p1"],
+			);
+		});
+
 		it("uses caller context when discovering the current pane", () => {
 			assert.deepEqual(__herdrTest__.buildCurrentPaneArgs(), [
 				"pane",
@@ -4981,6 +5019,7 @@ describe("herdr.ts", () => {
 					shellPid: 100,
 					foregroundProcessGroupId: 100,
 					pids: [100],
+					foregroundProcesses: [],
 				}),
 				true,
 			);
@@ -4990,7 +5029,33 @@ describe("herdr.ts", () => {
 					shellPid: 100,
 					foregroundProcessGroupId: 200,
 					pids: [100, 200],
+					foregroundProcesses: [],
 				}),
+				false,
+			);
+		});
+
+		it("matches only the expected Pi session and cwd", () => {
+			const process = {
+				pid: 200,
+				name: "pi",
+				argv: ["pi", "--session", "/tmp/session.jsonl"],
+				cwd: "/tmp/worktree",
+			};
+			assert.equal(
+				__herdrTest__.isExpectedPiProcess(
+					process,
+					"/tmp/session.jsonl",
+					"/tmp/worktree",
+				),
+				true,
+			);
+			assert.equal(
+				__herdrTest__.isExpectedPiProcess(
+					process,
+					"/tmp/other.jsonl",
+					"/tmp/worktree",
+				),
 				false,
 			);
 		});
@@ -5003,7 +5068,16 @@ describe("herdr.ts", () => {
 							pane_id: "w1:p9",
 							shell_pid: 100,
 							foreground_process_group_id: 200,
-							foreground_processes: [{ pid: 200 }, { pid: 201 }],
+							foreground_processes: [
+								{
+									pid: 200,
+									name: "pi",
+									argv0: "pi",
+									argv: ["pi", "--session", "/tmp/session.jsonl"],
+									cwd: "/tmp/worktree",
+								},
+								{ pid: 201 },
+							],
 						},
 					},
 				}),
@@ -5014,6 +5088,16 @@ describe("herdr.ts", () => {
 				shellPid: 100,
 				foregroundProcessGroupId: 200,
 				pids: [100, 200, 201],
+				foregroundProcesses: [
+					{
+						pid: 200,
+						name: "pi",
+						argv0: "pi",
+						argv: ["pi", "--session", "/tmp/session.jsonl"],
+						cwd: "/tmp/worktree",
+					},
+					{ pid: 201 },
+				],
 			});
 		});
 	});

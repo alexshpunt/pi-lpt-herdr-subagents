@@ -231,6 +231,25 @@ export interface HerdrWorktreeInfo {
   isLinkedWorktree: boolean;
 }
 
+export class HerdrWorktreeCreateError extends Error {
+	readonly recoveredWorktree: Pick<
+		HerdrWorktreeInfo,
+		"path" | "branch" | "workspaceId"
+	>;
+
+	constructor(
+		message: string,
+		recoveredWorktree: Pick<
+			HerdrWorktreeInfo,
+			"path" | "branch" | "workspaceId"
+		>,
+	) {
+		super(message);
+		this.name = "HerdrWorktreeCreateError";
+		this.recoveredWorktree = recoveredWorktree;
+	}
+}
+
 export function parseHerdrWorktreeList(output: string): HerdrWorktreeInfo[] {
   const parsed = parseHerdrJson(output) as {
     result?: {
@@ -273,6 +292,45 @@ export function listHerdrWorktrees(cwd?: string): HerdrWorktreeInfo[] {
   return parseHerdrWorktreeList(herdrExec(args));
 }
 
+function parseHerdrPaneList(output: string, workspaceId: string): string[] {
+	const parsed = parseHerdrJson(output) as {
+		result?: {
+			type?: unknown;
+			panes?: Array<{ pane_id?: unknown; workspace_id?: unknown }>;
+		};
+	} | null;
+	if (parsed?.result?.type !== "pane_list" || !Array.isArray(parsed.result.panes)) {
+		throw new Error("Unexpected herdr pane list output");
+	}
+	return parsed.result.panes
+		.filter((pane) => pane.workspace_id === workspaceId)
+		.map((pane) => pane.pane_id)
+		.filter((paneId): paneId is string => typeof paneId === "string");
+}
+
+function recoverHerdrWorktree(
+	cwd: string,
+	branch: string,
+): HerdrWorktreeSurface | HerdrWorktreeInfo | undefined {
+	const matches = listHerdrWorktrees(cwd).filter(
+		(worktree) => worktree.branch === branch,
+	);
+	if (matches.length !== 1) return undefined;
+	const worktree = matches[0];
+	if (!worktree.workspaceId) return worktree;
+	const panes = parseHerdrPaneList(
+		herdrExec(["pane", "list", "--workspace", worktree.workspaceId]),
+		worktree.workspaceId,
+	);
+	if (panes.length !== 1) return worktree;
+	return {
+		path: worktree.path,
+		branch: worktree.branch,
+		workspaceId: worktree.workspaceId,
+		paneId: panes[0],
+	};
+}
+
 export function createHerdrWorktree(
   name: string,
   cwd: string,
@@ -280,7 +338,24 @@ export function createHerdrWorktree(
   base: string,
 ): HerdrWorktreeSurface {
   const output = herdrExec(buildWorktreeCreateArgs(name, cwd, branch, base));
+	try {
   return extractHerdrWorktree(output);
+	} catch (parseError) {
+		let recovered: HerdrWorktreeSurface | HerdrWorktreeInfo | undefined;
+		try {
+			recovered = recoverHerdrWorktree(cwd, branch);
+		} catch {
+			throw parseError;
+		}
+		if (recovered?.workspaceId && "paneId" in recovered) return recovered;
+		if (recovered) {
+			throw new HerdrWorktreeCreateError(
+				`Herdr created branch ${branch}, but its workspace response was incomplete`,
+				recovered,
+			);
+		}
+		throw parseError;
+	}
 }
 
 export function createHerdrSurfaceSplit(
@@ -431,11 +506,20 @@ export async function inspectHerdrPane(
   }
 }
 
+export interface HerdrForegroundProcess {
+	pid: number;
+	name?: string;
+	argv0?: string;
+	argv?: string[];
+	cwd?: string;
+}
+
 export interface HerdrPaneProcessInfo {
 	paneId: string;
 	shellPid?: number;
 	foregroundProcessGroupId?: number;
 	pids: number[];
+	foregroundProcesses: HerdrForegroundProcess[];
 }
 
 export function parsePaneProcessInfo(
@@ -448,7 +532,13 @@ export function parsePaneProcessInfo(
 				pane_id?: unknown;
 				shell_pid?: unknown;
 				foreground_process_group_id?: unknown;
-				foreground_processes?: Array<{ pid?: unknown }>;
+				foreground_processes?: Array<{
+					pid?: unknown;
+					name?: unknown;
+					argv0?: unknown;
+					argv?: unknown;
+					cwd?: unknown;
+				}>;
 			};
 		};
 	} | null;
@@ -478,6 +568,7 @@ export function parsePaneProcessInfo(
 	) {
 		pids.add(info.foreground_process_group_id);
 	}
+	const foregroundProcesses: HerdrForegroundProcess[] = [];
 	for (const process of info.foreground_processes ?? []) {
 		if (
 			typeof process?.pid === "number" &&
@@ -485,6 +576,16 @@ export function parsePaneProcessInfo(
 			process.pid > 0
 		) {
 			pids.add(process.pid);
+			foregroundProcesses.push({
+				pid: process.pid,
+				...(typeof process.name === "string" ? { name: process.name } : {}),
+				...(typeof process.argv0 === "string" ? { argv0: process.argv0 } : {}),
+				...(Array.isArray(process.argv) &&
+				process.argv.every((value) => typeof value === "string")
+					? { argv: process.argv as string[] }
+					: {}),
+				...(typeof process.cwd === "string" ? { cwd: process.cwd } : {}),
+			});
 		}
 	}
 	return {
@@ -494,6 +595,7 @@ export function parsePaneProcessInfo(
 			? { foregroundProcessGroupId: info.foreground_process_group_id }
 			: {}),
 		pids: [...pids],
+		foregroundProcesses,
 	};
 }
 
@@ -515,14 +617,63 @@ async function getHerdrPaneProcessInfoAsync(
 
 function isHerdrShellReady(info: HerdrPaneProcessInfo): boolean {
 	return (
-		info.shellPid != null &&
-		info.foregroundProcessGroupId === info.shellPid
+		info.shellPid != null && info.foregroundProcessGroupId === info.shellPid
+	);
+}
+
+function isExpectedPiProcess(
+	process: HerdrForegroundProcess,
+	sessionFile: string,
+	cwd: string,
+): boolean {
+	const sessionIndex = process.argv?.indexOf("--session") ?? -1;
+	return (
+		(process.name === "pi" || process.argv0?.split("/").pop() === "pi") &&
+		sessionIndex >= 0 &&
+		process.argv?.[sessionIndex + 1] === sessionFile &&
+		process.cwd === cwd
+	);
+}
+
+export async function waitForHerdrPiReady(
+	surface: string,
+	sessionFile: string,
+	cwd: string,
+	options: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<void> {
+	const timeoutMs = options.timeoutMs ?? 10_000;
+	const intervalMs = options.intervalMs ?? 50;
+	const deadline = Date.now() + timeoutMs;
+	let lastError = "expected Pi process not observed";
+
+	while (Date.now() <= deadline) {
+		try {
+			const info = await getHerdrPaneProcessInfoAsync(surface);
+			if (
+				info.foregroundProcesses.some((process) =>
+					isExpectedPiProcess(process, sessionFile, cwd),
+				)
+			) {
+				return;
+			}
+		} catch (error) {
+			lastError = error instanceof Error ? error.message : String(error);
+		}
+		if (Date.now() >= deadline) break;
+		await new Promise((resolve) => setTimeout(resolve, intervalMs));
+	}
+	throw new Error(
+		`Timed out waiting for Pi session ${sessionFile} in Herdr pane ${surface}: ${lastError}`,
 	);
 }
 
 export async function waitForHerdrShellReady(
 	surface: string,
-	options: { timeoutMs?: number; intervalMs?: number; signal?: AbortSignal } = {},
+	options: {
+		timeoutMs?: number;
+		intervalMs?: number;
+		signal?: AbortSignal;
+	} = {},
 ): Promise<void> {
 	const timeoutMs = options.timeoutMs ?? 10_000;
 	const intervalMs = options.intervalMs ?? 50;
@@ -530,9 +681,11 @@ export async function waitForHerdrShellReady(
 	let lastError = "no interactive shell foreground process";
 
 	while (Date.now() <= deadline) {
-		if (options.signal?.aborted) throw new Error("Shell readiness wait cancelled.");
+		if (options.signal?.aborted)
+			throw new Error("Shell readiness wait cancelled.");
 		try {
-			if (isHerdrShellReady(await getHerdrPaneProcessInfoAsync(surface))) return;
+			if (isHerdrShellReady(await getHerdrPaneProcessInfoAsync(surface)))
+				return;
 		} catch (error) {
 			lastError = error instanceof Error ? error.message : String(error);
 		}
@@ -636,8 +789,10 @@ export const __herdrTest__ = {
   extractHerdrRootPaneId,
   extractHerdrWorktree,
   parseHerdrWorktreeList,
+	parseHerdrPaneList,
   parsePaneGetOutput,
   parsePaneGetError,
 	parsePaneProcessInfo,
 	isHerdrShellReady,
+	isExpectedPiProcess,
 };

@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { getSubagentActivityFile } from "./activity.ts";
 import { createLifecycle, type SubagentLifecycle } from "./lifecycle.ts";
 import type { ResolvedRuntimePlan } from "./runtime-routing.ts";
+import { HerdrWorktreeCreateError } from "./herdr.ts";
 import {
 	createWorktreeSessionFork,
 	seedSubagentSessionFile,
@@ -21,6 +22,7 @@ import {
 	createSubagentWorktree,
 	runScriptInPane,
 	shellQuote,
+	waitForPiReady,
 	waitForShellReady,
 	focusWorkspace,
 	type HerdrWorktreeSurface,
@@ -135,6 +137,7 @@ export interface PiLaunchOperations {
 		command: string,
 		options: { scriptPath: string; scriptPreamble: string },
 	): string;
+	waitForPiReady?(surface: string, sessionFile: string, cwd: string): Promise<void>;
 	focusWorkspace?(workspaceId: string): void;
 }
 
@@ -143,6 +146,7 @@ const defaultOperations: PiLaunchOperations = {
 	createWorktree: createSubagentWorktree,
 	waitForShellReady,
 	runScript: runScriptInPane,
+	waitForPiReady,
 	focusWorkspace,
 };
 
@@ -225,8 +229,11 @@ async function launchFreshPiSubagent(
 
 	try {
 		const session = prepareChildSession(resolved, surface);
+		const handoffArtifacts = request.handoff
+			? prepareTaskArtifacts(resolved, session)
+			: undefined;
 		await confirmShellReady(session, operations);
-		const artifacts = prepareTaskArtifacts(resolved, session);
+		const artifacts = handoffArtifacts ?? prepareTaskArtifacts(resolved, session);
 		const command = buildPiCommand(resolved, artifacts);
 		const launchScriptFile = startPiProcess(
 			resolved,
@@ -234,6 +241,19 @@ async function launchFreshPiSubagent(
 			command,
 			operations,
 		);
+		if (request.handoff) {
+			if (!operations.waitForPiReady) {
+				throw new Error("Pi startup confirmation is unavailable");
+			}
+			await operations.waitForPiReady(
+				artifacts.surface,
+				artifacts.sessionFile,
+				artifacts.targetCwd,
+			);
+			if (artifacts.worktree) {
+				persistWorktreeResult(artifacts.worktree, "running");
+			}
+		}
 		return createRunningChild(resolved, artifacts, launchScriptFile);
 	} catch (error) {
 		if (!surface.worktree) throw error;
@@ -335,6 +355,9 @@ function prepareLaunchSurface(
 		writeWorktreeManifest(manifestFile, {
 			state: "failed",
 			...ownership,
+			...(error instanceof HerdrWorktreeCreateError
+				? error.recoveredWorktree
+				: {}),
 			error: errorMessage(error),
 		});
 		throw error;
@@ -549,7 +572,8 @@ function buildPiCommand(
 			);
 		}
 		env.push(`PI_SUBAGENT_NAME=${shellQuote(request.name)}`);
-		if (request.agent) env.push(`PI_SUBAGENT_AGENT=${shellQuote(request.agent)}`);
+		if (request.agent)
+			env.push(`PI_SUBAGENT_AGENT=${shellQuote(request.agent)}`);
 		if (request.behavior.autoExit) env.push("PI_SUBAGENT_AUTO_EXIT=1");
 		env.push(`PI_SUBAGENT_SESSION=${shellQuote(artifacts.sessionFile)}`);
 		env.push(`PI_SUBAGENT_ID=${shellQuote(resolved.id)}`);
@@ -576,7 +600,9 @@ function startPiProcess(
 		"subagent-scripts",
 		`${safeName(resolved.request.name) || "subagent"}-${resolved.id}.sh`,
 	);
-	if (artifacts.worktree) persistWorktreeResult(artifacts.worktree, "running");
+	if (artifacts.worktree && !resolved.request.handoff) {
+		persistWorktreeResult(artifacts.worktree, "running");
+	}
 	return operations.runScript(artifacts.surface, command, {
 		scriptPath: launchScriptFile,
 		scriptPreamble: [

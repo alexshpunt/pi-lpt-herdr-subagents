@@ -8,6 +8,7 @@ import {
 	createHerdrWorktree,
 	focusHerdrWorkspace,
 	getHerdrPaneProcessInfo,
+	waitForHerdrPiReady,
 	waitForHerdrShellReady,
 	isHerdrAvailable,
 	isProcessAlive,
@@ -165,6 +166,15 @@ export async function waitForShellReady(
 ): Promise<void> {
 	assertTerminalAvailable();
 	return waitForHerdrShellReady(paneId, options);
+}
+
+export async function waitForPiReady(
+	paneId: PaneId,
+	sessionFile: string,
+	cwd: string,
+): Promise<void> {
+	assertTerminalAvailable();
+	return waitForHerdrPiReady(paneId, sessionFile, cwd);
 }
 
 export async function waitForPaneAbsence(

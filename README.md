@@ -1,84 +1,99 @@
 # Pi Herdr Agents
 
-Async subagents for [Pi](https://github.com/earendil-works/pi) running exclusively in [Herdr](https://herdr.dev). Spawn, orchestrate, and manage sub-agent sessions in dedicated herdr tabs or panes. **Fully non-blocking** — the main agent keeps working while subagents run in the background.
+![Pi Herdr Agents: parallel Pi agents running asynchronously in dedicated Herdr panes and managed worktrees.](https://raw.githubusercontent.com/giuseppecrj/pi-herdr-agents/main/docs/assets/pi-herdr-agents-gallery.png)
 
-Package: `pi-herdr-agents` · Repository: [`giuseppecrj/pi-herdr-agents`](https://github.com/giuseppecrj/pi-herdr-agents)
+Asynchronous subagents and approved review workflows for [Pi](https://github.com/earendil-works/pi), running exclusively in [Herdr](https://herdr.dev).
 
-## How It Works
+Delegate investigation, implementation, and review without blocking the parent session. Each child runs as a real Pi process in its own Herdr surface; results return automatically when the child finishes.
 
-Call `subagent()` and it **returns immediately**. The sub-agent runs in its own terminal pane. A live widget above the input shows all tracked agents with their projected state — for example `starting`, `active`, `waiting`, `blocked`, `interrupted`, `stalled`, `running`, or `finalizing`. The header summarizes **active** (processing) vs **open** (not processing). When every tracked subagent is open, the border switches to amber. When a sub-agent finishes, its result is **steered back** into the main session as an async notification — triggering a new turn so the agent can process it.
+## Features
 
-```
-╭─ Subagents ──────────────────── 1 active · 1 open ─╮
-│ 00:23  Scout: Auth (scout)        active · bash 7m │
-│ 00:45  Scout: DB (scout)                waiting 2m │
-╰────────────────────────────────────────────────────╯
-```
+- **Non-blocking delegation** — `subagent` acknowledges launch immediately while the parent keeps working.
+- **Parallel execution** — run independent scouts, workers, and reviewers at the same time.
+- **Live supervision** — track process and turn state in Pi's subagent widget; interrupt one child turn without destroying its session.
+- **Managed worktrees** — isolate writing agents in retained Herdr workspaces with explicit Git ownership and recovery details.
+- **Conversation handoff** — continue the active Pi conversation in a new worktree with `/worktree` while preserving the parent session.
+- **Approved review workflows** — prepare and run bounded, read-only multi-agent reviews with fresh evidence and one synthesized result.
+- **Reusable roles** — use bundled agents, project or global definitions, and installable role packs.
 
-For parallel execution, just call `subagent` multiple times — they all run concurrently:
+## Requirements
 
-```typescript
-subagent({ name: "Scout: Auth", agent: "scout", task: "Analyze auth module" });
-subagent({ name: "Scout: DB", agent: "scout", task: "Map database schema" });
-// Both return immediately, results steer back independently
-```
+- [Pi](https://github.com/earendil-works/pi) with package support
+- [Herdr](https://herdr.dev) and its CLI
+- `HERDR_ENV=1` — start Pi from inside Herdr
 
-Read-only agents can safely share the parent checkout. For parallel agents that write files, give each task a unique Herdr-managed worktree; see [Worktree subagents](docs/worktree-subagents.md).
-
-## Development
-
-Run unit tests and lint locally:
-
-```bash
-npm test
-npm run lint
-```
-
-Run the required end-to-end suite from inside herdr:
-
-```bash
-npm run test:integration
-```
-
-It launches real Pi sessions, Herdr panes, worktrees, and the extension from the working tree, but routes model requests to a local deterministic fixture. It needs no provider credentials or network access.
-
-An optional live-provider smoke test remains available for Pi/provider compatibility; it is not a merge gate:
-
-```bash
-PI_TEST_MODEL="openai-codex/gpt-5.6-luna" PI_TEST_TIMEOUT=180000 \
-  npm run test:integration:live
-```
-
-`PI_TEST_MODEL` selects the parent and child runtime only in live mode.
+Other terminal multiplexers are not supported. Worktrees isolate Git checkouts, not processes or permissions; child agents and installed Pi packages run with your user account's access.
 
 ## Install
 
-Install the package globally from npm:
+Install from npm:
 
 ```bash
 pi install npm:pi-herdr-agents
 ```
 
-Use `pi install -l npm:pi-herdr-agents` for a project-local installation, or try it for one run without changing settings:
+Install project-locally or try it for one run:
 
 ```bash
+pi install -l npm:pi-herdr-agents
 pi -e npm:pi-herdr-agents
 ```
 
-Pi packages execute with your user account's full system access. Review the package source before installation.
-
-The documented `npm version` release step updates [CHANGELOG.md](CHANGELOG.md). Pushing that version change to `main` publishes to npm and creates the matching Git tag and GitHub Release. For bootstrap authentication, versioning, verification, and troubleshooting, see [RELEASING.md](RELEASING.md).
-
-Start herdr, then run pi inside it:
+Then start Pi inside Herdr:
 
 ```bash
 herdr
 pi
 ```
 
-herdr is the only supported terminal environment. The extension requires `HERDR_ENV=1` and the `herdr` CLI to be available.
+Restart or `/reload` Pi after installation. Review package source before installing any Pi package.
 
-### Troubleshooting completion delivery
+## Quick start
+
+Ask Pi to delegate naturally:
+
+```text
+Use two scouts in parallel to map the authentication flow, then summarize their findings.
+```
+
+Or launch a named role directly:
+
+```text
+/subagent scout Analyze the authentication module and report relevant files and risks
+```
+
+For an isolated writing task:
+
+```text
+/worktree auth-fix Implement the approved authentication fix and run the focused tests
+```
+
+Pi can also call the tool directly:
+
+```typescript
+subagent({ name: "Auth scout", agent: "scout", task: "Map the authentication flow" });
+subagent({ name: "DB scout", agent: "scout", task: "Map the session schema" });
+// Both return immediately; each result comes back independently.
+```
+
+Use ordinary panes for read-only agents. Give each independent writing agent a unique managed worktree; see [Worktree subagents](docs/worktree-subagents.md).
+
+## How it works
+
+![Pi Herdr Agents lifecycle: spawn a child, run it in Herdr, supervise live state, and deliver one bounded result to the parent.](https://raw.githubusercontent.com/giuseppecrj/pi-herdr-agents/main/docs/assets/async-subagent-lifecycle.png)
+
+A `subagent` call creates a dedicated Herdr pane or worktree, launches a child Pi session, and returns `started`. The parent watcher combines Herdr process state with child activity details and projects the result into a live widget:
+
+```text
+╭─ Subagents ──────────────────── 1 active · 1 open ─╮
+│ 00:23  Scout: Auth (scout)        active · read 7m │
+│ 00:45  Reviewer (reviewer)              waiting 2m │
+╰────────────────────────────────────────────────────╯
+```
+
+When the child completes, the parent receives one bounded `subagent_result` message and starts a new turn with that result in context. Callers never need to poll, tail session files, or wait in a shell loop.
+
+## Troubleshooting completion delivery
 
 If a child finishes but the parent returns an empty or unrelated response, first verify that the result reached the parent session:
 
@@ -865,17 +880,31 @@ Every sub-agent session displays a compact tools widget showing available and de
 
 ---
 
-## Requirements
+## Development
 
-- [Pi](https://github.com/earendil-works/pi) — the coding agent
-- [herdr](https://herdr.dev) — the required terminal workspace
+Run local checks:
 
 ```bash
-herdr
-pi
+npm ci
+npm test
+npm run lint
+npm pack --dry-run
 ```
 
-Other multiplexers and terminal backends are not supported. Worktrees provide Git checkout isolation only, not process or security isolation; child agents and installed Pi packages run with your user's filesystem and command permissions.
+Run the required end-to-end suite from inside Herdr:
+
+```bash
+npm run test:integration
+```
+
+The deterministic suite launches real Pi sessions, Herdr panes, and worktrees without provider credentials. The optional live-provider smoke test is not a merge gate:
+
+```bash
+PI_TEST_MODEL="openai-codex/gpt-5.6-luna" PI_TEST_TIMEOUT=180000 \
+  npm run test:integration:live
+```
+
+See [RELEASING.md](RELEASING.md) for versioning, trusted publication, and release verification.
 
 ---
 

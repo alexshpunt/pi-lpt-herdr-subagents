@@ -1,5 +1,6 @@
 .pi/
 test/
+docs/assets/
 .github/
 .gitignore
 config.json

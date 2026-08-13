@@ -3095,6 +3095,34 @@ describe("commands", () => {
 		);
 	});
 
+	it("registers /worktree with only its list subcommand", async () => {
+		const { api, registeredCommands } = createMockExtensionApi();
+		(subagentsModule as any).default(api);
+
+		const worktree = registeredCommands.find(
+			(command) => command.name === "worktree",
+		);
+		assert.ok(worktree, "expected /worktree to be registered");
+		assert.equal(
+			registeredCommands.some((command) => command.name === "handoff-worktree"),
+			false,
+		);
+
+		const notifications: Array<{ message: string; level: string }> = [];
+		await worktree.handler("", {
+			ui: {
+				notify: (message: string, level: string) =>
+					notifications.push({ message, level }),
+			},
+		});
+		assert.deepEqual(notifications, [
+			{
+				message: "Usage: /worktree <name> [task] | /worktree list",
+				level: "warning",
+			},
+		]);
+	});
+
 	it("registers direct BTW commands without steering the parent", async () => {
 		const { api, registeredCommands, sentUserMessages } =
 			createMockExtensionApi();
@@ -4726,6 +4754,42 @@ describe("herdr.ts", () => {
 	});
 
 	describe("herdr command construction", () => {
+		it("parses worktree list results", () => {
+			assert.deepEqual(
+				__herdrTest__.parseHerdrWorktreeList(
+					JSON.stringify({
+						result: {
+							type: "worktree_list",
+							worktrees: [
+								{
+									branch: "main",
+									path: "/repo",
+									is_linked_worktree: false,
+								},
+								{
+									branch: "feature/auth",
+									path: "/tmp/auth",
+									label: "Auth",
+									open_workspace_id: "w9",
+									is_linked_worktree: true,
+								},
+							],
+						},
+					}),
+				),
+				[
+					{ branch: "main", path: "/repo", isLinkedWorktree: false },
+					{
+						branch: "feature/auth",
+						path: "/tmp/auth",
+						label: "Auth",
+						workspaceId: "w9",
+						isLinkedWorktree: true,
+					},
+				],
+			);
+		});
+
 		it("uses caller context when discovering the current pane", () => {
 			assert.deepEqual(__herdrTest__.buildCurrentPaneArgs(), [
 				"pane",

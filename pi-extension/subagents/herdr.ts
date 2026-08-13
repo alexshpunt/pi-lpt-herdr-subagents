@@ -222,6 +222,57 @@ export function createHerdrSurface(name: string): string {
   return paneId;
 }
 
+/** Worktree records returned by `herdr worktree list`. */
+export interface HerdrWorktreeInfo {
+  branch: string;
+  path: string;
+  label?: string;
+  workspaceId?: string;
+  isLinkedWorktree: boolean;
+}
+
+export function parseHerdrWorktreeList(output: string): HerdrWorktreeInfo[] {
+  const parsed = parseHerdrJson(output) as {
+    result?: {
+      type?: unknown;
+      worktrees?: Array<{
+        branch?: unknown;
+        path?: unknown;
+        label?: unknown;
+        open_workspace_id?: unknown;
+        is_linked_worktree?: unknown;
+      }>;
+    };
+  } | null;
+  const worktrees = parsed?.result?.worktrees;
+  if (parsed?.result?.type !== "worktree_list" || !Array.isArray(worktrees)) {
+    throw new Error("Unexpected herdr worktree list output");
+  }
+  return worktrees.map((worktree) => {
+    if (
+      typeof worktree.branch !== "string" ||
+      typeof worktree.path !== "string"
+    ) {
+      throw new Error("Unexpected herdr worktree list entry");
+    }
+    return {
+      branch: worktree.branch,
+      path: worktree.path,
+      ...(typeof worktree.label === "string" ? { label: worktree.label } : {}),
+      ...(typeof worktree.open_workspace_id === "string"
+        ? { workspaceId: worktree.open_workspace_id }
+        : {}),
+      isLinkedWorktree: worktree.is_linked_worktree === true,
+    };
+  });
+}
+
+export function listHerdrWorktrees(cwd?: string): HerdrWorktreeInfo[] {
+  const args = ["worktree", "list"];
+  if (cwd) args.push("--cwd", cwd);
+  return parseHerdrWorktreeList(herdrExec(args));
+}
+
 export function createHerdrWorktree(
   name: string,
   cwd: string,
@@ -584,6 +635,7 @@ export const __herdrTest__ = {
   extractHerdrPaneId,
   extractHerdrRootPaneId,
   extractHerdrWorktree,
+  parseHerdrWorktreeList,
   parsePaneGetOutput,
   parsePaneGetError,
 	parsePaneProcessInfo,

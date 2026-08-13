@@ -523,9 +523,9 @@ Use `/btw` for a quick side question without adding a turn to the main session:
 
 The extension snapshots the current active conversation branch, opens a non-focused Herdr tab, and starts an interactive Pi session with the same model and thinking level. The answer stays in that tab and is never delivered as a subagent result. A second `/btw` replaces the previous one; `/btw-close` closes it explicitly.
 
-### `/handoff-worktree`
+### `/worktree`
 
-`/handoff-worktree <branch> [--base <ref>] [task]` creates an exact-base Herdr-managed worktree and launches a new interactive Pi session there with the active conversation branch plus bounded handoff context. It focuses the destination workspace only after the launch command is accepted. The original session and worktree remain available for recovery; no merge, push, cleanup, or parent-checkout switch occurs. This is a new-process handoff, not an in-place move of the existing shell or Pi process.
+`/worktree <worktree> [task]` creates a Herdr-managed worktree from the current committed branch and launches a new interactive Pi session there with the active conversation branch. The original session remains available. Use `/worktree list` to list worktrees for the current repository. This is a new-process handoff, not an in-place move of the existing shell or Pi process.
 
 BTW shares the current working directory. It treats inherited work as reference context and modifies the workspace only when the side question explicitly requests it. Cleanup is best effort; if closing fails, the tab remains available for manual recovery.
 

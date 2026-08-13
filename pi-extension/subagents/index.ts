@@ -109,6 +109,7 @@ import {
 	type SubagentLifecycle,
 	type PaneInspection,
 } from "./lifecycle.ts";
+import { listHerdrWorktrees } from "./herdr.ts";
 import {
 	captureWorktreeHandoff,
 	launchPiSubagent,
@@ -3838,15 +3839,40 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	// /iterate command — fork the session into a subagent
-	pi.registerCommand("handoff-worktree", {
-		description: "Launch an interactive Pi session in a new managed worktree",
+	pi.registerCommand("worktree", {
+		description:
+			"Fork this session into a worktree; use /worktree list to inspect them",
 		handler: async (args, ctx) => {
 			const parts = args.trim().split(/\s+/).filter(Boolean);
+			if (parts[0] === "list") {
+				if (!isTerminalAvailable()) {
+					ctx.ui.notify(terminalSetupHint(), "error");
+					return;
+				}
+				try {
+					const worktrees = listHerdrWorktrees(ctx.cwd);
+					ctx.ui.notify(
+						worktrees
+							.map(
+								(worktree) =>
+									`${worktree.branch} — ${worktree.path}${worktree.workspaceId ? ` (${worktree.workspaceId})` : ""}`,
+							)
+							.join("\n") || "No worktrees found.",
+						"info",
+					);
+				} catch (error) {
+					ctx.ui.notify(
+						`Worktree list failed: ${error instanceof Error ? error.message : String(error)}`,
+						"error",
+					);
+				}
+				return;
+			}
+
 			const branch = parts.shift();
 			if (!branch) {
 				ctx.ui.notify(
-					"Usage: /handoff-worktree <branch> [--base <ref>] [task]",
+					"Usage: /worktree <name> [task] | /worktree list",
 					"warning",
 				);
 				return;
@@ -3870,16 +3896,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				if (!isThinkingLevel(thinking)) {
 					throw new Error(`Unsupported parent thinking level: ${thinking}`);
 				}
-				let base = "HEAD";
-				if (parts[0] === "--base") {
-					base = parts[1] ?? "";
-					parts.splice(0, 2);
-					if (!base) throw new Error("--base requires a Git revision");
-				} else if (parts[0]?.startsWith("--base=")) {
-					const option = parts.shift() ?? "";
-					base = option.slice("--base=".length);
-					if (!base) throw new Error("--base requires a Git revision");
-				}
 				const task =
 					parts.join(" ") ||
 					"Continue the current work in the new worktree.";
@@ -3895,10 +3911,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				);
 				const result = await launchPiWorktreeHandoff({
 					kind: "fresh",
-					name: `Handoff: ${branch}`,
+					name: `Worktree: ${branch}`,
 					task,
 					cwd: ctx.cwd,
-					worktree: { branch, base },
+					worktree: { branch },
 					handoff: { leafId },
 					parent: {
 						cwd: ctx.cwd,
@@ -3922,13 +3938,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				}
 				ctx.ui.notify(
 					result.focusError
-						? `Handoff launched, but workspace focus failed: ${result.focusError}\nWorktree: ${worktree.path}`
-						: `Handoff launched in ${worktree.path} (workspace ${worktree.workspaceId}).`,
+						? `Worktree launched, but workspace focus failed: ${result.focusError}\nWorktree: ${worktree.path}`
+						: `Worktree launched in ${worktree.path} (workspace ${worktree.workspaceId}).`,
 					result.focusError ? "warning" : "info",
 				);
 			} catch (error) {
 				ctx.ui.notify(
-					`Worktree handoff failed: ${error instanceof Error ? error.message : String(error)}`,
+					`Worktree launch failed: ${error instanceof Error ? error.message : String(error)}`,
 					"error",
 				);
 			}

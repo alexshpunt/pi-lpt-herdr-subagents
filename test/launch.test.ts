@@ -505,7 +505,11 @@ describe("Pi launch", () => {
 						type: "message",
 						id: "ready-user",
 						parentId: null,
-						message: { role: "user", content: [{ type: "text", text: "start" }], timestamp: 1 },
+						message: {
+							role: "user",
+							content: [{ type: "text", text: "start" }],
+							timestamp: 1,
+						},
 					},
 					{
 						type: "message",
@@ -522,7 +526,9 @@ describe("Pi launch", () => {
 							timestamp: 2,
 						},
 					},
-				].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+				]
+					.map((entry) => JSON.stringify(entry))
+					.join("\n") + "\n",
 			);
 			const worktreePath = join(root, "shell-timeout-tree");
 			const manifestFile = join(
@@ -541,14 +547,31 @@ describe("Pi launch", () => {
 						handoff: { leafId: "ready-assistant" },
 					},
 					{
-						createPane: () => { throw new Error("unexpected pane creation"); },
-						createWorktree(_name, cwd, branch, base) {
-							execFileSync("git", ["worktree", "add", "-q", "-b", branch, worktreePath, base], { cwd });
-							return { path: worktreePath, branch, workspaceId: "workspace-timeout", paneId: "pane-timeout" };
+						createPane: () => {
+							throw new Error("unexpected pane creation");
 						},
-						waitForShellReady: async () => { throw new Error("shell timeout"); },
-						runScript: () => { throw new Error("must not run"); },
-						focusWorkspace: () => { throw new Error("must not focus"); },
+						createWorktree(_name, cwd, branch, base) {
+							execFileSync(
+								"git",
+								["worktree", "add", "-q", "-b", branch, worktreePath, base],
+								{ cwd },
+							);
+							return {
+								path: worktreePath,
+								branch,
+								workspaceId: "workspace-timeout",
+								paneId: "pane-timeout",
+							};
+						},
+						waitForShellReady: async () => {
+							throw new Error("shell timeout");
+						},
+						runScript: () => {
+							throw new Error("must not run");
+						},
+						focusWorkspace: () => {
+							throw new Error("must not focus");
+						},
 					},
 				),
 				/shell timeout/i,
@@ -556,14 +579,19 @@ describe("Pi launch", () => {
 			const manifest = JSON.parse(readFileSync(manifestFile, "utf8"));
 			assert.equal(manifest.state, "failed");
 			assert.equal(existsSync(manifest.sessionFile), true);
-			assert.match(readFileSync(manifest.sessionFile, "utf8"), /pi-herdr-worktree-handoff/);
+			assert.match(
+				readFileSync(manifest.sessionFile, "utf8"),
+				/pi-herdr-worktree-handoff/,
+			);
 		});
 	});
 
 	it("does not focus or report success when Pi startup is not confirmed", async () => {
 		await withFixture(async ({ request, project, sessionDir, root }) => {
 			execFileSync("git", ["init", "-q"], { cwd: project });
-			execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: project });
+			execFileSync("git", ["config", "user.email", "test@example.com"], {
+				cwd: project,
+			});
 			execFileSync("git", ["config", "user.name", "Test"], { cwd: project });
 			writeFileSync(join(project, "base.txt"), "base\n");
 			execFileSync("git", ["add", "base.txt"], { cwd: project });
@@ -572,32 +600,85 @@ describe("Pi launch", () => {
 				request.parent.sessionFile,
 				[
 					{ type: "session", version: 3, id: "parent", cwd: project },
-					{ type: "message", id: "startup-user", parentId: null, message: { role: "user", content: [{ type: "text", text: "start" }], timestamp: 1 } },
-					{ type: "message", id: "startup-assistant", parentId: "startup-user", message: { role: "assistant", content: [{ type: "text", text: "ready" }], api: "test", provider: "fake", model: "worker", usage: {}, stopReason: "stop", timestamp: 2 } },
-				].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+					{
+						type: "message",
+						id: "startup-user",
+						parentId: null,
+						message: {
+							role: "user",
+							content: [{ type: "text", text: "start" }],
+							timestamp: 1,
+						},
+					},
+					{
+						type: "message",
+						id: "startup-assistant",
+						parentId: "startup-user",
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: "ready" }],
+							api: "test",
+							provider: "fake",
+							model: "worker",
+							usage: {},
+							stopReason: "stop",
+							timestamp: 2,
+						},
+					},
+				]
+					.map((entry) => JSON.stringify(entry))
+					.join("\n") + "\n",
 			);
 			const worktreePath = join(root, "startup-failed-tree");
-			const manifestFile = join(sessionDir, "artifacts", "parent", "worktree-runs", "child-1.json");
+			const manifestFile = join(
+				sessionDir,
+				"artifacts",
+				"parent",
+				"worktree-runs",
+				"child-1.json",
+			);
 			let focused = false;
 			await assert.rejects(
 				launchPiWorktreeHandoff(
-					{ ...request, worktree: { branch: "issue/startup-failed" }, handoff: { leafId: "startup-assistant" } },
 					{
-						createPane: () => { throw new Error("unexpected pane creation"); },
+						...request,
+						worktree: { branch: "issue/startup-failed" },
+						handoff: { leafId: "startup-assistant" },
+					},
+					{
+						createPane: () => {
+							throw new Error("unexpected pane creation");
+						},
 						createWorktree(_name, cwd, branch, base) {
-							execFileSync("git", ["worktree", "add", "-q", "-b", branch, worktreePath, base], { cwd });
-							return { path: worktreePath, branch, workspaceId: "workspace-startup", paneId: "pane-startup" };
+							execFileSync(
+								"git",
+								["worktree", "add", "-q", "-b", branch, worktreePath, base],
+								{ cwd },
+							);
+							return {
+								path: worktreePath,
+								branch,
+								workspaceId: "workspace-startup",
+								paneId: "pane-startup",
+							};
 						},
 						waitForShellReady: async () => {},
 						runScript: (_surface, _command, options) => options.scriptPath,
-						waitForPiReady: async () => { throw new Error("pi exited before startup"); },
-						focusWorkspace: () => { focused = true; },
+						waitForPiReady: async () => {
+							throw new Error("pi exited before startup");
+						},
+						focusWorkspace: () => {
+							focused = true;
+						},
 					},
 				),
 				/worktree retained.*pi exited before startup/i,
 			);
 			assert.equal(focused, false);
-			assert.equal(JSON.parse(readFileSync(manifestFile, "utf8")).state, "failed");
+			assert.equal(
+				JSON.parse(readFileSync(manifestFile, "utf8")).state,
+				"failed",
+			);
 		});
 	});
 
@@ -631,7 +712,7 @@ describe("Pi launch", () => {
 						parentId: "failure-user",
 						message: {
 							role: "assistant",
-						content: [{ type: "text", text: "ready" }],
+							content: [{ type: "text", text: "ready" }],
 							api: "test",
 							provider: "fake",
 							model: "worker",

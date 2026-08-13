@@ -137,7 +137,11 @@ export interface PiLaunchOperations {
 		command: string,
 		options: { scriptPath: string; scriptPreamble: string },
 	): string;
-	waitForPiReady?(surface: string, sessionFile: string, cwd: string): Promise<void>;
+	waitForPiReady?(
+		surface: string,
+		sessionFile: string,
+		cwd: string,
+	): Promise<void>;
 	focusWorkspace?(workspaceId: string): void;
 }
 
@@ -233,7 +237,8 @@ async function launchFreshPiSubagent(
 			? prepareTaskArtifacts(resolved, session)
 			: undefined;
 		await confirmShellReady(session, operations);
-		const artifacts = handoffArtifacts ?? prepareTaskArtifacts(resolved, session);
+		const artifacts =
+			handoffArtifacts ?? prepareTaskArtifacts(resolved, session);
 		const command = buildPiCommand(resolved, artifacts);
 		const launchScriptFile = startPiProcess(
 			resolved,

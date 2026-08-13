@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -515,6 +516,7 @@ describe("Pi launch", () => {
 					},
 				].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
 			);
+			const parentBefore = readFileSync(request.parent.sessionFile, "utf8");
 			const worktreePath = join(root, "failed-tree");
 			const manifestFile = join(
 				sessionDir,
@@ -546,10 +548,13 @@ describe("Pi launch", () => {
 				runScript() {
 					throw new Error("pane rejected command");
 				},
+				focusWorkspace() {
+					throw new Error("focus must not run after launch failure");
+				},
 			};
 
 			await assert.rejects(
-				launchPiSubagent(
+				launchPiWorktreeHandoff(
 					{
 						...request,
 						worktree: { branch: "issue/7-failed" },
@@ -563,7 +568,15 @@ describe("Pi launch", () => {
 			assert.equal(manifest.state, "failed");
 			assert.equal(manifest.path, worktreePath);
 			assert.equal(manifest.sourceSessionFile, request.parent.sessionFile);
+			assert.match(manifest.handoffMessage, /issue\/7-failed/);
 			assert.equal(manifest.clean, true);
+			assert.equal(existsSync(worktreePath), true);
+			assert.equal(existsSync(manifest.sessionFile), true);
+			assert.match(
+				readFileSync(manifest.sessionFile, "utf8"),
+				/pi-herdr-worktree-handoff/,
+			);
+			assert.equal(readFileSync(request.parent.sessionFile, "utf8"), parentBefore);
 		});
 	});
 });

@@ -103,7 +103,7 @@ Subagent tabs, panes, and worktree workspaces are created without stealing keybo
 
 ### Extensions
 
-**Subagents** — 5 main-session tools + 5 commands, plus 2 child-only tools:
+**Subagents** — 5 main-session tools + 6 commands, plus 2 child-only tools:
 
 | Tool                 | Description                                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------- |
@@ -124,6 +124,7 @@ Subagent tabs, panes, and worktree workspaces are created without stealing keybo
 | `/iterate`                 | Fork into a subagent for quick fixes |
 | `/btw <question>`          | Open an ephemeral side-question session in a background tab |
 | `/btw-close`               | Close the current BTW session        |
+| `/worktree <name> [task]`  | Continue this session in a new managed worktree (`/worktree list` lists them) |
 | `/subagent <agent> <task>` | Spawn a named agent directly (`/subagent list` lists available agents) |
 
 ### Taxonomy and discovery
@@ -149,6 +150,7 @@ The current workflow inventory is:
 | Planning | `/plan` | Scout → interactive planner → workers → reviewer; writes `.pi/plans/...` artifacts; runs on Pi. |
 | Iteration | `/iterate` | Opens one interactive full-context Pi fork and returns its completion summary. |
 | Side question | `/btw`, `/btw-close` | Opens one replaceable interactive Pi side session; its answer stays outside the parent transcript. |
+| Worktree handoff | `/worktree <name> [task]`, `/worktree list` | Forks the active conversation into a long-lived interactive Pi process in a new worktree created from committed `HEAD`; retains the parent session. |
 | Approved review runner | `herdr_workflow` (low-level control tool) | Validates and runs exact approved project-local JavaScript with bounded read-only Pi reviewers. The bundled `orchestrate` skill authors this first-flow topology. |
 | Adversarial review | `adversarial-reviewer` | Transitional workflow implementation that selects three distinct authenticated Pi runtimes for generic reviewer passes, preferring provider diversity; it writes `.reviews/...` artifacts. It remains visible and launchable until a dedicated workflow surface replaces it. |
 
@@ -523,11 +525,13 @@ Use `/btw` for a quick side question without adding a turn to the main session:
 
 The extension snapshots the current active conversation branch, opens a non-focused Herdr tab, and starts an interactive Pi session with the same model and thinking level. The answer stays in that tab and is never delivered as a subagent result. A second `/btw` replaces the previous one; `/btw-close` closes it explicitly.
 
-### `/worktree`
+BTW shares the current working directory. It treats inherited work as reference context and modifies the workspace only when the side question explicitly requests it. Cleanup is best effort; if closing fails, the tab remains available for manual recovery.
+
+---
+
+## The `/worktree` Workflow
 
 `/worktree <worktree> [task]` creates a Herdr-managed worktree from the current committed branch and launches a new interactive Pi session there with the active conversation branch. The original session remains available. Use `/worktree list` to list worktrees for the current repository. This is a new-process handoff, not an in-place move of the existing shell or Pi process.
-
-BTW shares the current working directory. It treats inherited work as reference context and modifies the workspace only when the side question explicitly requests it. Cleanup is best effort; if closing fails, the tab remains available for manual recovery.
 
 ---
 

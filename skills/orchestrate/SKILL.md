@@ -31,19 +31,19 @@ package.
 ## 2. Parent-only preflight
 
 Perform discovery in the parent session only. Inspect the source and candidate
-revision, identify the review questions, and resolve distinct available Pi
-review roles and their exact authenticated `provider/model` and `thinking`
-values. Use the normal role discovery and model catalog already available to
-the parent; do not add a tracker client, a second discovery mechanism, or ask a
-child to discover roles.
+revision, identify the review questions, and resolve available Pi review roles
+with their exact authenticated `provider/model` and `thinking` values. Use the
+normal role discovery and model catalog already available to the parent; do not
+add a tracker client, a second discovery mechanism, or ask a child to discover
+roles.
 
-Choose at least two independent reviewer roles and one different synthesizer
-role. Every declared role must be distinct, Pi-backed, and have a non-empty
-read-only tool set after runner derivation. Use bounded caps no higher than
-`maxAgents: 8` and `maxConcurrency: 4`; leave enough agent calls for one
-synthesizer and any permitted replacement. Exact model and thinking are
-mandatory for every role. Never inherit, guess, or fall back to a parent or
-role default.
+Choose at least two independent reviewer nodes and one fresh synthesis node.
+Each node needs a distinct ID, but independent nodes can use the same review
+role. Every declared role must be Pi-backed and have a non-empty read-only tool
+set after runner derivation. Use bounded caps no higher than `maxAgents: 8` and
+`maxConcurrency: 4`; leave enough agent calls for one synthesizer and any
+permitted replacement. Exact model and thinking are mandatory for every node.
+Never inherit, guess, or fall back to a parent or role default.
 
 The first flow is review-only. Do not plan writers, commits, worktrees for
 writing, ticket changes, pull requests, merges, deployments, publishing,
@@ -68,9 +68,9 @@ runner metadata comment, with only the fields accepted by the runner:
   "maxAgents": 8,
   "maxConcurrency": 4,
   "roles": [
-    {"role": "<review-role-a>", "kind": "review", "model": "<provider/model>", "thinking": "<level>"},
-    {"role": "<review-role-b>", "kind": "review", "model": "<provider/model>", "thinking": "<level>"},
-    {"role": "<synthesizer-role>", "kind": "review", "model": "<provider/model>", "thinking": "<level>"}
+    {"id": "<review-node-a>", "role": "<review-role>", "kind": "review", "model": "<provider/model>", "thinking": "<level>"},
+    {"id": "<review-node-b>", "role": "<review-role>", "kind": "review", "model": "<provider/model>", "thinking": "<level>"},
+    {"id": "<synthesis-node>", "role": "<review-role>", "kind": "review", "model": "<provider/model>", "thinking": "<level>"}
   ]
 }
 */
@@ -85,20 +85,20 @@ must be explicit. Keep the script below the runner's size limit.
 
 Launch independent fresh reviewers with ordinary JavaScript and `Promise.all`.
 Each reviewer must get the exact evidence and the same review request, while
-retaining its distinct declared role. Pass only
-`{ kind: "review", role: "<declared-role>" }` to `agent()`; the script cannot
+retaining its distinct declared node ID. Pass only
+`{ kind: "review", node: "<declared-node>" }` to `agent()`; the script cannot
 select tools, model, thinking, cwd, skills, or context.
 
-A required reviewer may have at most one fresh same-role replacement, and only
+A required reviewer may have at most one fresh same-node replacement, and only
 when its returned failure envelope explicitly has `retryable === true`:
 
 ```js
-const finalReviews = await Promise.all(reviewRequests.map(async ({ role, prompt }) => {
-  const first = await agent(prompt, { kind: "review", role });
+const finalReviews = await Promise.all(reviewRequests.map(async ({ node, prompt }) => {
+  const first = await agent(prompt, { kind: "review", node });
   if (first && first.ok === false && first.retryable === true) {
     return await agent(prompt + "\nThis is the one approved replacement attempt.", {
       kind: "review",
-      role,
+      node,
     });
   }
   return first;
@@ -107,20 +107,20 @@ const finalReviews = await Promise.all(reviewRequests.map(async ({ role, prompt 
 
 Do not infer retryability from prose, error text, stop reasons, null values, or
 negative review findings. Do not retry a successful review or a failure without
-explicit `retryable: true`. The replacement keeps the exact same role and
-approved runtime. Current runtime failures are non-retryable, so this branch is
+explicit `retryable: true`. The replacement keeps the exact same review node
+and approved runtime. Current runtime failures are non-retryable, so this branch is
 normally dormant; do not invent a retryable integration fixture.
 
 Start one fresh synthesizer only after all reviewers and any bounded
 replacement have settled. It must receive the exact source evidence and every
 final reviewer success/failure envelope, including failures; never filter,
 collapse, or synthesize in the parent. The synthesizer is a distinct declared
-role and uses only:
+node and uses only:
 
 ```js
 const synthesis = await agent(synthesisPrompt, {
   kind: "review",
-  role: "<synthesizer-role>",
+  node: "<synthesis-node>",
 });
 ```
 

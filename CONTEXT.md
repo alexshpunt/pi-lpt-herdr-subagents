@@ -64,6 +64,12 @@ _Avoid_: Required tracker integration, silent fallback
 A bounded planned subagent run that may cover one, part of one, or several source tickets while retaining source traceability. The shipped first flow accepts only `kind: "review"`; `read` and `write` remain deferred kinds for later workflows.
 _Avoid_: Ticket, untracked child run, inferred effect, first-flow read/write node
 
+**Review node**:
+A declared workflow execution identity that pins one role, exact runtime, and
+thinking level. Node IDs are unique within a workflow; several nodes can use
+the same role.
+_Avoid_: Role identity, implicit runtime, duplicate-role prohibition
+
 **Writer lane (deferred)**:
 A possible later single write node and retained worktree; it is not part of the first review-only workflow and requires separate evidence and approval.
 _Avoid_: First-flow writer, parallel writers, shared-checkout writer
@@ -121,7 +127,7 @@ The final fresh read-only review node that receives every explicit reviewer succ
 _Avoid_: Filtered failures, mechanical worst-verdict rule, parent-side synthesis
 
 **Parent-guided recovery**:
-Current runtime child failures are explicit non-retryable evidence. The parent can approve a new smaller workflow for missing coverage. The bundled skill also contains one dormant same-role replacement branch, used only when a required failure explicitly has `retryable: true`; it never infers retryability from prose or runtime error text.
+Current runtime child failures are explicit non-retryable evidence. The parent can approve a new smaller workflow for missing coverage. The bundled skill also contains one dormant same-node replacement branch, used only when a required failure explicitly has `retryable: true`; it never infers retryability from prose or runtime error text.
 _Avoid_: Error-text retry classification, silent model fallback, unbounded retries
 
 **Incomplete review**:

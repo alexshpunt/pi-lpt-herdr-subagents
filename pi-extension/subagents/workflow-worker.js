@@ -15,9 +15,9 @@ function agent(prompt, options) {
 		Array.isArray(options) ||
 		Object.keys(options).length !== 2 ||
 		options.kind !== "review" ||
-		typeof options.role !== "string"
+		(typeof options.node !== "string" && typeof options.role !== "string")
 	) {
-		throw new Error("Workflow agent requires a prompt and { kind: 'review', role } options");
+		throw new Error("Workflow agent requires a prompt and { kind: 'review', node } options");
 	}
 	const id = String(++nextAgentId);
 	port.postMessage({ type: "agent", id, prompt, options });

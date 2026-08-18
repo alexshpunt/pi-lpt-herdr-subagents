@@ -1728,16 +1728,18 @@ describe("subagent discovery", () => {
 		);
 		assert.match(
 			instructions,
-			/select three distinct exact authenticated model IDs/i,
+			/select three distinct exact\s+authenticated model IDs/i,
 		);
+		assert.match(instructions, /project'?s review constraints/i);
 		assert.match(instructions, /prefer different\s+providers/i);
 		assert.match(
 			instructions,
-			/reuse the same three model IDs for the Skeptic/i,
+			/reuse the three selected model IDs/i,
 		);
+		assert.match(instructions, /fresh `reviewer` synthesis pass/i);
 		assert.match(
 			instructions,
-			/final assistant message is its complete report/i,
+			/Do not\s+create artifacts in the reviewed checkout/i,
 		);
 		assert.doesNotMatch(instructions, /tools:\s*["']read,bash,write["']/);
 	});

@@ -234,10 +234,7 @@ describe("workflow preparation", () => {
 		};
 		try {
 			const checkout = createWorkflowReaderCheckout(candidate, journal);
-			assert.equal(
-				readFileSync(join(checkout, "README.md"), "utf8"),
-				"# test\n",
-			);
+			assert.equal(readFileSync(join(checkout, "README.md"), "utf8"), "# test\n");
 			assert.equal(existsSync(join(checkout, "parent-only.txt")), false);
 			assert.deepEqual(
 				disposeWorkflowReaderCheckout(candidate, checkout, journal),
@@ -286,9 +283,7 @@ describe("workflow preparation", () => {
 		try {
 			const parent = createExtensionApi();
 			subagentsExtension(parent.api);
-			const control = parent.tools.find(
-				(tool) => tool.name === "herdr_workflow",
-			);
+			const control = parent.tools.find((tool) => tool.name === "herdr_workflow");
 			assert.ok(control);
 			const result = await control.execute(
 				"test",
@@ -312,7 +307,7 @@ describe("workflow preparation", () => {
 			assert.match(result.content[0].text, /Prepared workflow control/);
 			assert.match(
 				result.content[0].text,
-				/Role policy fingerprints: reviewer=[a-f0-9]{64}/,
+				/Review-node policy fingerprints: reviewer=[a-f0-9]{64}/,
 			);
 			assert.match(result.content[0].text, /APPROVE [a-f0-9]{8}/);
 			assert.throws(() =>
@@ -454,6 +449,67 @@ describe("workflow preparation", () => {
 		);
 	});
 
+	it("allows distinct review nodes to share one role", () => {
+		const baseSha = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], {
+			encoding: "utf8",
+		}).trim();
+		const legacyCandidate = prepare(
+			root,
+			writeWorkflow(root, workflow(baseSha), "legacy-reviewer-role"),
+		);
+		const legacy = subagentTest.resolveWorkflowReviewNode(
+			legacyCandidate.rolePolicies,
+			undefined,
+			"reviewer",
+		);
+		assert.ok("policy" in legacy);
+		assert.equal(legacy.policy.id, "reviewer");
+
+		const candidate = prepare(
+			root,
+			writeWorkflow(
+				root,
+				workflow(baseSha, {
+					roles: [
+						{
+							id: "standards",
+							role: "reviewer",
+							kind: "review",
+							model: "test/model",
+							thinking: "low",
+						},
+						{
+							id: "spec",
+							role: "reviewer",
+							kind: "review",
+							model: "test/model",
+							thinking: "low",
+						},
+					],
+				}),
+				"shared-reviewer-role",
+			),
+		);
+
+		assert.deepEqual(
+			candidate.rolePolicies.map(({ id, role }) => ({ id, role })),
+			[
+				{ id: "standards", role: "reviewer" },
+				{ id: "spec", role: "reviewer" },
+			],
+		);
+		assert.deepEqual(
+			subagentTest.resolveWorkflowReviewNode(
+				candidate.rolePolicies,
+				undefined,
+				"reviewer",
+			),
+			{
+				error: 'Workflow role "reviewer" is ambiguous; use a review node ID.',
+			},
+		);
+	});
+
 	it("fails closed at the artifact, metadata, source, and role-policy boundaries", () => {
 		const baseSha = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], {
 			encoding: "utf8",
@@ -479,11 +535,7 @@ describe("workflow preparation", () => {
 			{
 				name: "source path escape",
 				setup: (run) =>
-					writeWorkflow(
-						root,
-						workflow(baseSha, { sources: ["../outside"] }),
-						run,
-					),
+					writeWorkflow(root, workflow(baseSha, { sources: ["../outside"] }), run),
 			},
 			{
 				name: "unknown role",
@@ -568,7 +620,7 @@ describe("workflow preparation", () => {
 				},
 			},
 			{
-				name: "duplicate role",
+				name: "duplicate review node",
 				overrides: {
 					roles: [
 						{
@@ -678,7 +730,7 @@ describe("workflow preparation", () => {
 			writeWorkflow(
 				root,
 				workflow(baseSha) +
-					"return await agent('Review the source.', { kind: 'review', role: 'reviewer' });\n",
+					"return await agent('Review the source.', { kind: 'review', node: 'reviewer' });\n",
 				"worker-agent",
 			),
 		);
@@ -694,6 +746,30 @@ describe("workflow preparation", () => {
 			{ state: "completed", result: childResult },
 		);
 		assert.deepEqual(request, {
+			prompt: "Review the source.",
+			options: { kind: "review", node: "reviewer" },
+		});
+		const legacyAgent = prepare(
+			root,
+			writeWorkflow(
+				root,
+				workflow(baseSha) +
+					"return await agent('Review the source.', { kind: 'review', role: 'reviewer' });\n",
+				"worker-legacy-agent",
+			),
+		);
+		let legacyRequest: { prompt: string; options: unknown } | undefined;
+		assert.deepEqual(
+			await executeWorkflow(legacyAgent, {
+				deadlineMs: 1_000,
+				onAgent: async (prompt, options) => {
+					legacyRequest = { prompt, options };
+					return childResult;
+				},
+			}),
+			{ state: "completed", result: childResult },
+		);
+		assert.deepEqual(legacyRequest, {
 			prompt: "Review the source.",
 			options: { kind: "review", role: "reviewer" },
 		});
@@ -994,12 +1070,14 @@ return results;
 			1,
 		);
 		assert.equal(
-			readFileSync(join(settledDir, "run.jsonl"), "utf8").trim().split("\n").length,
+			readFileSync(join(settledDir, "run.jsonl"), "utf8").trim().split("\n")
+				.length,
 			2,
 		);
 		const secondRecords = recoverWorkflowStartup(root);
 		assert.equal(
-			secondRecords.find((record) => record.runId === "restart-running")?.interrupted,
+			secondRecords.find((record) => record.runId === "restart-running")
+				?.interrupted,
 			false,
 		);
 		assert.equal(readFileSync(interruptedPath, "utf8"), interrupted);
@@ -1043,8 +1121,7 @@ return results;
 				state: "failed",
 				error: {
 					code: "cancel_termination_failed",
-					message:
-						"Workflow cancellation could not confirm process exit for: 4242",
+					message: "Workflow cancellation could not confirm process exit for: 4242",
 				},
 			},
 			checkout: {
@@ -1146,9 +1223,7 @@ return { shouldNot: "complete" };
 		try {
 			const parent = createExtensionApi();
 			subagentsExtension(parent.api);
-			const control = parent.tools.find(
-				(tool) => tool.name === "herdr_workflow",
-			);
+			const control = parent.tools.find((tool) => tool.name === "herdr_workflow");
 			assert.ok(control);
 			const prepared = await control.execute(
 				"prep",
@@ -1239,10 +1314,7 @@ return { shouldNot: "complete" };
 					},
 				},
 			);
-			assert.match(
-				again.content[0].text,
-				/already ended as cancelled|cancelled/,
-			);
+			assert.match(again.content[0].text, /already ended as cancelled|cancelled/);
 			const delivered = await parent.nextMessage;
 			assert.equal(delivered.message.customType, "herdr_workflow_result");
 			assert.equal(delivered.message.details.state, "cancelled");
@@ -1254,16 +1326,11 @@ return { shouldNot: "complete" };
 				.split("\n")
 				.map((line) => JSON.parse(line));
 			const terminals = events.filter((event) =>
-				["completed", "failed", "cancelled", "interrupted"].includes(
-					event.type,
-				),
+				["completed", "failed", "cancelled", "interrupted"].includes(event.type),
 			);
 			assert.equal(terminals.length, 1);
 			assert.equal(terminals[0].type, "cancelled");
-			assert.equal(
-				events.filter((event) => event.type === "delivery").length,
-				1,
-			);
+			assert.equal(events.filter((event) => event.type === "delivery").length, 1);
 			assert.equal("envelope" in events.at(-1), false);
 		} finally {
 			process.chdir(previousCwd);
@@ -1312,6 +1379,7 @@ return { shouldNot: "complete" };
 				paneId: "survivor-pane",
 				shellPid: 4242,
 				pids: [4242],
+				foregroundProcesses: [],
 			}),
 			closeSurface: () => {},
 			waitAbsence: async () => true,
@@ -1320,9 +1388,7 @@ return { shouldNot: "complete" };
 		try {
 			const parent = createExtensionApi();
 			subagentsExtension(parent.api);
-			const control = parent.tools.find(
-				(tool) => tool.name === "herdr_workflow",
-			);
+			const control = parent.tools.find((tool) => tool.name === "herdr_workflow");
 			assert.ok(control);
 			const prepared = await control.execute(
 				"prep",
@@ -1464,20 +1530,12 @@ return { shouldNot: "complete" };
 				.split("\n")
 				.map((line) => JSON.parse(line));
 			const terminals = events.filter((event) =>
-				["completed", "failed", "cancelled", "interrupted"].includes(
-					event.type,
-				),
+				["completed", "failed", "cancelled", "interrupted"].includes(event.type),
 			);
 			assert.equal(terminals.length, 1);
 			assert.equal(terminals[0].type, "failed");
-			assert.equal(
-				terminals[0].envelope.error.code,
-				"cancel_termination_failed",
-			);
-			assert.equal(
-				events.filter((event) => event.type === "delivery").length,
-				1,
-			);
+			assert.equal(terminals[0].envelope.error.code, "cancel_termination_failed");
+			assert.equal(events.filter((event) => event.type === "delivery").length, 1);
 			assert.ok(
 				events.some(
 					(event) =>
@@ -1540,6 +1598,7 @@ return { shouldNot: "complete" };
 					paneId: "empty-pane",
 					shellPid: 1,
 					pids: [],
+					foregroundProcesses: [],
 				}),
 				closeSurface: () => {},
 				waitAbsence: async () => true,
@@ -1593,9 +1652,7 @@ return { shouldNot: "complete" };
 			try {
 				const parent = createExtensionApi();
 				subagentsExtension(parent.api);
-				const control = parent.tools.find(
-					(tool) => tool.name === "herdr_workflow",
-				);
+				const control = parent.tools.find((tool) => tool.name === "herdr_workflow");
 				assert.ok(control);
 				const prepared = await control.execute(
 					"prep",
@@ -1605,8 +1662,7 @@ return { shouldNot: "complete" };
 					{
 						cwd: root,
 						sessionManager: {
-							getSessionFile: () =>
-								join(root, `parent-${scenario.runId}.jsonl`),
+							getSessionFile: () => join(root, `parent-${scenario.runId}.jsonl`),
 							getSessionId: () => `session-${scenario.runId}`,
 							getLeafId: () => `leaf-${scenario.runId}`,
 						},
@@ -1626,8 +1682,7 @@ return { shouldNot: "complete" };
 					{
 						cwd: root,
 						sessionManager: {
-							getSessionFile: () =>
-								join(root, `parent-${scenario.runId}.jsonl`),
+							getSessionFile: () => join(root, `parent-${scenario.runId}.jsonl`),
 							getSessionId: () => `session-${scenario.runId}`,
 							getLeafId: () => `approval-${scenario.runId}`,
 							getBranch: () => [
@@ -1671,8 +1726,7 @@ return { shouldNot: "complete" };
 					{
 						cwd: root,
 						sessionManager: {
-							getSessionFile: () =>
-								join(root, `parent-${scenario.runId}.jsonl`),
+							getSessionFile: () => join(root, `parent-${scenario.runId}.jsonl`),
 							getSessionId: () => `session-${scenario.runId}`,
 							getLeafId: () => `approval-${scenario.runId}`,
 						},
@@ -1701,8 +1755,7 @@ return { shouldNot: "complete" };
 					{
 						cwd: root,
 						sessionManager: {
-							getSessionFile: () =>
-								join(root, `parent-${scenario.runId}.jsonl`),
+							getSessionFile: () => join(root, `parent-${scenario.runId}.jsonl`),
 							getSessionId: () => `session-${scenario.runId}`,
 							getLeafId: () => `approval-${scenario.runId}`,
 						},
@@ -1740,20 +1793,12 @@ return { shouldNot: "complete" };
 					.split("\n")
 					.map((line) => JSON.parse(line));
 				const terminals = events.filter((event) =>
-					["completed", "failed", "cancelled", "interrupted"].includes(
-						event.type,
-					),
+					["completed", "failed", "cancelled", "interrupted"].includes(event.type),
 				);
 				assert.equal(terminals.length, 1);
 				assert.equal(terminals[0].type, "failed");
-				assert.equal(
-					terminals[0].envelope.error.code,
-					"cancel_termination_failed",
-				);
-				assert.equal(
-					events.filter((event) => event.type === "delivery").length,
-					1,
-				);
+				assert.equal(terminals[0].envelope.error.code, "cancel_termination_failed");
+				assert.equal(events.filter((event) => event.type === "delivery").length, 1);
 				assert.ok(
 					events.some(
 						(event) =>

@@ -68,6 +68,7 @@ import {
 	type PendingWorkflow,
 	type WorkflowReaderCheckout,
 	type WorkflowRole,
+	type WorkflowRolePolicy,
 	type WorkflowTerminalGate,
 	type WorkflowTerminalOutcome,
 } from "./workflow.ts";
@@ -1743,6 +1744,26 @@ function buildWorkflowChildCommand(params: {
 	return `cd ${shellQuote(params.checkout)} && ${env} ${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
 }
 
+function resolveWorkflowReviewNode(
+	rolePolicies: WorkflowRolePolicy[],
+	node: string | undefined,
+	legacyRole: string | undefined,
+): { policy: WorkflowRolePolicy } | { error: string } {
+	const target = node ?? legacyRole ?? "";
+	const matches = rolePolicies.filter((value) =>
+		node === undefined ? value.role === legacyRole : value.id === node,
+	);
+	if (matches.length === 1) return { policy: matches[0] };
+	if (node === undefined && matches.length > 1) {
+		return {
+			error: `Workflow role ${JSON.stringify(legacyRole)} is ambiguous; use a review node ID.`,
+		};
+	}
+	return {
+		error: `Workflow review node ${JSON.stringify(target)} is unavailable.`,
+	};
+}
+
 export const __test__ = {
 	borderLine,
 	renderSubagentWidgetLines,
@@ -1756,6 +1777,7 @@ export const __test__ = {
 	buildPiPromptArgs,
 	buildBtwLaunchCommand,
 	buildWorkflowChildCommand,
+	resolveWorkflowReviewNode,
 	observeRunningSubagent,
 	resolveDenyTools,
 	resolveInterruptTarget,
@@ -2309,37 +2331,43 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 		if (!options || typeof options !== "object" || Array.isArray(options)) {
 			return workflowFailure(
 				"workflow_agent_options",
-				"Workflow agent options must contain kind: review and one declared role.",
+				"Workflow agent options must contain kind: review and one declared review node.",
 			);
 		}
 		const entries = Object.entries(options as Record<string, unknown>);
-		const { kind, role: roleName } = options as {
+		const {
+			kind,
+			node,
+			role: legacyRole,
+		} = options as {
 			kind?: unknown;
+			node?: unknown;
 			role?: unknown;
 		};
 		if (
 			entries.length !== 2 ||
 			kind !== "review" ||
-			typeof roleName !== "string"
+			(typeof node !== "string" && typeof legacyRole !== "string")
 		) {
 			return workflowFailure(
 				"workflow_agent_options",
-				"Workflow agent options must contain only kind: review and one declared role.",
+				"Workflow agent options must contain only kind: review and one declared review node.",
 			);
 		}
-		const policy = candidate.rolePolicies.find(
-			(value) => value.role === roleName,
+		const resolved = resolveWorkflowReviewNode(
+			candidate.rolePolicies,
+			typeof node === "string" ? node : undefined,
+			typeof legacyRole === "string" ? legacyRole : undefined,
 		);
-		const role = roles.find((value) => value.name === roleName);
-		if (
-			!policy ||
-			!role ||
-			role.disableModelInvocation ||
-			policy.tools.length === 0
-		) {
+		if ("error" in resolved)
+			return workflowFailure("policy_error", resolved.error);
+		const { policy } = resolved;
+		const nodeId = policy.id;
+		const role = roles.find((value) => value.name === policy.role);
+		if (!role || role.disableModelInvocation || policy.tools.length === 0) {
 			return workflowFailure(
 				"policy_error",
-				`Workflow role ${JSON.stringify(roleName)} is unavailable.`,
+				`Workflow review node ${JSON.stringify(nodeId)} is unavailable.`,
 			);
 		}
 		const id = `workflow-${candidate.runId}-${Math.random().toString(16).slice(2, 10)}`;
@@ -2357,7 +2385,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			if (childController.signal.aborted)
 				return workflowFailure("cancelled", "Workflow cancelled.");
 			mkdirSync(dirname(sessionFile), { recursive: true });
-			surface = createSubagentPane(`${candidate.runId}: ${roleName}`);
+			surface = createSubagentPane(`${candidate.runId}: ${nodeId}`);
 			owner.children.set(id, { controller: childController, surface });
 			await waitForShellReady(surface, { signal: childController.signal });
 			if (childController.signal.aborted)
@@ -2366,7 +2394,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				checkout,
 				sessionFile,
 				id,
-				name: roleName,
+				name: nodeId,
 				model: policy.model,
 				thinking: policy.thinking,
 				tools: policy.tools,
@@ -2375,7 +2403,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			});
 			journal.append("agent_started", {
 				id,
-				role: roleName,
+				node: nodeId,
+				role: role.name,
 				sessionFile,
 				tools: policy.tools,
 			});
@@ -2386,7 +2415,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			const watched = await watchSubagent(
 				{
 					id,
-					name: roleName,
+					name: nodeId,
 					task: prompt,
 					surface,
 					startTime: Date.now(),
@@ -2406,7 +2435,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			const finalAssistant = inspectFinalAssistantMessage(childEntries);
 			journal.append("agent_completed", {
 				id,
-				role: roleName,
+				node: nodeId,
+				role: role.name,
 				sessionFile,
 				sessionExists,
 				exitCode: watched.exitCode,

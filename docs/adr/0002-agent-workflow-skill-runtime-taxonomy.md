@@ -148,8 +148,9 @@ Apply these rules:
 
 This preserves the useful multi-model review behavior without baking a
 particular vendor choice into the generic `reviewer` role. Adversarial review
-selects three distinct exact authenticated Pi model IDs at runtime, preferring
-provider diversity, and launches generic `reviewer` children.
+first applies project review constraints, then selects three distinct eligible
+exact authenticated Pi model IDs, prefers provider diversity, and launches
+generic `reviewer` children followed by fresh reviewer synthesis.
 
 ### 5. Subagent execution is Pi-only
 
@@ -191,11 +192,11 @@ project authors can still add their own namespaced fields.
   `chrome-cdp` dependency declared through canonical `skills` metadata.
 - `claude-reviewer` — Removed. Use the generic `reviewer` role with an
   authenticated Claude model through Pi provider/model routing.
-- `adversarial-reviewer` — Workflow implementation pending a workflow surface.
-  It selects three distinct exact authenticated Pi model IDs at runtime,
-  preferring provider diversity, and launches generic `reviewer` children. Do
-  not clone this pattern for new outcomes; migrate its user contract to an
-  adversarial-review workflow.
+- `adversarial-reviewer` — Transitional workflow implementation. It applies
+  project review constraints, selects three distinct eligible exact
+  authenticated Pi model IDs, and launches generic `reviewer` children followed
+  by fresh reviewer synthesis. Do not clone this pattern for new outcomes;
+  migrate its user contract to an adversarial-review workflow.
 - `plan-skill.md` — Planning workflow instruction. Document by workflow purpose,
   not agent type.
 - `skills/orchestrate/SKILL.md` — Bundled native authoring skill for the first
@@ -215,9 +216,9 @@ not a general workflow registry.
    `scout`'s `output` metadata and `visual-tester`'s compatibility `skill` key.
 4. Document every current workflow—planning, iteration, side questions, and
    adversarial review—with its roles, artifacts, prerequisites, and runtime
-   policy in one place. Adversarial review selects three distinct exact
-   authenticated Pi model IDs at runtime, prefers provider diversity, and uses
-   generic `reviewer` children.
+   policy in one place. Adversarial review applies project constraints, selects
+   three distinct eligible exact authenticated Pi model IDs, prefers provider
+   diversity, and uses generic `reviewer` children with fresh synthesis.
 5. Remove bundled `claude-reviewer`; callers use the generic `reviewer` role
    with Pi provider/model routing.
 

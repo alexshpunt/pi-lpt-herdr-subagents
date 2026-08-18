@@ -44,7 +44,7 @@ const METADATA_FIELDS = new Set([
 	"maxConcurrency",
 	"roles",
 ]);
-const ROLE_FIELDS = new Set(["role", "kind", "model", "thinking"]);
+const ROLE_FIELDS = new Set(["id", "role", "kind", "model", "thinking"]);
 
 export class WorkflowPreparationError extends Error {
 	constructor(message: string) {
@@ -72,6 +72,7 @@ export interface WorkflowRole {
 }
 
 interface WorkflowMetadataRole {
+	id: string;
 	role: string;
 	kind: "review";
 	model: string;
@@ -89,6 +90,7 @@ interface WorkflowMetadata {
 }
 
 export interface WorkflowRolePolicy {
+	id: string;
 	role: string;
 	model: string;
 	thinking: ThinkingLevel;
@@ -274,14 +276,18 @@ function parseMetadata(source: string): WorkflowMetadata {
 	if (!Array.isArray(metadata.roles) || metadata.roles.length === 0) {
 		fail("workflow metadata roles must be a non-empty array");
 	}
-	const roleNames = new Set<string>();
+	const nodeIds = new Set<string>();
 	const roles = metadata.roles.map((candidate, index) => {
 		const role = object(candidate, `workflow metadata roles[${index}]`);
 		exactKeys(role, ROLE_FIELDS, `workflow metadata roles[${index}]`);
 		const name = string(role.role, `workflow metadata roles[${index}].role`);
-		if (roleNames.has(name))
-			fail(`workflow metadata has duplicate role ${JSON.stringify(name)}`);
-		roleNames.add(name);
+		const id =
+			role.id === undefined
+				? name
+				: string(role.id, `workflow metadata roles[${index}].id`);
+		if (nodeIds.has(id))
+			fail(`workflow metadata has duplicate review node ${JSON.stringify(id)}`);
+		nodeIds.add(id);
 		if (role.kind !== "review")
 			fail(`workflow role ${JSON.stringify(name)} must have kind "review"`);
 		const model = string(
@@ -294,7 +300,7 @@ function parseMetadata(source: string): WorkflowMetadata {
 		);
 		if (!isThinkingLevel(thinking))
 			fail(`workflow role ${JSON.stringify(name)} has unsupported thinking`);
-		return { role: name, kind: "review" as const, model, thinking };
+		return { id, role: name, kind: "review" as const, model, thinking };
 	});
 
 	return {
@@ -441,6 +447,7 @@ function resolveRolePolicies(
 			}),
 		);
 		return {
+			id: declared.id,
 			role: declared.role,
 			model: declared.model,
 			thinking: declared.thinking,
@@ -1201,8 +1208,8 @@ export function formatApprovalPacket(candidate: PendingWorkflow): string {
 		`Git common directory: ${candidate.repository.commonDir}`,
 		`Base commit: ${candidate.baseSha}`,
 		`Sources: ${candidate.sources.join(", ")}`,
-		`Roles: ${candidate.rolePolicies.map((role) => `${role.role} (${role.model}, ${role.thinking}; ${role.tools.join(", ")})`).join("; ")}`,
-		`Role policy fingerprints: ${candidate.rolePolicies.map((role) => `${role.role}=${role.fingerprint}`).join(", ")}`,
-		`To execute this exact workflow once, reply: APPROVE ${candidate.scriptHash.slice(0, 8)}`, 
+		`Review nodes: ${candidate.rolePolicies.map((role) => `${role.id}: ${role.role} (${role.model}, ${role.thinking}; ${role.tools.join(", ")})`).join("; ")}`,
+		`Review-node policy fingerprints: ${candidate.rolePolicies.map((role) => `${role.id}=${role.fingerprint}`).join(", ")}`,
+		`To execute this exact workflow once, reply: APPROVE ${candidate.scriptHash.slice(0, 8)}`,
 	].join("\n");
 }

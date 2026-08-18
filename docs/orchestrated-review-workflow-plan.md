@@ -162,12 +162,14 @@ The first bytes of `workflow.js` contain one parse-only JSON comment:
   "maxConcurrency": 3,
   "roles": [
     {
+      "id": "architecture",
       "role": "architecture-reviewer",
       "kind": "review",
       "model": "openai-codex/gpt-5.6-luna",
       "thinking": "low"
     },
     {
+      "id": "synthesis",
       "role": "review-synthesizer",
       "kind": "review",
       "model": "openai-codex/gpt-5.6-luna",
@@ -178,7 +180,7 @@ The first bytes of `workflow.js` contain one parse-only JSON comment:
 */
 ```
 
-Unknown fields, duplicate roles, missing or non-exact models, missing or unsupported thinking, non-review kinds, empty derived tool allowlists, missing commits, `maxAgents > 8`, `maxConcurrency > 4`, or concurrency above the agent cap fail preparation.
+Unknown fields, duplicate review-node IDs, missing or non-exact models, missing or unsupported thinking, non-review kinds, empty derived tool allowlists, missing commits, `maxAgents > 8`, `maxConcurrency > 4`, or concurrency above the agent cap fail preparation. Multiple nodes can reference one review role.
 
 `sources` records provenance only. Workflow children cannot read arbitrary parent paths or refetch URLs and tickets; the parent materializes exact source evidence into the approved script or prompts before preparation.
 
@@ -197,13 +199,13 @@ V1 exposes only:
 ```ts
 agent(
   prompt: string,
-  options: { kind: "review"; role: string },
+  options: { kind: "review"; node: string },
 ): Promise<AgentResult>;
 
 log(message: string): void;
 ```
 
-The role selects its exact approved model and thinking from metadata. The script cannot select tools, models, thinking, cwd, branches, extensions, skills, or environment variables.
+The review node selects its exact approved role, model, and thinking from metadata. The script cannot select tools, models, thinking, cwd, branches, extensions, skills, or environment variables.
 
 ```ts
 type AgentResult =

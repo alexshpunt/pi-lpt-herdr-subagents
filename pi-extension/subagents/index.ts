@@ -117,6 +117,7 @@ import {
 	persistWorktreeResult,
 	runSubagentScript,
 	writeWorktreeManifest,
+	buildSubagentToolAllowlist,
 	type WorktreeHandoff,
 	type WorktreeLaunch,
 } from "./launch.ts";
@@ -1404,32 +1405,6 @@ function updateWidget() {
  * first positional message so that /skill: args land in messages[1..] and arrive
  * as standalone prompts in the child session.
  */
-const SUBAGENT_CONTROL_TOOLS = ["caller_ping", "subagent_done"] as const;
-
-/**
- * Build the child --tools allowlist.
- *
- * Pi 0.70+ applies --tools to built-in, extension, and custom tools. If a
- * subagent definition restricts tools to e.g. "read,bash,write", the child
- * control tools from subagent-done.ts would otherwise be hidden, leaving a
- * manually resumed or user-touched subagent unable to call subagent_done.
- */
-function buildSubagentToolAllowlist(effectiveTools?: string): string | null {
-	const requested = (effectiveTools ?? "")
-		.split(",")
-		.map((tool) => tool.trim())
-		.filter(Boolean);
-
-	if (requested.length === 0) return null;
-
-	const allow = new Set(requested);
-	for (const tool of SUBAGENT_CONTROL_TOOLS) {
-		allow.add(tool);
-	}
-
-	return [...allow].join(",");
-}
-
 function buildPiPromptArgs(params: {
 	effectiveSkills?: string;
 	taskDelivery: "direct" | "artifact";

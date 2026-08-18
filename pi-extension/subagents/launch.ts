@@ -28,7 +28,6 @@ import {
 	type HerdrWorktreeSurface,
 } from "./terminal.ts";
 
-const SUBAGENT_CONTROL_TOOLS = ["caller_ping", "subagent_done"] as const;
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 
 type SubagentSessionMode = "standalone" | "lineage-only" | "fork";
@@ -550,7 +549,10 @@ function buildPiCommand(
 			shellQuote(artifacts.systemPromptFile),
 		);
 	}
-	const toolAllowlist = buildToolAllowlist(request.behavior.tools);
+	const toolAllowlist = buildSubagentToolAllowlist(
+		request.behavior.tools,
+		request.behavior.autoExit,
+	);
 	if (toolAllowlist) parts.push("--tools", shellQuote(toolAllowlist));
 	if (!request.handoff) {
 		for (const prompt of buildPromptArgs(
@@ -579,7 +581,9 @@ function buildPiCommand(
 		env.push(`PI_SUBAGENT_NAME=${shellQuote(request.name)}`);
 		if (request.agent)
 			env.push(`PI_SUBAGENT_AGENT=${shellQuote(request.agent)}`);
-		if (request.behavior.autoExit) env.push("PI_SUBAGENT_AUTO_EXIT=1");
+		env.push(
+			`PI_SUBAGENT_AUTO_EXIT=${request.behavior.autoExit ? "1" : "0"}`,
+		);
 		env.push(`PI_SUBAGENT_SESSION=${shellQuote(artifacts.sessionFile)}`);
 		env.push(`PI_SUBAGENT_ID=${shellQuote(resolved.id)}`);
 		env.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellQuote(artifacts.activityFile)}`);
@@ -678,7 +682,7 @@ async function launchResumedPiSubagent(
 		`PI_SUBAGENT_SESSION=${shellQuote(request.sessionFile)}`,
 		`PI_SUBAGENT_ID=${shellQuote(id)}`,
 		`PI_SUBAGENT_ACTIVITY_FILE=${shellQuote(activityFile)}`,
-		...(autoExit ? ["PI_SUBAGENT_AUTO_EXIT=1"] : []),
+		`PI_SUBAGENT_AUTO_EXIT=${autoExit ? "1" : "0"}`,
 	];
 	const command = [
 		...env,
@@ -722,14 +726,19 @@ async function launchResumedPiSubagent(
 	};
 }
 
-function buildToolAllowlist(tools?: string): string | null {
+export function buildSubagentToolAllowlist(
+	tools?: string,
+	autoExit = false,
+): string | null {
 	const requested = (tools ?? "")
 		.split(",")
 		.map((tool) => tool.trim())
 		.filter(Boolean);
 	if (requested.length === 0) return null;
 	const allow = new Set(requested);
-	for (const tool of SUBAGENT_CONTROL_TOOLS) allow.add(tool);
+	allow.delete("subagent_done");
+	allow.add("caller_ping");
+	if (!autoExit) allow.add("subagent_done");
 	return [...allow].join(",");
 }
 

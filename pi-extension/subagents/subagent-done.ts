@@ -1,7 +1,7 @@
 /**
  * Extension loaded into sub-agents.
  * - Shows agent identity + available tools as a styled widget above the editor (toggle with Ctrl+J)
- * - Provides a `subagent_done` tool for autonomous agents to self-terminate
+ * - Provides a `subagent_done` tool for interactive agents to self-terminate
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
@@ -301,6 +301,8 @@ export default function (pi: ExtensionAPI) {
       };
     },
   });
+
+  if (autoExit) return;
 
   pi.registerTool({
     name: "subagent_done",

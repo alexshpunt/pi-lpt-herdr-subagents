@@ -68,7 +68,7 @@ import {
 	getSubagentActivityFile,
 	readSubagentActivityFile,
 } from "../pi-extension/subagents/activity.ts";
-import {
+import subagentDoneExtension, {
 	shouldMarkUserTookOver,
 	shouldAutoExitOnAgentEnd,
 	findLatestAssistantError,
@@ -1829,10 +1829,17 @@ describe("subagent discovery", () => {
 		);
 	});
 
-	it("buildSubagentToolAllowlist preserves requested tools and adds child control tools", () => {
+	it("buildSubagentToolAllowlist keeps explicit completion for interactive children", () => {
 		assert.equal(
 			testApi.buildSubagentToolAllowlist("read,bash,web_search"),
 			"read,bash,web_search,caller_ping,subagent_done",
+		);
+	});
+
+	it("buildSubagentToolAllowlist omits explicit completion for auto-exit children", () => {
+		assert.equal(
+			testApi.buildSubagentToolAllowlist("read,bash,web_search,subagent_done", true),
+			"read,bash,web_search,caller_ping",
 		);
 	});
 
@@ -2332,6 +2339,31 @@ describe("subagent discovery", () => {
 	});
 });
 describe("subagent-done.ts", () => {
+	it("does not register subagent_done for auto-exit children", () => {
+		const previousAutoExit = process.env.PI_SUBAGENT_AUTO_EXIT;
+		process.env.PI_SUBAGENT_AUTO_EXIT = "1";
+		try {
+			const { api, registeredTools } = createMockExtensionApi();
+			subagentDoneExtension(api);
+			assert.equal(registeredTools.some((tool) => tool.name === "caller_ping"), true);
+			assert.equal(registeredTools.some((tool) => tool.name === "subagent_done"), false);
+		} finally {
+			restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", previousAutoExit);
+		}
+	});
+
+	it("registers subagent_done for interactive children", () => {
+		const previousAutoExit = process.env.PI_SUBAGENT_AUTO_EXIT;
+		delete process.env.PI_SUBAGENT_AUTO_EXIT;
+		try {
+			const { api, registeredTools } = createMockExtensionApi();
+			subagentDoneExtension(api);
+			assert.equal(registeredTools.some((tool) => tool.name === "subagent_done"), true);
+		} finally {
+			restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", previousAutoExit);
+		}
+	});
+
 	describe("shouldMarkUserTookOver", () => {
 		it("ignores the initial injected task before the first agent run", () => {
 			assert.equal(shouldMarkUserTookOver(false), false);

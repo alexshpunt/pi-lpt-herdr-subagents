@@ -117,7 +117,8 @@ describe("Pi launch", () => {
 			assert.match(command, new RegExp(`^cd '${project}' && `));
 			assert.match(command, /--model 'fake\/worker'/);
 			assert.match(command, /--thinking 'high'/);
-			assert.match(command, /--tools 'read,bash,caller_ping,subagent_done'/);
+			assert.match(command, /--tools 'read,bash,caller_ping'/);
+			assert.doesNotMatch(command, /subagent_done/);
 			assert.match(command, /PI_DENY_TOOLS='subagent,subagent_resume'/);
 			assert.match(command, /PI_SUBAGENT_AUTO_EXIT=1/);
 			assert.match(command, /'' '\/skill:tdd' '@[^']+\.md'/);
@@ -136,6 +137,36 @@ describe("Pi launch", () => {
 				readFileSync(systemPromptPath, "utf8"),
 				"You are a focused worker.",
 			);
+		});
+	});
+
+	it("clears inherited auto-exit state for interactive children", async () => {
+		await withFixture(async ({ request }) => {
+			let command = "";
+			await launchPiSubagent(
+				{
+					...request,
+					behavior: {
+						...request.behavior,
+						autoExit: false,
+						interactive: true,
+					},
+				},
+				{
+					createPane: () => "pane-interactive",
+					createWorktree: () => {
+						throw new Error("unexpected worktree creation");
+					},
+					waitForShellReady: async () => {},
+					runScript: (_surface, value, options) => {
+						command = value;
+						return options.scriptPath;
+					},
+				},
+			);
+
+			assert.match(command, /PI_SUBAGENT_AUTO_EXIT=0/);
+			assert.match(command, /--tools 'read,bash,caller_ping,subagent_done'/);
 		});
 	});
 
@@ -231,37 +262,44 @@ describe("Pi launch", () => {
 		});
 	});
 
-	it("keeps a resumed session interactive when auto-exit is disabled", async () => {
+	it("clears inherited auto-exit state when a resumed session is interactive", async () => {
 		await withFixture(async ({ root, sessionDir }) => {
 			const sessionFile = join(root, "interactive.jsonl");
 			writeFileSync(sessionFile, "existing session\n");
-			let command = "";
-			const running = await launchPiSubagent(
-				{
-					kind: "resume",
-					id: "resume-interactive",
-					name: "Interactive resume",
-					sessionFile,
-					parent: { sessionId: "parent", sessionDir },
-					behavior: { autoExit: false },
-				},
-				{
-					createPane: () => "pane-interactive",
-					createWorktree: () => {
-						throw new Error("a resume must not create a worktree");
+			const previousAutoExit = process.env.PI_SUBAGENT_AUTO_EXIT;
+			process.env.PI_SUBAGENT_AUTO_EXIT = "1";
+			try {
+				let command = "";
+				const running = await launchPiSubagent(
+					{
+						kind: "resume",
+						id: "resume-interactive",
+						name: "Interactive resume",
+						sessionFile,
+						parent: { sessionId: "parent", sessionDir },
+						behavior: { autoExit: false },
 					},
-					waitForShellReady: async () => {},
-					runScript: (_surface, value, options) => {
-						command = value;
-						return options.scriptPath;
+					{
+						createPane: () => "pane-interactive",
+						createWorktree: () => {
+							throw new Error("a resume must not create a worktree");
+						},
+						waitForShellReady: async () => {},
+						runScript: (_surface, value, options) => {
+							command = value;
+							return options.scriptPath;
+						},
 					},
-				},
-			);
+				);
 
-			assert.equal(running.task, "resumed session");
-			assert.equal(running.interactive, true);
-			assert.doesNotMatch(command, /PI_SUBAGENT_AUTO_EXIT/);
-			assert.doesNotMatch(command, /'@[^']+\.md'/);
+				assert.equal(running.task, "resumed session");
+				assert.equal(running.interactive, true);
+				assert.match(command, /PI_SUBAGENT_AUTO_EXIT=0/);
+				assert.doesNotMatch(command, /'@[^']+\.md'/);
+			} finally {
+				if (previousAutoExit === undefined) delete process.env.PI_SUBAGENT_AUTO_EXIT;
+				else process.env.PI_SUBAGENT_AUTO_EXIT = previousAutoExit;
+			}
 		});
 	});
 

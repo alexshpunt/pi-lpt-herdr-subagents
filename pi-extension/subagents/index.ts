@@ -232,8 +232,7 @@ const SubagentParams = Type.Object({
 		Type.Object({
 			branch: Type.String({
 				minLength: 1,
-				description:
-					"New branch name for an isolated Herdr-managed Git worktree",
+				description: "New branch name for an isolated Herdr-managed Git worktree",
 			}),
 			base: Type.Optional(
 				Type.String({
@@ -361,7 +360,7 @@ function getFrontmatterValue(
 }
 
 function parseOptionalBoolean(value: string | undefined): boolean | undefined {
-	return value != null ? value === "true" : undefined;
+	return value == null ? undefined : value === "true";
 }
 
 function parseSessionMode(
@@ -401,12 +400,8 @@ function parseAgentDefinition(
 			getFrontmatterValue(frontmatter, "skill"),
 		thinking: thinking && isThinkingLevel(thinking) ? thinking : undefined,
 		denyTools: getFrontmatterValue(frontmatter, "deny-tools"),
-		spawning: parseOptionalBoolean(
-			getFrontmatterValue(frontmatter, "spawning"),
-		),
-		autoExit: parseOptionalBoolean(
-			getFrontmatterValue(frontmatter, "auto-exit"),
-		),
+		spawning: parseOptionalBoolean(getFrontmatterValue(frontmatter, "spawning")),
+		autoExit: parseOptionalBoolean(getFrontmatterValue(frontmatter, "auto-exit")),
 		interactive: parseOptionalBoolean(
 			getFrontmatterValue(frontmatter, "interactive"),
 		),
@@ -462,8 +457,7 @@ function findPackageMetadata(path: string): {
 				const pkg = JSON.parse(readFileSync(packagePath, "utf8"));
 				return {
 					provider: typeof pkg.name === "string" ? pkg.name : undefined,
-					providerVersion:
-						typeof pkg.version === "string" ? pkg.version : undefined,
+					providerVersion: typeof pkg.version === "string" ? pkg.version : undefined,
 				};
 			} catch {
 				return {};
@@ -490,8 +484,7 @@ function discoverRolePackPaths(pi?: Pick<ExtensionAPI, "events">): {
 				if (typeof path !== "string" || !isAbsolute(path)) {
 					diagnostics.push({
 						code: "invalid-role-pack-path",
-						message:
-							"Role packs must register an absolute file or directory path.",
+						message: "Role packs must register an absolute file or directory path.",
 					});
 					return;
 				}
@@ -528,8 +521,7 @@ function discoverAgentCatalog(pi?: Pick<ExtensionAPI, "events">): AgentCatalog {
 				continue;
 			}
 			const parsed = parseAgentDefinition(content, fallbackName);
-			if (parsed)
-				agents.set(parsed.name, { ...parsed, source, path: filePath });
+			if (parsed) agents.set(parsed.name, { ...parsed, source, path: filePath });
 		}
 	};
 
@@ -1030,9 +1022,9 @@ function resolveResultPresentation(
 			`subagent or resume the session with subagent_resume.`;
 	} else {
 		body =
-			result.exitCode !== 0
-				? `Sub-agent "${name}" failed (exit code ${result.exitCode}).\n\n${result.summary}`
-				: `Sub-agent "${name}" completed (${formatElapsed(result.elapsed)}).\n\n${result.summary}`;
+			result.exitCode === 0
+				? `Sub-agent "${name}" completed (${formatElapsed(result.elapsed)}).\n\n${result.summary}`
+				: `Sub-agent "${name}" failed (exit code ${result.exitCode}).\n\n${result.summary}`;
 	}
 
 	if (result.fallbackAttempts && result.fallbackAttempts.length > 1) {
@@ -1463,15 +1455,13 @@ function ensureLifecycle(running: RunningSubagent): SubagentLifecycle {
 					turnActive: state.phase === "active",
 					providerActive: false,
 					toolActive: state.activeScope === "tool",
-					...(state.activeScope
-						? { activeScope: state.activeScope as any }
-						: {}),
-					...(state.activeSinceMs != null
-						? { activeSince: state.activeSinceMs }
-						: {}),
-					...(state.waitingSinceMs != null
-						? { waitingSince: state.waitingSinceMs }
-						: {}),
+					...(state.activeScope ? { activeScope: state.activeScope as any } : {}),
+					...(state.activeSinceMs == null
+						? {}
+						: { activeSince: state.activeSinceMs }),
+					...(state.waitingSinceMs == null
+						? {}
+						: { waitingSince: state.waitingSinceMs }),
 					...(state.activityLabel && state.activeScope === "tool"
 						? { toolName: state.activityLabel }
 						: {}),
@@ -1667,10 +1657,7 @@ function startStatusRefresh(pi: ExtensionAPI) {
 			pi.sendMessage(
 				{
 					customType: "subagent_status",
-					content: formatStatusAggregate(
-						transitionLines,
-						statusConfig.lineLimit,
-					),
+					content: formatStatusAggregate(transitionLines, statusConfig.lineLimit),
 					display: true,
 					details: { lines: capped.visibleLines, overflow: capped.overflow },
 				},
@@ -1940,9 +1927,7 @@ function resolveSubagentRuntimePlans(
 		wrapPiModelRegistry(ctx.modelRegistry),
 	);
 	if (params.worktree && plans.length > 1) {
-		throw new Error(
-			"Model fallbacks are not supported for worktree subagents.",
-		);
+		throw new Error("Model fallbacks are not supported for worktree subagents.");
 	}
 	return plans;
 }
@@ -2025,9 +2010,9 @@ async function watchSubagent(
 						? observed.thinking
 						: undefined;
 				const mismatch =
-					observedModel !== running.runtimePlan.model
-						? `Resolved model ${running.runtimePlan.model} but child reported ${observedModel}`
-						: undefined;
+					observedModel === running.runtimePlan.model
+						? undefined
+						: `Resolved model ${running.runtimePlan.model} but child reported ${observedModel}`;
 				running.runtimePlan = {
 					...running.runtimePlan,
 					...(observedThinking ? { thinking: observedThinking } : {}),
@@ -2042,15 +2027,15 @@ async function watchSubagent(
 				findLastAssistantMessage(allEntries) ??
 				(result.errorMessage
 					? `Subagent error: ${result.errorMessage}`
-					: result.exitCode !== 0
-						? `Sub-agent exited with code ${result.exitCode}`
-						: "Sub-agent exited without output");
+					: result.exitCode === 0
+						? "Sub-agent exited without output"
+						: `Sub-agent exited with code ${result.exitCode}`);
 		} else {
 			summary = result.errorMessage
 				? `Subagent error: ${result.errorMessage}`
-				: result.exitCode !== 0
-					? `Sub-agent exited with code ${result.exitCode}`
-					: "Sub-agent exited without output";
+				: result.exitCode === 0
+					? "Sub-agent exited without output"
+					: `Sub-agent exited with code ${result.exitCode}`;
 		}
 
 		const worktreeHandoff = finalizeSubagentSurface(
@@ -2358,11 +2343,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			);
 		}
 		const id = `workflow-${candidate.runId}-${Math.random().toString(16).slice(2, 10)}`;
-		const sessionFile = join(
-			dirname(candidate.path),
-			"sessions",
-			`${id}.jsonl`,
-		);
+		const sessionFile = join(dirname(candidate.path), "sessions", `${id}.jsonl`);
 		let surface: string | undefined;
 		let launched = false;
 		const childController = new AbortController();
@@ -2472,10 +2453,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			if (childController.signal.aborted)
 				return workflowFailure("cancelled", "Workflow cancelled.");
 			const message = error instanceof Error ? error.message : String(error);
-			return workflowFailure(
-				launched ? "child_error" : "launch_error",
-				message,
-			);
+			return workflowFailure(launched ? "child_error" : "launch_error", message);
 		} finally {
 			owner.controller.signal.removeEventListener("abort", onOwnerAbort);
 			owner.children.delete(id);
@@ -2500,7 +2478,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 		const envelope = {
 			runId: candidate.runId,
 			state: outcome.state,
-			...(outcome.result !== undefined ? { result: outcome.result } : {}),
+			...(outcome.result === undefined ? {} : { result: outcome.result }),
 			...(outcome.error ? { error: outcome.error } : {}),
 			...(checkoutResult ? { checkout: checkoutResult } : {}),
 		};
@@ -2542,9 +2520,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 	) => {
 		if (!claimWorkflowTerminal(owner.gate, outcome)) {
 			return (
-				owner.gate.outcome ??
-				runtime.workflowOutcomes.get(owner.runId) ??
-				outcome
+				owner.gate.outcome ?? runtime.workflowOutcomes.get(owner.runId) ?? outcome
 			);
 		}
 		runtime.workflowOutcomes.set(owner.runId, outcome);
@@ -2823,7 +2799,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 							content: [
 								{
 									type: "text",
-									text: "Error: start pi with a persistent session before preparing a workflow.",
+									text:
+										"Error: start pi with a persistent session before preparing a workflow.",
 								},
 							],
 							details: { error: "workflow_persistent_session_required" },
@@ -2838,9 +2815,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 						});
 						runtime.pendingWorkflow = candidate;
 						return {
-							content: [
-								{ type: "text", text: formatApprovalPacket(candidate) },
-							],
+							content: [{ type: "text", text: formatApprovalPacket(candidate) }],
 							details: {
 								runId: candidate.runId,
 								scriptHash: candidate.scriptHash,
@@ -2978,13 +2953,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					}
 					try {
 						const root = realpathSync(
-							execFileSync(
-								"git",
-								["-C", ctx.cwd, "rev-parse", "--show-toplevel"],
-								{
-									encoding: "utf8",
-								},
-							).trim(),
+							execFileSync("git", ["-C", ctx.cwd, "rev-parse", "--show-toplevel"], {
+								encoding: "utf8",
+							}).trim(),
 						);
 						const commonDir = realpathSync(
 							execFileSync(
@@ -3007,7 +2978,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 								content: [
 									{
 										type: "text",
-										text: "Error: workflow cancellation must use the approved repository identity.",
+										text:
+											"Error: workflow cancellation must use the approved repository identity.",
 									},
 								],
 								details: { error: "workflow_cancel_identity_mismatch" },
@@ -3039,9 +3011,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					};
 				}
 				return {
-					content: [
-						{ type: "text", text: "Error: unsupported workflow action." },
-					],
+					content: [{ type: "text", text: "Error: unsupported workflow action." }],
 					details: { error: "workflow_action_unavailable" },
 				};
 			},
@@ -3114,7 +3084,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 						content: [
 							{
 								type: "text",
-								text: "Error: no session file. Start pi with a persistent session to use subagents.",
+								text:
+									"Error: no session file. Start pi with a persistent session to use subagents.",
 							},
 						],
 						details: { error: "no session file" },
@@ -3132,9 +3103,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					parentThinking !== "xhigh" &&
 					parentThinking !== "max"
 				) {
-					throw new Error(
-						`Unsupported parent thinking level: ${parentThinking}`,
-					);
+					throw new Error(`Unsupported parent thinking level: ${parentThinking}`);
 				}
 				const runtimePlans = resolveSubagentRuntimePlans(
 					params,
@@ -3227,9 +3196,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 							exitCode: result.exitCode,
 							elapsed: result.elapsed,
 							sessionFile: result.sessionFile,
-							...(result.errorMessage
-								? { errorMessage: result.errorMessage }
-								: {}),
+							...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
 							...(result.fallbackAttempts
 								? { fallbackAttempts: result.fallbackAttempts }
 								: {}),
@@ -3276,9 +3243,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 								(running.worktree
 									? ` in worktree ${running.worktree.path} on branch ${running.worktree.branch}. `
 									: ". ") +
-								(worktreeLaunchWarning
-									? `Warning: ${worktreeLaunchWarning} `
-									: "") +
+								(worktreeLaunchWarning ? `Warning: ${worktreeLaunchWarning} ` : "") +
 								`Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. ` +
 								`The results will be delivered to you automatically as a steer message when the sub-agent finishes. ` +
 								`Until then, move on to other work or tell the user you're waiting.`,
@@ -3295,9 +3260,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 						thinking: running.runtimePlan?.thinking,
 						runtimePlan: running.runtimePlan,
 						...(running.worktree ? { worktree: running.worktree } : {}),
-						...(worktreeLaunchWarning
-							? { warning: worktreeLaunchWarning }
-							: {}),
+						...(worktreeLaunchWarning ? { warning: worktreeLaunchWarning } : {}),
 						status: "started",
 					},
 				};
@@ -3309,8 +3272,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					typeof partialArgs.name === "string" && partialArgs.name
 						? partialArgs.name
 						: "(unnamed)";
-				const task =
-					typeof partialArgs.task === "string" ? partialArgs.task : "";
+				const task = typeof partialArgs.task === "string" ? partialArgs.task : "";
 				const agent =
 					typeof partialArgs.agent === "string" && partialArgs.agent
 						? theme.fg("dim", ` (${partialArgs.agent})`)
@@ -3319,9 +3281,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					typeof partialArgs.cwd === "string" && partialArgs.cwd
 						? theme.fg("dim", ` in ${partialArgs.cwd}`)
 						: "";
-				const worktree = partialArgs.worktree as
-					| { branch?: unknown }
-					| undefined;
+				const worktree = partialArgs.worktree as { branch?: unknown } | undefined;
 				const worktreeHint =
 					typeof worktree?.branch === "string"
 						? theme.fg("dim", ` on ${worktree.branch} (worktree)`)
@@ -3337,8 +3297,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				// LLM generates tool arguments, so args.task grows token by token.
 				// We keep it compact here — Ctrl+O on renderResult expands the full content.
 				if (task) {
-					const firstLine =
-						task.split("\n").find((l: string) => l.trim()) ?? "";
+					const firstLine = task.split("\n").find((l: string) => l.trim()) ?? "";
 					const preview =
 						firstLine.length > 100 ? firstLine.slice(0, 100) + "…" : firstLine;
 					if (preview) {
@@ -3477,21 +3436,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				const agents = details?.agents ?? [];
 				const diagnostics = details?.diagnostics ?? [];
 				if (agents.length === 0 && diagnostics.length === 0) {
-					return new Text(
-						theme.fg("dim", "No subagent definitions found."),
-						0,
-						0,
-					);
+					return new Text(theme.fg("dim", "No subagent definitions found."), 0, 0);
 				}
 				const lines = agents.map((a: any) => {
 					const source =
-						a.source === "package" && a.provider
-							? `package:${a.provider}`
-							: a.source;
+						a.source === "package" && a.provider ? `package:${a.provider}` : a.source;
 					const badge = theme.fg("accent", ` (${source})`);
-					const desc = a.description
-						? theme.fg("dim", ` — ${a.description}`)
-						: "";
+					const desc = a.description ? theme.fg("dim", ` — ${a.description}`) : "";
 					const model = a.model ? theme.fg("dim", ` [${a.model}]`) : "";
 					return `  ${theme.fg("toolTitle", theme.bold(a.name))}${badge}${model}${desc}`;
 				});
@@ -3648,17 +3599,14 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 							return;
 						}
 
-						const allEntries = getNewEntries(
-							params.sessionPath,
-							entryCountBefore,
-						);
+						const allEntries = getNewEntries(params.sessionPath, entryCountBefore);
 						const summary =
 							findLastAssistantMessage(allEntries) ??
 							(result.errorMessage
 								? `Subagent error: ${result.errorMessage}`
-								: result.exitCode !== 0
-									? `Resumed session exited with code ${result.exitCode}`
-									: "Resumed session exited without new output");
+								: result.exitCode === 0
+									? "Resumed session exited without new output"
+									: `Resumed session exited with code ${result.exitCode}`);
 						const presentation = resolveResultPresentation(
 							{ ...result, summary, sessionFile: params.sessionPath },
 							name,
@@ -3671,12 +3619,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 							exitCode: result.exitCode,
 							elapsed: result.elapsed,
 							sessionFile: params.sessionPath,
-							...(result.errorMessage
-								? { errorMessage: result.errorMessage }
-								: {}),
-							...(running.runtimePlan
-								? { runtimePlan: running.runtimePlan }
-								: {}),
+							...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+							...(running.runtimePlan ? { runtimePlan: running.runtimePlan } : {}),
 						});
 					})
 					.catch((err) => {
@@ -3847,10 +3791,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
 			const branch = parts.shift();
 			if (!branch || branch === "list") {
-				ctx.ui.notify(
-					"Usage: /worktree <name> [task] | /worktree list",
-					"warning",
-				);
+				ctx.ui.notify("Usage: /worktree <name> [task] | /worktree list", "warning");
 				return;
 			}
 			if (!isTerminalAvailable()) {
@@ -3886,7 +3827,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				);
 				const result = await launchPiWorktreeHandoff({
 					kind: "fresh",
-					name: `Worktree: ${branch}`,
+					name: `wt: ${branch}`,
 					task,
 					cwd: ctx.cwd,
 					worktree: { branch },
@@ -3951,10 +3892,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					...formatVisibleAgentDefinitions(catalog.agents),
 					...formatAgentDiagnostics(catalog.diagnostics),
 				];
-				ctx.ui.notify(
-					lines.join("\n") || "No subagent definitions found.",
-					"info",
-				);
+				ctx.ui.notify(lines.join("\n") || "No subagent definitions found.", "info");
 				return;
 			}
 			if (!trimmed) {
@@ -4004,7 +3942,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					typeof details.errorMessage === "string" ? details.errorMessage : "";
 				const failed = exitCode !== 0 || !!errorMessage;
 				const elapsed =
-					details.elapsed != null ? formatElapsed(details.elapsed) : "?";
+					details.elapsed == null ? "?" : formatElapsed(details.elapsed);
 				const bgFn = failed
 					? (text: string) => theme.bg("toolErrorBg", text)
 					: (text: string) => theme.bg("toolSuccessBg", text);
@@ -4030,10 +3968,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				const summary = rawContent
 					.replace(/\n\nSession: .+\nResume: .+$/, "")
 					.replace(`Sub-agent "${name}" completed (${elapsed}).\n\n`, "")
-					.replace(
-						`Sub-agent "${name}" failed (exit code ${exitCode}).\n\n`,
-						"",
-					)
+					.replace(`Sub-agent "${name}" failed (exit code ${exitCode}).\n\n`, "")
 					.replace(
 						new RegExp(
 							`^Sub-agent "${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}" failed after ${elapsed} \\(provider/agent error — auto-retry exhausted\\)\\.\\n\\n`,
@@ -4053,9 +3988,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					}
 					if (details.sessionFile) {
 						contentLines.push("");
-						contentLines.push(
-							theme.fg("dim", `Session: ${details.sessionFile}`),
-						);
+						contentLines.push(theme.fg("dim", `Session: ${details.sessionFile}`));
 						contentLines.push(
 							theme.fg("dim", `Resume:  pi --session ${details.sessionFile}`),
 						);
@@ -4069,9 +4002,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 						}
 						const totalLines = summary.split("\n").length;
 						if (totalLines > 5) {
-							contentLines.push(
-								theme.fg("muted", `… ${totalLines - 5} more lines`),
-							);
+							contentLines.push(theme.fg("muted", `… ${totalLines - 5} more lines`));
 						}
 					}
 					contentLines.push(
@@ -4091,8 +4022,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 	pi.registerMessageRenderer("subagent_status", (message, options, theme) => {
 		const details = message.details as any;
 		const lines = Array.isArray(details?.lines) ? details.lines : [];
-		const overflow =
-			typeof details?.overflow === "number" ? details.overflow : 0;
+		const overflow = typeof details?.overflow === "number" ? details.overflow : 0;
 		if (lines.length === 0 && overflow === 0) return undefined;
 
 		return {
@@ -4148,9 +4078,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					contentLines.push(details.message ?? "");
 					if (details.sessionFile) {
 						contentLines.push("");
-						contentLines.push(
-							theme.fg("dim", `Session: ${details.sessionFile}`),
-						);
+						contentLines.push(theme.fg("dim", `Session: ${details.sessionFile}`));
 					}
 				} else {
 					const preview = (details.message ?? "")

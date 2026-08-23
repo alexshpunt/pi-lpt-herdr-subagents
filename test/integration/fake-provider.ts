@@ -164,7 +164,8 @@ function bashCommand(source: string): string | undefined {
 }
 
 function markerText(source: string): string | undefined {
-	return source.match(/(?:Return|return) exactly ([A-Za-z0-9_]+)/)?.[1];
+	const matches = [...source.matchAll(/(?:Return|return) exactly ([A-Za-z0-9_]+)/g)];
+	return matches.at(-1)?.[1];
 }
 
 async function waitForIntegrationGate(source: string): Promise<void> {
@@ -203,6 +204,17 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 	if (resumed) return { text: `RESUME_RESULT_${resumed}` };
 	const btw = btwText(source);
 	if (btw) return { text: btw };
+
+	if (names.has("subagent_done") && /CLOSE_PERSISTENT_CHILD/.test(source)) {
+		return {
+			toolCalls: [
+				{
+					name: "subagent_done",
+					arguments: { summary: "SETTLED_TWO" },
+				},
+			],
+		};
+	}
 
 	// caller_ping is always allowlisted for public children; only use it when the
 	// prompt actually asks for a help ping (test-ping), not for ordinary tasks.

@@ -92,7 +92,40 @@ function readSettledResult(sessionFile: string): IntegrationResultDetails {
 	);
 }
 
+
+function listWorkspacePanes(workspaceId: string): Array<{ pane_id?: string; label?: string; agent_session?: { value?: string } }> {
+	return JSON.parse(execFileSync("herdr", ["pane", "list", "--workspace", workspaceId], { encoding: "utf8" }))
+		.result.panes as Array<{ pane_id?: string; label?: string; agent_session?: { value?: string } }>;
+}
+
+async function waitForAgentPane(
+	paneLabel: string,
+	workspaceId: string,
+	timeout = PI_TIMEOUT,
+): Promise<string> {
+	const deadline = Date.now() + timeout;
+	while (Date.now() < deadline) {
+		const match = listWorkspacePanes(workspaceId).find(
+			(pane) => pane.label === paneLabel && typeof pane.pane_id === "string",
+		);
+		if (match?.pane_id) return match.pane_id;
+		await sleep(50);
+	}
+	throw new Error(`Timeout waiting for live pane ${paneLabel}; panes=${JSON.stringify(listWorkspacePanes(workspaceId))}`);
+}
+
+async function waitForAgentGone(paneId: string, workspaceId: string, timeout = PI_TIMEOUT): Promise<void> {
+	const deadline = Date.now() + timeout;
+	while (Date.now() < deadline) {
+		const pane = listWorkspacePanes(workspaceId).find((candidate) => candidate.pane_id === paneId);
+		if (!pane?.agent_session && !pane?.label) return;
+		await sleep(50);
+	}
+	throw new Error(`Timeout waiting for agent pane to close ${paneId}`);
+}
+
 function listBtwPanes(workspaceId: string): string[] {
+
 	const tabs = JSON.parse(
 		execFileSync("herdr", ["tab", "list", "--workspace", workspaceId], {
 			encoding: "utf8",
@@ -827,6 +860,82 @@ for (const backend of backends) {
 				content.includes(`SYSPROMPT_${id}`),
 				`System prompt test marker should exist`,
 			);
+		});
+
+		it("delivers ordered settled turns from one persistent child and closes without redelivery", async () => {
+			const id = uniqueId();
+			const childName = `Persistent-${id}`;
+			const parentSession = join(env.dir, `persistent-parent-${id}.jsonl`);
+
+			const surface = createTrackedSurface(env, `persistent-${id}`);
+			await waitForPaneReady(surface);
+			startPi(
+				surface,
+				env.dir,
+				[
+					"Call subagent with these EXACT parameters:",
+					`  name: "${childName}"`,
+					'  agent: "test-persistent"',
+					'  task: "Return exactly SETTLED_ONE. Do not call subagent_done yet."',
+					"Do not call any other tools.",
+				].join("\n"),
+				{ extraArgs: `--session ${shellQuote(parentSession)}` },
+			);
+
+			const readResults = (): IntegrationSessionEntry[] => {
+				const lines = existsSync(parentSession)
+					? readFileSync(parentSession, "utf8").split("\n").filter(Boolean)
+					: [];
+				return lines.flatMap((line) => {
+					try {
+						const entry = JSON.parse(line) as IntegrationSessionEntry;
+						return entry.type === "custom_message" && entry.customType === "subagent_result" ? [entry] : [];
+					} catch {
+						return [];
+					}
+				});
+			};
+			const firstDeadline = Date.now() + PI_TIMEOUT;
+			let firstResults = readResults();
+			while (firstResults.length < 1 && Date.now() < firstDeadline) {
+				await sleep(50);
+				firstResults = readResults();
+			}
+			assert.equal(firstResults.length, 1, "first settled turn must be delivered once");
+			assert.match(String(firstResults[0].details?.resultContent), /SETTLED_ONE/);
+			const childSession = firstResults[0].details?.sessionFile;
+			assert.equal(typeof childSession, "string", "settled result must identify the child session");
+			if (typeof childSession !== "string") return;
+
+			const childPane = await waitForAgentPane(childName, env.workspaceId);
+			const secondPrompt = execFileSync(
+				"herdr",
+				["agent", "prompt", childPane, "Return exactly SETTLED_TWO. Do not call subagent_done yet."],
+				{ encoding: "utf8" },
+			);
+			assert.ok(secondPrompt.trim(), "Herdr prompt command must acknowledge the second input");
+			const secondDeadline = Date.now() + PI_TIMEOUT;
+			let secondResults = readResults();
+			while (secondResults.length < 2 && Date.now() < secondDeadline) {
+				await sleep(50);
+				secondResults = readResults();
+			}
+			assert.equal(secondResults.length, 2, "second settled turn must be delivered exactly once");
+			assert.match(String(secondResults[0].details?.resultContent), /SETTLED_ONE/);
+			assert.match(String(secondResults[1].details?.resultContent), /SETTLED_TWO/);
+			assert.ok(listWorkspacePanes(env.workspaceId).some((pane) => pane.label === childName), "persistent child must remain live after settled turns");
+
+			const closePrompt = execFileSync(
+				"herdr",
+				["agent", "prompt", childPane, "CLOSE_PERSISTENT_CHILD"],
+				{ encoding: "utf8" },
+			);
+			assert.ok(closePrompt.trim(), "Herdr prompt command must acknowledge the close input");
+			await waitForFile(`${childSession}.exit`, PI_TIMEOUT, /"type":"done"/);
+			await waitForAgentGone(childPane, env.workspaceId);
+			const finalResults = readResults();
+			assert.equal(finalResults.length, 2, "subagent_done must not redeliver SETTLED_TWO");
+			assert.match(String(finalResults[1].details?.resultContent), /SETTLED_TWO/);
 		});
 
 		it("delivers a settled provider error without ordered model fallback", async () => {

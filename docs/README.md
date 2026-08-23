@@ -6,6 +6,7 @@ Use this page to find the authoritative document for a task. Current shipped beh
 
 - [`../README.md`](../README.md) — installation, public API, configuration, lifecycle, and role authoring.
 - [`worktree-subagents.md`](worktree-subagents.md) — canonical worktree operation, review, recovery, and cleanup.
+- [`settled-lifecycle-contract.md`](settled-lifecycle-contract.md) — shipped per-turn settled outcomes, identity, cursor, and delivery gates.
 - [`../RELEASING.md`](../RELEASING.md) — release checks and publication procedure.
 
 ## Domain language and active design

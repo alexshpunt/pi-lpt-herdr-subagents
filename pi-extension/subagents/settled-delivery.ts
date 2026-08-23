@@ -114,6 +114,8 @@ export function enqueueSettledDelivery<T>(options: {
   childId: string;
   identity: SettledDeliveryIdentity;
   activitySequence: number;
+  /** Event logs may be retried after a later sequence succeeded. */
+  allowOlder?: boolean;
   enqueue: () => T | Promise<T>;
 }): Promise<DeliveryJobResult<T>> {
   const {
@@ -122,11 +124,13 @@ export function enqueueSettledDelivery<T>(options: {
     childId,
     identity,
     activitySequence,
+    allowOlder = false,
     enqueue,
   } = options;
   return queue.enqueue(childId, async () => {
     if (hasSettledDelivery(ledger, identity)) return { status: "duplicate" };
     if (
+      !allowOlder &&
       ledger.lastActivitySequence != null &&
       activitySequence <= ledger.lastActivitySequence
     ) {
@@ -152,6 +156,10 @@ export function enqueueTerminalFinalization<T>(options: {
 }): Promise<T> {
   const { queue, ledger, childId, finalAssistant, finalize } = options;
   return queue.enqueue(childId, () =>
-    finalize(finalAssistant == null ? false : hasSettledDelivery(ledger, finalAssistant)),
+    finalize(
+      finalAssistant == null
+        ? false
+        : hasSettledDelivery(ledger, finalAssistant),
+    ),
   );
 }

@@ -242,6 +242,20 @@ Multiple subagents run concurrently — each steers its result back independentl
 Completion messages render with a colored background and are expandable with `Ctrl+O`. Results larger than 16,000 characters are abbreviated in the parent context while preserving their beginning, conclusion, and session path; the complete result remains in the child session. The extension includes that bounded result and a continuation instruction directly in the single custom `subagent_result` message that triggers or steers Pi, avoiding empty turns caused by a separate context-free wake-up. The renderer uses the unadorned bounded result from structured details. Completed rows are removed from the widget as soon as their result is delivered or suppressed.
 
 ### In-progress status updates
+### Settled turns and child lifecycle
+
+A persistent child can return one parent result at every settled turn without closing its session. The five outcomes are:
+
+- clean: deliver the result; an `auto-exit` child closes after that boundary;
+- empty: deliver the empty result; an `auto-exit` child closes after that boundary;
+- provider/agent error: deliver the error and keep the child open;
+- intentional interrupt: stay silent and keep the child open;
+- unexpected abort: deliver an abort notice and keep the child open.
+
+Interactive children close only when they call `subagent_done`; a clean auto-exit boundary is the other terminal path. Settled delivery and terminal delivery use separate identity gates, so a clean auto-exit race cannot send the same result twice. A failed parent enqueue remains retryable.
+
+Same-process `/reload`, `/new`, `/resume`, and `/fork` preserve active watchers and their delivery state. A full Pi process restart is outside this guarantee: active watchers are not restored and pending delivery is not replayed.
+
 
 The widget projects each sub-agent from a **process + turn lifecycle**:
 
@@ -324,14 +338,14 @@ exact IDs from your authenticated model catalog:
 `subagent({ agent: ... })`. Explicit `model` tool arguments take precedence,
 followed by agent frontmatter, per-agent config, the global default, and finally
 the parent model. Model values must be exact authenticated `provider/model-id`
-references. A value can contain an ordered comma-separated fallback list, for
+references. A value can contain an ordered comma-separated candidate list, for
 example `provider/preferred, provider/fallback`. The extension validates every
-candidate before launch, retries the preferred model normally, then launches
-later candidates only after a provider/agent request failure. A completed child
-result, including a negative task result, never switches models. Completion
-metadata and the status widget report the model actually used; an exhausted
-list reports every attempted model. Workflow metadata accepts one exact model
-only, to keep approved workflow runtimes deterministic.
+candidate before launch. A provider/agent error that reaches the child's settled
+boundary is returned immediately and does not advance to a later candidate.
+Launch failures before a child reaches that boundary may still use the ordered
+launch fallback behavior. Completion metadata and the status widget report the
+model actually used. Workflow metadata accepts one exact model only, to keep
+approved workflow runtimes deterministic.
 
 `config.json` is gitignored in the source tree so local overrides are not
 committed from a checkout. On an installed package root, treat it as disposable
@@ -373,7 +387,7 @@ subagent({
 | `agent`                | string  | —              | Load defaults from agent definition                                                               |
 | `fork`                 | boolean | `false`        | Force the full-context fork mode for this spawn, overriding any agent `session-mode` frontmatter  |
 | `interactive`          | boolean | derived        | Mark this spawn as interactive (don't wake the parent on stall/recovery). Defaults to the agent's `interactive` frontmatter, otherwise the inverse of `auto-exit`. |
-| `model`                | string  | configured or parent | Exact authenticated `provider/model-id`, or an ordered comma-separated Pi fallback list; fallback lists are unavailable for worktree spawns. Resolution is tool argument → agent frontmatter → per-agent config → global config → parent |
+| `model`                | string  | configured or parent | Exact authenticated `provider/model-id`, or an ordered comma-separated candidate list; candidate lists are unavailable for worktree spawns. A settled provider error is returned immediately rather than advancing candidates. Resolution is tool argument → agent frontmatter → per-agent config → global config → parent |
 | `thinking`             | string  | parent level   | Pi thinking level (`off` through `max`); omit to inherit the parent                                |
 | `systemPrompt`         | string  | —              | Role/system-prompt text for a bare spawn; named agents keep their definition body                  |
 | `skills`               | string  | —              | Comma-separated skill names                                                                       |
@@ -714,7 +728,7 @@ and verify them with `/subagent list` plus a smoke launch.
 | ------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `name`        | string  | Optional explicit agent name used in `agent: "my-agent"`; defaults to the filename stem and must match it in role packs                                                                                                                                                                                            |
 | `description` | string  | Shown in `subagents_list` output                                                                                                                                                                                                                                            |
-| `model`       | string  | Optional exact authenticated Pi model default or ordered comma-separated fallback list; omit to use per-agent config, global config, then the parent                                                                                                                       |
+| `model`       | string  | Optional exact authenticated Pi model default or ordered comma-separated candidate list; a settled provider error is returned immediately; omit to use per-agent config, global config, then the parent                                                                                                                       |
 | `thinking`    | string  | Optional Pi thinking default (`off` through `max`); omit to inherit the parent                                                                                                                                   |
 | `system-prompt` | string | `append` passes the agent body through Pi's appended system prompt; `replace` replaces Pi's default system prompt. Without this field, the body is included in the task wrapper                                                                                                                                                                                                                                 |
 | `tools`       | string  | Comma-separated Pi `--tools` allowlist; may contain any registered built-in, extension, or custom tool name                                                                                                                                                                 |

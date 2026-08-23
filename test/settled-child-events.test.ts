@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -9,7 +9,9 @@ import subagentDoneExtension, {
 } from "../pi-extension/subagents/subagent-done.ts";
 import {
   getSubagentActivityFile,
+  getSubagentSettledEventsFile,
   readSubagentActivityFile,
+  readSubagentSettledEventsFile,
 } from "../pi-extension/subagents/activity.ts";
 
 function createApi() {
@@ -33,30 +35,34 @@ function createApi() {
 }
 
 function withChildEnv(
-  run: (paths: { dir: string; session: string; activity: string }) => void,
+  run: (paths: { dir: string; session: string; activity: string; settledEvents: string }) => void,
   autoExit = true,
 ) {
   const dir = mkdtempSync(join(tmpdir(), "settled-child-events-"));
   const session = join(dir, "child.jsonl");
   const activity = getSubagentActivityFile(dir, "child-1");
+  const settledEvents = getSubagentSettledEventsFile(dir, "child-1");
   const old = {
     autoExit: process.env.PI_SUBAGENT_AUTO_EXIT,
     session: process.env.PI_SUBAGENT_SESSION,
     id: process.env.PI_SUBAGENT_ID,
     activity: process.env.PI_SUBAGENT_ACTIVITY_FILE,
+    settledEvents: process.env.PI_SUBAGENT_SETTLED_EVENTS_FILE,
   };
   process.env.PI_SUBAGENT_AUTO_EXIT = autoExit ? "1" : "0";
   process.env.PI_SUBAGENT_SESSION = session;
   process.env.PI_SUBAGENT_ID = "child-1";
   process.env.PI_SUBAGENT_ACTIVITY_FILE = activity;
+  process.env.PI_SUBAGENT_SETTLED_EVENTS_FILE = settledEvents;
   try {
-    run({ dir, session, activity });
+    run({ dir, session, activity, settledEvents });
   } finally {
     for (const [key, value] of Object.entries({
       PI_SUBAGENT_AUTO_EXIT: old.autoExit,
       PI_SUBAGENT_SESSION: old.session,
       PI_SUBAGENT_ID: old.id,
       PI_SUBAGENT_ACTIVITY_FILE: old.activity,
+      PI_SUBAGENT_SETTLED_EVENTS_FILE: old.settledEvents,
     })) {
       if (value == null) delete process.env[key];
       else process.env[key] = value;
@@ -121,6 +127,43 @@ describe("settled child event boundary", () => {
         assert.equal(settled.activity.settledOutcome, "clean");
         assert.equal(settled.activity.settledAssistantId, "assistant-two");
       }
+    }, false);
+
+  });
+
+
+  it("appends every settled boundary and ignores an incomplete trailing record", () => {
+    withChildEnv(({ settledEvents }) => {
+      const fake = createApi();
+      subagentDoneExtension(fake.api);
+      fake.emit("agent_end", { messages: [clean("assistant-one")] });
+      fake.emit("agent_settled");
+      fake.emit("before_agent_start");
+      fake.emit("agent_end", { messages: [clean("assistant-two")] });
+      fake.emit("agent_settled");
+
+      const events = readSubagentSettledEventsFile(settledEvents, "child-1");
+      assert.deepEqual(events.map((event) => event.assistantId), ["assistant-one", "assistant-two"]);
+      const raw = readFileSync(settledEvents, "utf8");
+      appendFileSync(settledEvents, "{\"schema\":1");
+      assert.deepEqual(
+        readSubagentSettledEventsFile(settledEvents, "child-1").map((event) => event.assistantId),
+        ["assistant-one", "assistant-two"],
+      );
+      assert.equal(raw.length > 0, true);
+    }, false);
+  });
+
+  it("does not reuse prior agent_end evidence after a new run starts", () => {
+    withChildEnv(({ session }) => {
+      const fake = createApi();
+      subagentDoneExtension(fake.api);
+      fake.emit("agent_end", { messages: [clean("assistant-old")] });
+      fake.emit("agent_settled");
+      fake.emit("before_agent_start");
+      fake.emit("agent_settled");
+      assert.equal(fake.shutdowns, 0);
+      assert.equal(existsSync(`${session}.exit`), false);
     }, false);
   });
 

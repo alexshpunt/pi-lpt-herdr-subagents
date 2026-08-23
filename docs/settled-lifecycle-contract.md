@@ -59,5 +59,5 @@ Settled delivery and terminal completion are separate gates:
 
 `SettledParentPayload` carries the explicit parent fields: child id, session
 file, assistant entry id, activity sequence, turn index, outcome, text, stop
-reason, provider error, and empty state. Later wiring may bound presentation
-text, but it must preserve these identity and outcome fields.
+reason, provider error, and empty state. Parent delivery bounds presentation
+text while preserving these identity and outcome fields.

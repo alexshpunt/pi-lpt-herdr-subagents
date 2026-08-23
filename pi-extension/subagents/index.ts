@@ -92,6 +92,7 @@ import {
 } from "./status.ts";
 import {
 	readSubagentActivityFile,
+  readSubagentSettledEventsFile,
 	type ActivityReadResult,
 	type SubagentActivityState,
 } from "./activity.ts";
@@ -107,7 +108,6 @@ import {
 	markProcessRunning,
 	observeActivity,
 	observePaneInspection,
-	hasSettledAssistant,
 	projectLifecycle,
 	type LifecycleProjection,
 	type SubagentLifecycle,
@@ -116,6 +116,7 @@ import {
 import {
 	createSettledDeliveryQueue,
 	enqueueSettledDelivery,
+  enqueueTerminalFinalization,
 	type SettledDeliveryQueue,
 } from "./settled-delivery.ts";
 import {
@@ -248,7 +249,8 @@ const SubagentParams = Type.Object({
 		Type.Object({
 			branch: Type.String({
 				minLength: 1,
-				description: "New branch name for an isolated Herdr-managed Git worktree",
+        description:
+          "New branch name for an isolated Herdr-managed Git worktree",
 			}),
 			base: Type.Optional(
 				Type.String({
@@ -416,8 +418,12 @@ function parseAgentDefinition(
 			getFrontmatterValue(frontmatter, "skill"),
 		thinking: thinking && isThinkingLevel(thinking) ? thinking : undefined,
 		denyTools: getFrontmatterValue(frontmatter, "deny-tools"),
-		spawning: parseOptionalBoolean(getFrontmatterValue(frontmatter, "spawning")),
-		autoExit: parseOptionalBoolean(getFrontmatterValue(frontmatter, "auto-exit")),
+    spawning: parseOptionalBoolean(
+      getFrontmatterValue(frontmatter, "spawning"),
+    ),
+    autoExit: parseOptionalBoolean(
+      getFrontmatterValue(frontmatter, "auto-exit"),
+    ),
 		interactive: parseOptionalBoolean(
 			getFrontmatterValue(frontmatter, "interactive"),
 		),
@@ -473,7 +479,8 @@ function findPackageMetadata(path: string): {
 				const pkg = JSON.parse(readFileSync(packagePath, "utf8"));
 				return {
 					provider: typeof pkg.name === "string" ? pkg.name : undefined,
-					providerVersion: typeof pkg.version === "string" ? pkg.version : undefined,
+          providerVersion:
+            typeof pkg.version === "string" ? pkg.version : undefined,
 				};
 			} catch {
 				return {};
@@ -500,7 +507,8 @@ function discoverRolePackPaths(pi?: Pick<ExtensionAPI, "events">): {
 				if (typeof path !== "string" || !isAbsolute(path)) {
 					diagnostics.push({
 						code: "invalid-role-pack-path",
-						message: "Role packs must register an absolute file or directory path.",
+            message:
+              "Role packs must register an absolute file or directory path.",
 					});
 					return;
 				}
@@ -537,7 +545,8 @@ function discoverAgentCatalog(pi?: Pick<ExtensionAPI, "events">): AgentCatalog {
 				continue;
 			}
 			const parsed = parseAgentDefinition(content, fallbackName);
-			if (parsed) agents.set(parsed.name, { ...parsed, source, path: filePath });
+      if (parsed)
+        agents.set(parsed.name, { ...parsed, source, path: filePath });
 		}
 	};
 
@@ -1072,6 +1081,12 @@ interface SubagentResult {
 	worktree?: WorktreeHandoff;
 }
 
+interface PendingTerminalDelivery {
+  finalAssistant?: SettledDeliveryIdentity;
+  queued: boolean;
+  finalize: (contentAlreadyDelivered: boolean) => void;
+}
+
 /**
  * State for a launched (but not yet completed) subagent.
  */
@@ -1085,6 +1100,7 @@ interface RunningSubagent {
 	sessionFile: string;
 	launchScriptFile?: string;
 	activityFile?: string;
+  settledEventsFile?: string;
 	activity?: SubagentActivityState;
 	sessionBaseline?: SessionBaselineCursor;
 	activityRead?: {
@@ -1110,6 +1126,8 @@ interface RunningSubagent {
 	interactive: boolean;
 	/** Parent-resolved model/thinking selection and provenance. */
 	runtimePlan: ResolvedRuntimePlan | undefined;
+  /** Pending terminal parent enqueue; retained until sendMessage succeeds. */
+  pendingTerminalDelivery?: PendingTerminalDelivery;
 	worktree?: WorktreeLaunch;
 }
 
@@ -1477,7 +1495,9 @@ function ensureLifecycle(running: RunningSubagent): SubagentLifecycle {
 					turnActive: state.phase === "active",
 					providerActive: false,
 					toolActive: state.activeScope === "tool",
-					...(state.activeScope ? { activeScope: state.activeScope as any } : {}),
+          ...(state.activeScope
+            ? { activeScope: state.activeScope as any }
+            : {}),
 					...(state.activeSinceMs == null
 						? {}
 						: { activeSince: state.activeSinceMs }),
@@ -1499,23 +1519,19 @@ function ensureLifecycle(running: RunningSubagent): SubagentLifecycle {
 	return lifecycle;
 }
 
-function settledAssistantFor(running: RunningSubagent): NewestAssistantEntry | null {
+function settledAssistantFor(
+  running: RunningSubagent,
+): NewestAssistantEntry | null {
 	if (!running.sessionBaseline) return null;
 	try {
-		const read = readEntriesAfterBaseline(running.sessionFile, running.sessionBaseline);
+    const read = readEntriesAfterBaseline(
+      running.sessionFile,
+      running.sessionBaseline,
+    );
 		return findNewestAppendedAssistant(read.entries);
 	} catch {
 		return null;
 	}
-}
-
-function wasSettled(running: RunningSubagent, assistant: NewestAssistantEntry | null): boolean {
-	if (!assistant || !running.lifecycle.settledDelivery) return false;
-	return hasSettledAssistant(running.lifecycle, {
-		childId: running.id,
-		sessionFile: running.sessionFile,
-		assistantEntryId: assistant.id,
-	});
 }
 
 function settledPresentation(
@@ -1548,19 +1564,65 @@ function settledPresentation(
 	);
 }
 
+function settledAssistantForId(
+  running: RunningSubagent,
+  assistantId: string,
+): NewestAssistantEntry | null {
+  if (!running.sessionBaseline) return null;
+  try {
+    const entries = readEntriesAfterBaseline(
+      running.sessionFile,
+      running.sessionBaseline,
+    ).entries;
+    return findNewestAppendedAssistant(
+      entries.filter((entry) => entry.id === assistantId),
+    );
+  } catch {
+    return null;
+  }
+}
+
+function settledAssistants(running: RunningSubagent): NewestAssistantEntry[] {
+	if (!running.sessionBaseline) return [];
+	try {
+		return readEntriesAfterBaseline(running.sessionFile, running.sessionBaseline).entries
+			.map((entry) => findNewestAppendedAssistant([entry]))
+			.filter((assistant): assistant is NewestAssistantEntry => assistant != null);
+	} catch {
+		return [];
+	}
+}
+
 function observeSettledRunningSubagent(running: RunningSubagent): void {
-	const activity = running.activity;
-	if (!activity || activity.latestEvent !== "agent_settled") return;
-	const sequence = activity.sequence;
+  if (!running.settledEventsFile) return;
+	let events = readSubagentSettledEventsFile(
+		running.settledEventsFile,
+		running.id,
+	).sort((left, right) => left.sequence - right.sequence);
+	if (events.length === 0) return;
+	const assistantPool = settledAssistants(running);
+	const usedAssistantIds = new Set<string>();
 	const gate = running.lifecycle.settledDelivery ?? {
 		lastActivitySequence: null,
 		delivered: new Set<string>(),
 	};
 	running.lifecycle.settledDelivery = gate;
-	if (gate.lastActivitySequence != null && sequence <= gate.lastActivitySequence) return;
 
-	const assistant = settledAssistantFor(running);
-	if (!assistant) return;
+  for (const event of events) {
+    if (
+      gate.lastActivitySequence != null &&
+      event.sequence <= gate.lastActivitySequence &&
+      !event.assistantId
+    )
+      continue;
+		let assistant = event.assistantId
+			? settledAssistantForId(running, event.assistantId)
+			: null;
+		if (!assistant) {
+			assistant = assistantPool.find((candidate) => !usedAssistantIds.has(candidate.id)) ?? null;
+		}
+		if (!assistant) continue;
+		usedAssistantIds.add(assistant.id);
 	const outcome = classifySettledOutcome({
 		assistant,
 		interruptRequested: running.lifecycle.turn.kind === "interrupted",
@@ -1571,8 +1633,11 @@ function observeSettledRunningSubagent(running: RunningSubagent): void {
 		assistantEntryId: assistant.id,
 	};
 	if (outcome === "intentional-abort") {
-		gate.lastActivitySequence = sequence;
-		return;
+      gate.lastActivitySequence = Math.max(
+        gate.lastActivitySequence ?? -1,
+        event.sequence,
+      );
+      continue;
 	}
 
 	void enqueueSettledDelivery({
@@ -1580,11 +1645,15 @@ function observeSettledRunningSubagent(running: RunningSubagent): void {
 		ledger: gate,
 		childId: running.id,
 		identity,
-		activitySequence: sequence,
+      activitySequence: event.sequence,
+      allowOlder: true,
 		enqueue: () => {
 			if (!runtime.pi) throw new Error("Parent API is unavailable");
 			const completionApi = runtime.pi;
-			sendSubagentResult(completionApi, settledPresentation(running, assistant, outcome), {
+        sendSubagentResult(
+          completionApi,
+          settledPresentation(running, assistant, outcome),
+          {
 				kind: "settled",
 				name: running.name,
 				task: running.task,
@@ -1592,18 +1661,58 @@ function observeSettledRunningSubagent(running: RunningSubagent): void {
 				childId: running.id,
 				sessionFile: running.sessionFile,
 				assistantEntryId: assistant.id,
-				activitySequence: sequence,
-				turnIndex: activity.turnIndex ?? null,
+            activitySequence: event.sequence,
+            turnIndex: event.turnIndex ?? null,
 				outcome,
 				text: assistant.text,
 				stopReason: assistant.stopReason,
-				...(assistant.errorMessage ? { errorMessage: assistant.errorMessage } : {}),
+            ...(assistant.errorMessage
+              ? { errorMessage: assistant.errorMessage }
+              : {}),
 				empty: assistant.empty,
+          },
+        );
+      },
+    }).catch(() => {
+      // A failed parent enqueue leaves this event retryable on the next poll.
 			});
+  }
+}
+
+function attemptPendingTerminalDelivery(running: RunningSubagent): void {
+  const pending = running.pendingTerminalDelivery;
+  if (!pending || pending.queued) return;
+  pending.queued = true;
+  const ledger = running.lifecycle.settledDelivery ?? {
+    lastActivitySequence: null,
+    delivered: new Set<string>(),
+  };
+  running.lifecycle.settledDelivery = ledger;
+  void enqueueTerminalFinalization({
+    queue: runtime.settledDeliveryQueue,
+    ledger,
+    childId: running.id,
+    finalAssistant: pending.finalAssistant,
+    finalize: (contentAlreadyDelivered) => {
+      pending.finalize(contentAlreadyDelivered);
+      running.pendingTerminalDelivery = undefined;
+      running.lifecycle = markDelivery(running.lifecycle, "delivered");
+      runningSubagents.delete(running.id);
+      updateWidget();
 		},
 	}).catch(() => {
-		// A failed parent enqueue leaves the tuple retryable on the next poll.
+    if (running.pendingTerminalDelivery === pending) pending.queued = false;
 	});
+}
+
+function queueTerminalDelivery(
+  running: RunningSubagent,
+  finalAssistant: SettledDeliveryIdentity | undefined,
+  finalize: (contentAlreadyDelivered: boolean) => void,
+): void {
+  if (running.pendingTerminalDelivery) return;
+  running.pendingTerminalDelivery = { finalAssistant, queued: false, finalize };
+  attemptPendingTerminalDelivery(running);
 }
 
 function observeRunningSubagent(
@@ -1627,7 +1736,8 @@ function observeRunningSubagent(
 		read,
 		observedAt,
 	);
-	if (read.ok) observeSettledRunningSubagent(running);
+	observeSettledRunningSubagent(running);
+	attemptPendingTerminalDelivery(running);
 }
 
 function resolveInterruptTarget(params: {
@@ -1787,7 +1897,10 @@ function startStatusRefresh(pi: ExtensionAPI) {
 			pi.sendMessage(
 				{
 					customType: "subagent_status",
-					content: formatStatusAggregate(transitionLines, statusConfig.lineLimit),
+          content: formatStatusAggregate(
+            transitionLines,
+            statusConfig.lineLimit,
+          ),
 					display: true,
 					details: { lines: capped.visibleLines, overflow: capped.overflow },
 				},
@@ -2078,7 +2191,9 @@ function resolveSubagentRuntimePlans(
 		wrapPiModelRegistry(ctx.modelRegistry),
 	);
 	if (params.worktree && plans.length > 1) {
-		throw new Error("Model fallbacks are not supported for worktree subagents.");
+    throw new Error(
+      "Model fallbacks are not supported for worktree subagents.",
+    );
 	}
 	return plans;
 }
@@ -2504,7 +2619,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			);
 		}
 		const id = `workflow-${candidate.runId}-${Math.random().toString(16).slice(2, 10)}`;
-		const sessionFile = join(dirname(candidate.path), "sessions", `${id}.jsonl`);
+    const sessionFile = join(
+      dirname(candidate.path),
+      "sessions",
+      `${id}.jsonl`,
+    );
 		let surface: string | undefined;
 		let launched = false;
 		const childController = new AbortController();
@@ -2616,7 +2735,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			if (childController.signal.aborted)
 				return workflowFailure("cancelled", "Workflow cancelled.");
 			const message = error instanceof Error ? error.message : String(error);
-			return workflowFailure(launched ? "child_error" : "launch_error", message);
+      return workflowFailure(
+        launched ? "child_error" : "launch_error",
+        message,
+      );
 		} finally {
 			owner.controller.signal.removeEventListener("abort", onOwnerAbort);
 			owner.children.delete(id);
@@ -2683,7 +2805,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 	) => {
 		if (!claimWorkflowTerminal(owner.gate, outcome)) {
 			return (
-				owner.gate.outcome ?? runtime.workflowOutcomes.get(owner.runId) ?? outcome
+        owner.gate.outcome ??
+        runtime.workflowOutcomes.get(owner.runId) ??
+        outcome
 			);
 		}
 		runtime.workflowOutcomes.set(owner.runId, outcome);
@@ -2962,8 +3086,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 							content: [
 								{
 									type: "text",
-									text:
-										"Error: start pi with a persistent session before preparing a workflow.",
+                  text: "Error: start pi with a persistent session before preparing a workflow.",
 								},
 							],
 							details: { error: "workflow_persistent_session_required" },
@@ -2978,7 +3101,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 						});
 						runtime.pendingWorkflow = candidate;
 						return {
-							content: [{ type: "text", text: formatApprovalPacket(candidate) }],
+              content: [
+                { type: "text", text: formatApprovalPacket(candidate) },
+              ],
 							details: {
 								runId: candidate.runId,
 								scriptHash: candidate.scriptHash,
@@ -3116,9 +3241,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					}
 					try {
 						const root = realpathSync(
-							execFileSync("git", ["-C", ctx.cwd, "rev-parse", "--show-toplevel"], {
+              execFileSync(
+                "git",
+                ["-C", ctx.cwd, "rev-parse", "--show-toplevel"],
+                {
 								encoding: "utf8",
-							}).trim(),
+                },
+              ).trim(),
 						);
 						const commonDir = realpathSync(
 							execFileSync(
@@ -3141,8 +3270,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 								content: [
 									{
 										type: "text",
-										text:
-											"Error: workflow cancellation must use the approved repository identity.",
+                    text: "Error: workflow cancellation must use the approved repository identity.",
 									},
 								],
 								details: { error: "workflow_cancel_identity_mismatch" },
@@ -3174,7 +3302,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					};
 				}
 				return {
-					content: [{ type: "text", text: "Error: unsupported workflow action." }],
+          content: [
+            { type: "text", text: "Error: unsupported workflow action." },
+          ],
 					details: { error: "workflow_action_unavailable" },
 				};
 			},
@@ -3247,8 +3377,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 						content: [
 							{
 								type: "text",
-								text:
-									"Error: no session file. Start pi with a persistent session to use subagents.",
+                text: "Error: no session file. Start pi with a persistent session to use subagents.",
 							},
 						],
 						details: { error: "no session file" },
@@ -3266,7 +3395,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					parentThinking !== "xhigh" &&
 					parentThinking !== "max"
 				) {
-					throw new Error(`Unsupported parent thinking level: ${parentThinking}`);
+          throw new Error(
+            `Unsupported parent thinking level: ${parentThinking}`,
+          );
 				}
 				const runtimePlans = resolveSubagentRuntimePlans(
 					params,
@@ -3314,28 +3445,22 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 							updateWidget();
 							return;
 						}
-						completedRunning.lifecycle = markDelivery(
-							completedRunning.lifecycle,
-							"delivered",
-						);
-						runningSubagents.delete(completedRunning.id);
-						updateWidget();
-						const completionApi = selectCompletionApi(pi, runtime.pi);
-
 						if (result.ping) {
-							// Subagent is requesting help — steer a ping message with session path for resume
+							const ping = result.ping;
 							const worktreeRef = result.worktree
 								? `\n\n${formatWorktreeHandoff(result.worktree)}`
 								: "";
 							const sessionRef = `\n\nSession: ${result.sessionFile}\nResume: pi --session ${result.sessionFile}`;
+              queueTerminalDelivery(completedRunning, undefined, () => {
+                const completionApi = selectCompletionApi(pi, runtime.pi);
 							completionApi.sendMessage(
 								{
 									customType: "subagent_ping",
-									content: `Sub-agent "${result.ping.name}" needs help (${formatElapsed(result.elapsed)}):\n\n${result.ping.message}${worktreeRef}${sessionRef}`,
+                    content: `Sub-agent "${ping.name}" needs help (${formatElapsed(result.elapsed)}):\n\n${ping.message}${worktreeRef}${sessionRef}`,
 									display: true,
 									details: {
-										name: result.ping.name,
-										message: result.ping.message,
+                      name: ping.name,
+                      message: ping.message,
 										agent: running.agent,
 										sessionFile: result.sessionFile,
 										...(result.worktree ? { worktree: result.worktree } : {}),
@@ -3343,18 +3468,29 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 								},
 								{ triggerTurn: true, deliverAs: "steer" },
 							);
+              });
 							return;
 						}
 
 						const finalAssistant = settledAssistantFor(completedRunning);
-						if (wasSettled(completedRunning, finalAssistant)) return;
-
+            const finalIdentity = finalAssistant
+              ? {
+                  childId: completedRunning.id,
+                  sessionFile: completedRunning.sessionFile,
+                  assistantEntryId: finalAssistant.id,
+                }
+              : undefined;
 						const presentation = resolveResultPresentation(
 							result,
 							completedRunning.name,
 							completedRunning.runtimePlan?.runtimeMismatch,
 						);
-
+            queueTerminalDelivery(
+              completedRunning,
+              finalIdentity,
+              (contentAlreadyDelivered) => {
+                if (contentAlreadyDelivered) return;
+                const completionApi = selectCompletionApi(pi, runtime.pi);
 						sendSubagentResult(completionApi, presentation, {
 							name: completedRunning.name,
 							task: completedRunning.task,
@@ -3362,7 +3498,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 							exitCode: result.exitCode,
 							elapsed: result.elapsed,
 							sessionFile: result.sessionFile,
-							...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+                  ...(result.errorMessage
+                    ? { errorMessage: result.errorMessage }
+                    : {}),
 							...(result.fallbackAttempts
 								? { fallbackAttempts: result.fallbackAttempts }
 								: {}),
@@ -3371,24 +3509,29 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 								? { runtimePlan: completedRunning.runtimePlan }
 								: {}),
 						});
+              },
+            );
 					})
 					.catch((err) => {
+            if (running.pendingTerminalDelivery) {
+              attemptPendingTerminalDelivery(running);
+              return;
+            }
 						if (!shouldDeliverSubagentCompletion(running)) {
 							running.lifecycle = markDelivery(running.lifecycle, "suppressed");
 							runningSubagents.delete(running.id);
 							updateWidget();
 							return;
 						}
-						running.lifecycle = markDelivery(running.lifecycle, "delivered");
-						runningSubagents.delete(running.id);
-						updateWidget();
-						sendSubagentResult(
-							selectCompletionApi(pi, runtime.pi),
-							resolveUnexpectedErrorPresentation(
+            const presentation = resolveUnexpectedErrorPresentation(
 								`Sub-agent "${running.name}" error`,
 								err,
 								running.sessionFile,
-							),
+            );
+            queueTerminalDelivery(running, undefined, () => {
+              sendSubagentResult(
+                selectCompletionApi(pi, runtime.pi),
+                presentation,
 							{
 								name: running.name,
 								task: running.task,
@@ -3398,6 +3541,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 							},
 						);
 					});
+          });
 
 				// Return immediately
 				return {
@@ -3409,7 +3553,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 								(running.worktree
 									? ` in worktree ${running.worktree.path} on branch ${running.worktree.branch}. `
 									: ". ") +
-								(worktreeLaunchWarning ? `Warning: ${worktreeLaunchWarning} ` : "") +
+                (worktreeLaunchWarning
+                  ? `Warning: ${worktreeLaunchWarning} `
+                  : "") +
 								`Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. ` +
 								`The results will be delivered to you automatically as a steer message when the sub-agent finishes. ` +
 								`Until then, move on to other work or tell the user you're waiting.`,
@@ -3426,7 +3572,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 						thinking: running.runtimePlan?.thinking,
 						runtimePlan: running.runtimePlan,
 						...(running.worktree ? { worktree: running.worktree } : {}),
-						...(worktreeLaunchWarning ? { warning: worktreeLaunchWarning } : {}),
+            ...(worktreeLaunchWarning
+              ? { warning: worktreeLaunchWarning }
+              : {}),
 						status: "started",
 					},
 				};
@@ -3438,7 +3586,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					typeof partialArgs.name === "string" && partialArgs.name
 						? partialArgs.name
 						: "(unnamed)";
-				const task = typeof partialArgs.task === "string" ? partialArgs.task : "";
+        const task =
+          typeof partialArgs.task === "string" ? partialArgs.task : "";
 				const agent =
 					typeof partialArgs.agent === "string" && partialArgs.agent
 						? theme.fg("dim", ` (${partialArgs.agent})`)
@@ -3447,7 +3596,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					typeof partialArgs.cwd === "string" && partialArgs.cwd
 						? theme.fg("dim", ` in ${partialArgs.cwd}`)
 						: "";
-				const worktree = partialArgs.worktree as { branch?: unknown } | undefined;
+        const worktree = partialArgs.worktree as
+          { branch?: unknown } | undefined;
 				const worktreeHint =
 					typeof worktree?.branch === "string"
 						? theme.fg("dim", ` on ${worktree.branch} (worktree)`)
@@ -3463,7 +3613,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				// LLM generates tool arguments, so args.task grows token by token.
 				// We keep it compact here — Ctrl+O on renderResult expands the full content.
 				if (task) {
-					const firstLine = task.split("\n").find((l: string) => l.trim()) ?? "";
+          const firstLine =
+            task.split("\n").find((l: string) => l.trim()) ?? "";
 					const preview =
 						firstLine.length > 100 ? firstLine.slice(0, 100) + "…" : firstLine;
 					if (preview) {
@@ -3602,13 +3753,21 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				const agents = details?.agents ?? [];
 				const diagnostics = details?.diagnostics ?? [];
 				if (agents.length === 0 && diagnostics.length === 0) {
-					return new Text(theme.fg("dim", "No subagent definitions found."), 0, 0);
+          return new Text(
+            theme.fg("dim", "No subagent definitions found."),
+            0,
+            0,
+          );
 				}
 				const lines = agents.map((a: any) => {
 					const source =
-						a.source === "package" && a.provider ? `package:${a.provider}` : a.source;
+            a.source === "package" && a.provider
+              ? `package:${a.provider}`
+              : a.source;
 					const badge = theme.fg("accent", ` (${source})`);
-					const desc = a.description ? theme.fg("dim", ` — ${a.description}`) : "";
+          const desc = a.description
+            ? theme.fg("dim", ` — ${a.description}`)
+            : "";
 					const model = a.model ? theme.fg("dim", ` [${a.model}]`) : "";
 					return `  ${theme.fg("toolTitle", theme.bold(a.name))}${badge}${model}${desc}`;
 				});
@@ -3739,34 +3898,41 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 							updateWidget();
 							return;
 						}
-						running.lifecycle = markDelivery(running.lifecycle, "delivered");
-						runningSubagents.delete(running.id);
-						updateWidget();
-						const completionApi = selectCompletionApi(pi, runtime.pi);
-
 						if (result.ping) {
+							const ping = result.ping;
 							const sessionRef = `\n\nSession: ${params.sessionPath}\nResume: pi --session ${params.sessionPath}`;
+              queueTerminalDelivery(running, undefined, () => {
+                const completionApi = selectCompletionApi(pi, runtime.pi);
 							completionApi.sendMessage(
 								{
 									customType: "subagent_ping",
-									content: `Sub-agent "${result.ping.name}" needs help (${formatElapsed(result.elapsed)}):\n\n${result.ping.message}${sessionRef}`,
+                    content: `Sub-agent "${ping.name}" needs help (${formatElapsed(result.elapsed)}):\n\n${ping.message}${sessionRef}`,
 									display: true,
 									details: {
-										name: result.ping.name,
-										message: result.ping.message,
+                      name: ping.name,
+                      message: ping.message,
 										sessionFile: params.sessionPath,
 									},
 								},
 								{ triggerTurn: true, deliverAs: "steer" },
 							);
+              });
 							return;
 						}
 
 						const finalAssistant = settledAssistantFor(running);
-						if (wasSettled(running, finalAssistant)) return;
-
+            const finalIdentity = finalAssistant
+              ? {
+                  childId: running.id,
+                  sessionFile: running.sessionFile,
+                  assistantEntryId: finalAssistant.id,
+                }
+              : undefined;
 						const allEntries = running.sessionBaseline
-							? readEntriesAfterBaseline(params.sessionPath, running.sessionBaseline).entries
+              ? readEntriesAfterBaseline(
+                  params.sessionPath,
+                  running.sessionBaseline,
+                ).entries
 							: [];
 						const summary =
 							findLastAssistantMessage(allEntries) ??
@@ -3780,37 +3946,52 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 							name,
 							running.runtimePlan?.runtimeMismatch,
 						);
-
+            queueTerminalDelivery(
+              running,
+              finalIdentity,
+              (contentAlreadyDelivered) => {
+                if (contentAlreadyDelivered) return;
+                const completionApi = selectCompletionApi(pi, runtime.pi);
 						sendSubagentResult(completionApi, presentation, {
 							name,
 							task: params.message ?? "resumed session",
 							exitCode: result.exitCode,
 							elapsed: result.elapsed,
 							sessionFile: params.sessionPath,
-							...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-							...(running.runtimePlan ? { runtimePlan: running.runtimePlan } : {}),
+                  ...(result.errorMessage
+                    ? { errorMessage: result.errorMessage }
+                    : {}),
+                  ...(running.runtimePlan
+                    ? { runtimePlan: running.runtimePlan }
+                    : {}),
 						});
+              },
+            );
 					})
 					.catch((err) => {
+            if (running.pendingTerminalDelivery) {
+              attemptPendingTerminalDelivery(running);
+              return;
+            }
 						if (!shouldDeliverSubagentCompletion(running)) {
 							running.lifecycle = markDelivery(running.lifecycle, "suppressed");
 							runningSubagents.delete(running.id);
 							updateWidget();
 							return;
 						}
-						running.lifecycle = markDelivery(running.lifecycle, "delivered");
-						runningSubagents.delete(running.id);
-						updateWidget();
-						sendSubagentResult(
-							selectCompletionApi(pi, runtime.pi),
-							resolveUnexpectedErrorPresentation(
+            const presentation = resolveUnexpectedErrorPresentation(
 								"Resume error",
 								err,
 								params.sessionPath,
-							),
+            );
+            queueTerminalDelivery(running, undefined, () => {
+              sendSubagentResult(
+                selectCompletionApi(pi, runtime.pi),
+                presentation,
 							{ name, error: err?.message, sessionFile: params.sessionPath },
 						);
 					});
+          });
 
 				return {
 					content: [{ type: "text", text: `Session "${name}" resumed.` }],
@@ -3959,7 +4140,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
 			const branch = parts.shift();
 			if (!branch || branch === "list") {
-				ctx.ui.notify("Usage: /worktree <name> [task] | /worktree list", "warning");
+        ctx.ui.notify(
+          "Usage: /worktree <name> [task] | /worktree list",
+          "warning",
+        );
 				return;
 			}
 			if (!isTerminalAvailable()) {
@@ -4060,7 +4244,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					...formatVisibleAgentDefinitions(catalog.agents),
 					...formatAgentDiagnostics(catalog.diagnostics),
 				];
-				ctx.ui.notify(lines.join("\n") || "No subagent definitions found.", "info");
+        ctx.ui.notify(
+          lines.join("\n") || "No subagent definitions found.",
+          "info",
+        );
 				return;
 			}
 			if (!trimmed) {
@@ -4136,7 +4323,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				const summary = rawContent
 					.replace(/\n\nSession: .+\nResume: .+$/, "")
 					.replace(`Sub-agent "${name}" completed (${elapsed}).\n\n`, "")
-					.replace(`Sub-agent "${name}" failed (exit code ${exitCode}).\n\n`, "")
+          .replace(
+            `Sub-agent "${name}" failed (exit code ${exitCode}).\n\n`,
+            "",
+          )
 					.replace(
 						new RegExp(
 							`^Sub-agent "${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}" failed after ${elapsed} \\(provider/agent error — auto-retry exhausted\\)\\.\\n\\n`,
@@ -4156,7 +4346,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					}
 					if (details.sessionFile) {
 						contentLines.push("");
-						contentLines.push(theme.fg("dim", `Session: ${details.sessionFile}`));
+            contentLines.push(
+              theme.fg("dim", `Session: ${details.sessionFile}`),
+            );
 						contentLines.push(
 							theme.fg("dim", `Resume:  pi --session ${details.sessionFile}`),
 						);
@@ -4170,7 +4362,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 						}
 						const totalLines = summary.split("\n").length;
 						if (totalLines > 5) {
-							contentLines.push(theme.fg("muted", `… ${totalLines - 5} more lines`));
+              contentLines.push(
+                theme.fg("muted", `… ${totalLines - 5} more lines`),
+              );
 						}
 					}
 					contentLines.push(
@@ -4190,7 +4384,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 	pi.registerMessageRenderer("subagent_status", (message, options, theme) => {
 		const details = message.details as any;
 		const lines = Array.isArray(details?.lines) ? details.lines : [];
-		const overflow = typeof details?.overflow === "number" ? details.overflow : 0;
+    const overflow =
+      typeof details?.overflow === "number" ? details.overflow : 0;
 		if (lines.length === 0 && overflow === 0) return undefined;
 
 		return {
@@ -4246,7 +4441,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					contentLines.push(details.message ?? "");
 					if (details.sessionFile) {
 						contentLines.push("");
-						contentLines.push(theme.fg("dim", `Session: ${details.sessionFile}`));
+            contentLines.push(
+              theme.fg("dim", `Session: ${details.sessionFile}`),
+            );
 					}
 				} else {
 					const preview = (details.message ?? "")

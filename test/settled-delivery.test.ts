@@ -110,6 +110,54 @@ describe("settled delivery ledger", () => {
     assert.equal(hasSettledDelivery(ledger, entry), true);
   });
 
+
+  it("allows an older event to retry after a later boundary succeeds", async () => {
+    const ledger = createSettledDeliveryLedger();
+    const queue = createSettledDeliveryQueue();
+    const first = identity("child", "assistant-1");
+    const second = identity("child", "assistant-2");
+    let failed = true;
+    await assert.rejects(enqueueSettledDelivery({
+      queue,
+      ledger,
+      childId: "child",
+      identity: first,
+      activitySequence: 1,
+      allowOlder: true,
+      enqueue: () => {
+        if (failed) {
+          failed = false;
+          throw new Error("first send failed");
+        }
+        return "one";
+      },
+    }), /first send failed/);
+    assert.deepEqual(
+      await enqueueSettledDelivery({
+        queue,
+        ledger,
+        childId: "child",
+        identity: second,
+        activitySequence: 2,
+        allowOlder: true,
+        enqueue: () => "two",
+      }),
+      { status: "delivered", value: "two" },
+    );
+    assert.deepEqual(
+      await enqueueSettledDelivery({
+        queue,
+        ledger,
+        childId: "child",
+        identity: first,
+        activitySequence: 1,
+        allowOlder: true,
+        enqueue: () => "one",
+      }),
+      { status: "delivered", value: "one" },
+    );
+  });
+
   it("ignores an older activity sequence", async () => {
     const ledger = createSettledDeliveryLedger();
     const queue = createSettledDeliveryQueue();
@@ -153,6 +201,37 @@ describe("settled delivery ledger", () => {
       finalize: (contentAlreadyDelivered) => ({ contentAlreadyDelivered, cleaned: true }),
     });
     assert.deepEqual(terminal, { contentAlreadyDelivered: true, cleaned: true });
+  });
+
+
+  it("leaves terminal finalization retryable after a send failure", async () => {
+    const ledger = createSettledDeliveryLedger();
+    const queue = createSettledDeliveryQueue();
+    let failed = true;
+    await assert.rejects(
+      enqueueTerminalFinalization({
+        queue,
+        ledger,
+        childId: "child",
+        finalize: () => {
+          if (failed) {
+            failed = false;
+            throw new Error("send failed");
+          }
+          return "delivered";
+        },
+      }),
+      /send failed/,
+    );
+    assert.equal(
+      await enqueueTerminalFinalization({
+        queue,
+        ledger,
+        childId: "child",
+        finalize: () => "delivered",
+      }),
+      "delivered",
+    );
   });
 
   it("isolates queues and ledgers by child id", async () => {

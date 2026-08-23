@@ -9,7 +9,10 @@ import {
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { getSubagentActivityFile } from "./activity.ts";
+import {
+  getSubagentActivityFile,
+  getSubagentSettledEventsFile,
+} from "./activity.ts";
 import { createLifecycle, type SubagentLifecycle } from "./lifecycle.ts";
 import type { ResolvedRuntimePlan } from "./runtime-routing.ts";
 import { HerdrWorktreeCreateError } from "./herdr.ts";
@@ -118,6 +121,7 @@ export interface PiRunningChild {
 	sessionFile: string;
 	launchScriptFile: string;
 	activityFile: string;
+  settledEventsFile: string;
 	interactive: boolean;
 	sessionBaseline: SessionBaselineCursor;
 	runtimePlan: ResolvedRuntimePlan | undefined;
@@ -179,6 +183,7 @@ interface PreparedSurface {
 interface PreparedSession extends PreparedSurface {
 	sessionFile: string;
 	activityFile: string;
+  settledEventsFile: string;
 }
 
 interface PreparedArtifacts extends PreparedSession {
@@ -430,7 +435,11 @@ function prepareChildSession(
 		resolved.artifactDir,
 		resolved.id,
 	);
-	return { ...surface, sessionFile, activityFile };
+  const settledEventsFile = getSubagentSettledEventsFile(
+    resolved.artifactDir,
+    resolved.id,
+  );
+  return { ...surface, sessionFile, activityFile, settledEventsFile };
 }
 
 async function confirmShellReady(
@@ -593,12 +602,13 @@ function buildPiCommand(
 		env.push(`PI_SUBAGENT_NAME=${shellQuote(request.name)}`);
 		if (request.agent)
 			env.push(`PI_SUBAGENT_AGENT=${shellQuote(request.agent)}`);
-		env.push(
-			`PI_SUBAGENT_AUTO_EXIT=${request.behavior.autoExit ? "1" : "0"}`,
-		);
+    env.push(`PI_SUBAGENT_AUTO_EXIT=${request.behavior.autoExit ? "1" : "0"}`);
 		env.push(`PI_SUBAGENT_SESSION=${shellQuote(artifacts.sessionFile)}`);
 		env.push(`PI_SUBAGENT_ID=${shellQuote(resolved.id)}`);
 		env.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellQuote(artifacts.activityFile)}`);
+    env.push(
+      `PI_SUBAGENT_SETTLED_EVENTS_FILE=${shellQuote(artifacts.settledEventsFile)}`,
+    );
 		env.push(`PI_SUBAGENT_SURFACE=${shellQuote(artifacts.surface)}`);
 	}
 
@@ -651,6 +661,7 @@ function createRunningChild(
 		sessionFile: artifacts.sessionFile,
 		launchScriptFile,
 		activityFile: artifacts.activityFile,
+    settledEventsFile: artifacts.settledEventsFile,
 		interactive: resolved.request.behavior.interactive,
 		sessionBaseline,
 		runtimePlan: resolved.request.runtimePlan,
@@ -675,6 +686,7 @@ async function launchResumedPiSubagent(
 	const surface = operations.createPane(request.name);
 	await operations.waitForShellReady(surface);
 	const activityFile = getSubagentActivityFile(artifactDir, id);
+  const settledEventsFile = getSubagentSettledEventsFile(artifactDir, id);
 	mkdirSync(dirname(activityFile), { recursive: true });
 
 	let messageFile: string | undefined;
@@ -699,6 +711,7 @@ async function launchResumedPiSubagent(
 		`PI_SUBAGENT_SESSION=${shellQuote(request.sessionFile)}`,
 		`PI_SUBAGENT_ID=${shellQuote(id)}`,
 		`PI_SUBAGENT_ACTIVITY_FILE=${shellQuote(activityFile)}`,
+    `PI_SUBAGENT_SETTLED_EVENTS_FILE=${shellQuote(settledEventsFile)}`,
 		`PI_SUBAGENT_AUTO_EXIT=${autoExit ? "1" : "0"}`,
 	];
 	const command = [
@@ -737,6 +750,7 @@ async function launchResumedPiSubagent(
 		sessionFile: request.sessionFile,
 		launchScriptFile,
 		activityFile,
+    settledEventsFile,
 		interactive,
 		runtimePlan: undefined,
 		sessionBaseline,

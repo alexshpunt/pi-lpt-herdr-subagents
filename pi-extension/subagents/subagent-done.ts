@@ -21,28 +21,38 @@ export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
 function textFromContent(content: unknown): string {
   if (!Array.isArray(content)) return "";
   return content
-    .filter((part): part is { type?: string; text?: string } => part != null && typeof part === "object")
+    .filter(
+      (part): part is { type?: string; text?: string } =>
+        part != null && typeof part === "object",
+    )
     .filter((part) => part.type === "text" && typeof part.text === "string")
     .map((part) => part.text ?? "")
     .join("");
 }
 
 /** Convert the latest assistant message into the frozen settled contract. */
-export function newestAssistantEntry(messages: any[] | undefined): NewestAssistantEntry | null {
+export function newestAssistantEntry(
+  messages: any[] | undefined,
+): NewestAssistantEntry | null {
   if (!messages || messages.length === 0) return null;
   const latest = messages[messages.length - 1];
   if (latest?.role === "user") return null;
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg?.role !== "assistant") continue;
-    const text = typeof msg.text === "string" ? msg.text : textFromContent(msg.content);
+    const text =
+      typeof msg.text === "string" ? msg.text : textFromContent(msg.content);
     const contentLength = text.length;
     return {
       id: typeof msg.id === "string" && msg.id ? msg.id : `assistant-${i}`,
       text: text || null,
       contentLength,
-      stopReason: typeof msg.stopReason === "string" ? msg.stopReason as AssistantStopReason : undefined,
-      errorMessage: typeof msg.errorMessage === "string" ? msg.errorMessage : undefined,
+      stopReason:
+        typeof msg.stopReason === "string"
+          ? (msg.stopReason as AssistantStopReason)
+          : undefined,
+      errorMessage:
+        typeof msg.errorMessage === "string" ? msg.errorMessage : undefined,
       empty: contentLength === 0,
     };
   }
@@ -93,16 +103,21 @@ export function findLatestAssistantError(
     const msg = messages[i];
     if (msg?.role !== "assistant") continue;
     if (msg.stopReason !== "error") return null;
-    const raw = typeof msg.errorMessage === "string" ? msg.errorMessage.trim() : "";
+    const raw =
+      typeof msg.errorMessage === "string" ? msg.errorMessage.trim() : "";
     return {
-      errorMessage: raw || "Subagent agent loop ended with stopReason=error (no errorMessage field).",
+      errorMessage:
+        raw ||
+        "Subagent agent loop ended with stopReason=error (no errorMessage field).",
       stopReason: "error",
     };
   }
   return null;
 }
 
-export function buildCompletionSidecar(messages: any[] | undefined):
+export function buildCompletionSidecar(
+  messages: any[] | undefined,
+):
   | { type: "done" }
   | { type: "error"; errorMessage: string; stopReason: "error" } {
   const errorInfo = findLatestAssistantError(messages);
@@ -129,16 +144,21 @@ export default function (pi: ExtensionAPI) {
   const recorder = createSubagentActivityRecorder({
     runningChildId: process.env.PI_SUBAGENT_ID,
     activityFile: process.env.PI_SUBAGENT_ACTIVITY_FILE,
+    settledEventsFile: process.env.PI_SUBAGENT_SETTLED_EVENTS_FILE,
   });
 
   function renderWidget(ctx: { ui: { setWidget: Function } }, _theme: any) {
     ctx.ui.setWidget(
       "subagent-tools",
       (_tui: any, theme: any) => {
-        const box = new Box(1, 0, (text: string) => theme.bg("toolSuccessBg", text));
+        const box = new Box(1, 0, (text: string) =>
+          theme.bg("toolSuccessBg", text),
+        );
 
         const label = subagentAgent || subagentName;
-        const agentTag = label ? theme.bold(theme.fg("accent", `[${label}]`)) : "";
+        const agentTag = label
+          ? theme.bold(theme.fg("accent", `[${label}]`))
+          : "";
 
         if (expanded) {
           // Expanded: full tool list + denied
@@ -168,11 +188,16 @@ export default function (pi: ExtensionAPI) {
           const countInfo = theme.fg("dim", ` — ${toolNames.length} tools`);
           const deniedInfo =
             denied.length > 0
-              ? theme.fg("dim", " · ") + theme.fg("error", `${denied.length} denied`)
+              ? theme.fg("dim", " · ") +
+                theme.fg("error", `${denied.length} denied`)
               : "";
           const hint = theme.fg("muted", "  (Ctrl+J to expand)");
 
-          const content = new Text(`${agentTag}${countInfo}${deniedInfo}${hint}`, 0, 0);
+          const content = new Text(
+            `${agentTag}${countInfo}${deniedInfo}${hint}`,
+            0,
+            0,
+          );
           box.addChild(content);
         }
 
@@ -203,6 +228,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", () => {
+    // Each run needs fresh agent_end evidence; never reuse a prior clean turn.
+    latestAgentEndMessages = undefined;
+    latestTurnIndex = undefined;
     recorder.beforeAgentStart();
   });
 
@@ -218,7 +246,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_settled", (_event, ctx) => {
-    const outcome = classifyAutoExitOutcome(latestAgentEndMessages, interruptRequested);
+    const outcome = classifyAutoExitOutcome(
+      latestAgentEndMessages,
+      interruptRequested,
+    );
     const assistant = newestAssistantEntry(latestAgentEndMessages);
     if (!outcome || !assistant) return;
 
@@ -267,7 +298,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_start", (event) => {
-    recorder.toolExecutionStart((event as any).toolCallId, (event as any).toolName);
+    recorder.toolExecutionStart(
+      (event as any).toolCallId,
+      (event as any).toolName,
+    );
   });
 
   pi.on("tool_call", (event) => {
@@ -275,7 +309,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_update", (event) => {
-    recorder.toolExecutionUpdate((event as any).toolCallId, (event as any).toolName);
+    recorder.toolExecutionUpdate(
+      (event as any).toolCallId,
+      (event as any).toolName,
+    );
   });
 
   pi.on("tool_result", (event) => {
@@ -283,7 +320,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_end", (event) => {
-    recorder.toolExecutionEnd((event as any).toolCallId, (event as any).toolName);
+    recorder.toolExecutionEnd(
+      (event as any).toolCallId,
+      (event as any).toolName,
+    );
   });
 
   pi.on("session_shutdown", (event) => {
@@ -328,7 +368,12 @@ export default function (pi: ExtensionAPI) {
 
       ctx.shutdown();
       return {
-        content: [{ type: "text", text: "Ping sent. Session will exit and parent will be notified." }],
+        content: [
+          {
+            type: "text",
+            text: "Ping sent. Session will exit and parent will be notified.",
+          },
+        ],
         details: {},
       };
     },

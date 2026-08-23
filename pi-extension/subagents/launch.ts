@@ -14,9 +14,11 @@ import { createLifecycle, type SubagentLifecycle } from "./lifecycle.ts";
 import type { ResolvedRuntimePlan } from "./runtime-routing.ts";
 import { HerdrWorktreeCreateError } from "./herdr.ts";
 import {
+	captureSessionBaseline,
 	createWorktreeSessionFork,
 	seedSubagentSessionFile,
 } from "./session.ts";
+import type { SessionBaselineCursor } from "./settled-contract.ts";
 import {
 	createSubagentPane,
 	createSubagentWorktree,
@@ -117,6 +119,7 @@ export interface PiRunningChild {
 	launchScriptFile: string;
 	activityFile: string;
 	interactive: boolean;
+	sessionBaseline: SessionBaselineCursor;
 	runtimePlan: ResolvedRuntimePlan | undefined;
 	worktree?: WorktreeLaunch;
 	lifecycle: SubagentLifecycle;
@@ -238,6 +241,10 @@ async function launchFreshPiSubagent(
 		await confirmShellReady(session, operations);
 		const artifacts =
 			handoffArtifacts ?? prepareTaskArtifacts(resolved, session);
+		// Capture the seeded/inherited session before starting Pi. This ordering
+		// closes the fast-child race where the first response is written before
+		// launchPiSubagent returns to its caller.
+		const sessionBaseline = captureSessionBaseline(artifacts.sessionFile);
 		const command = buildPiCommand(resolved, artifacts);
 		const launchScriptFile = startPiProcess(
 			resolved,
@@ -258,7 +265,12 @@ async function launchFreshPiSubagent(
 				persistWorktreeResult(artifacts.worktree, "running");
 			}
 		}
-		return createRunningChild(resolved, artifacts, launchScriptFile);
+		return createRunningChild(
+			resolved,
+			artifacts,
+			launchScriptFile,
+			sessionBaseline,
+		);
 	} catch (error) {
 		if (!surface.worktree) throw error;
 		const handoff = captureWorktreeHandoff(surface.worktree);
@@ -627,6 +639,7 @@ function createRunningChild(
 	resolved: ResolvedLaunch,
 	artifacts: PreparedArtifacts,
 	launchScriptFile: string,
+	sessionBaseline: SessionBaselineCursor,
 ): PiRunningChild {
 	return {
 		id: resolved.id,
@@ -639,6 +652,7 @@ function createRunningChild(
 		launchScriptFile,
 		activityFile: artifacts.activityFile,
 		interactive: resolved.request.behavior.interactive,
+		sessionBaseline,
 		runtimePlan: resolved.request.runtimePlan,
 		worktree: artifacts.worktree,
 		lifecycle: createLifecycle(resolved.startTime),
@@ -674,6 +688,9 @@ async function launchResumedPiSubagent(
 		writeFileSync(messageFile, request.message, "utf8");
 	}
 
+	// Resume must use the existing session position from before the new Pi
+	// process starts, not a line count observed after launch.
+	const sessionBaseline = captureSessionBaseline(request.sessionFile);
 	const env = [
 		...(process.env.PI_CODING_AGENT_DIR
 			? [`PI_CODING_AGENT_DIR=${shellQuote(process.env.PI_CODING_AGENT_DIR)}`]
@@ -722,6 +739,7 @@ async function launchResumedPiSubagent(
 		activityFile,
 		interactive,
 		runtimePlan: undefined,
+		sessionBaseline,
 		lifecycle: createLifecycle(startTime),
 	};
 }

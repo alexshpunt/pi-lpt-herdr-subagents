@@ -68,6 +68,8 @@ export interface SubagentLifecycle {
   delivery: CompletionDelivery;
   /** Repeated settled-turn delivery state, independent from terminal delivery. */
   settledDelivery?: SettledDeliveryGate;
+  /** Sequence of the settled boundary that consumed the latest interrupt intent. */
+  interruptSettledSequence?: number;
 }
 
 export interface LifecycleProjection {
@@ -334,6 +336,19 @@ export function markInterruptRequested(
       requestedAt,
       previousActivitySequence: lifecycle.lastActivitySequence,
     },
+  };
+}
+
+/** Consume one interrupt intent at its first eligible settled boundary. */
+export function consumeInterruptBoundary(
+  lifecycle: SubagentLifecycle,
+  sequence: number,
+): SubagentLifecycle {
+  if (lifecycle.turn.kind !== "interrupted") return lifecycle;
+  return {
+    ...lifecycle,
+    interruptSettledSequence: sequence,
+    turn: { kind: "waiting", startedAt: lifecycle.turn.requestedAt },
   };
 }
 

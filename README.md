@@ -241,7 +241,6 @@ Multiple subagents run concurrently — each steers its result back independentl
 
 Completion messages render with a colored background and are expandable with `Ctrl+O`. Results larger than 16,000 characters are abbreviated in the parent context while preserving their beginning, conclusion, and session path; the complete result remains in the child session. The extension includes that bounded result and a continuation instruction directly in the single custom `subagent_result` message that triggers or steers Pi, avoiding empty turns caused by a separate context-free wake-up. The renderer uses the unadorned bounded result from structured details. Completed rows are removed from the widget as soon as their result is delivered or suppressed.
 
-### In-progress status updates
 ### Settled turns and child lifecycle
 
 A persistent child can return one parent result at every settled turn without closing its session. The five outcomes are:
@@ -252,10 +251,12 @@ A persistent child can return one parent result at every settled turn without cl
 - intentional interrupt: stay silent and keep the child open;
 - unexpected abort: deliver an abort notice and keep the child open.
 
-Interactive children close only when they call `subagent_done`; a clean auto-exit boundary is the other terminal path. Settled delivery and terminal delivery use separate identity gates, so a clean auto-exit race cannot send the same result twice. A failed parent enqueue remains retryable.
+A non-auto-exit child can finish with `subagent_done`; `caller_ping` exits to request help. An auto-exit child closes after a clean or empty settled boundary. Provider errors and aborts remain open. Settled delivery and terminal delivery use separate identity gates, so a clean auto-exit race cannot send the same result twice. A failed parent enqueue remains retryable.
 
 Same-process `/reload`, `/new`, `/resume`, and `/fork` preserve active watchers and their delivery state. A full Pi process restart is outside this guarantee: active watchers are not restored and pending delivery is not replayed.
 
+
+### In-progress status updates
 
 The widget projects each sub-agent from a **process + turn lifecycle**:
 

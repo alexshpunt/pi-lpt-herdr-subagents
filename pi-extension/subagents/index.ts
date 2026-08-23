@@ -102,6 +102,7 @@ import {
 	lifecycleTransition,
 	markCompleted,
 	markCompletionDetected,
+	consumeInterruptBoundary,
 	markDelivery,
 	markFailed,
 	markInterruptRequested,
@@ -117,6 +118,7 @@ import {
 	createSettledDeliveryQueue,
 	enqueueSettledDelivery,
   enqueueTerminalFinalization,
+  markSettledDelivered,
 	type SettledDeliveryQueue,
 } from "./settled-delivery.ts";
 import {
@@ -1609,12 +1611,6 @@ function observeSettledRunningSubagent(running: RunningSubagent): void {
 	running.lifecycle.settledDelivery = gate;
 
   for (const event of events) {
-    if (
-      gate.lastActivitySequence != null &&
-      event.sequence <= gate.lastActivitySequence &&
-      !event.assistantId
-    )
-      continue;
 		let assistant = event.assistantId
 			? settledAssistantForId(running, event.assistantId)
 			: null;
@@ -1623,22 +1619,22 @@ function observeSettledRunningSubagent(running: RunningSubagent): void {
 		}
 		if (!assistant) continue;
 		usedAssistantIds.add(assistant.id);
-	const outcome = classifySettledOutcome({
-		assistant,
-		interruptRequested: running.lifecycle.turn.kind === "interrupted",
-	});
-	const identity: SettledDeliveryIdentity = {
-		childId: running.id,
-		sessionFile: running.sessionFile,
-		assistantEntryId: assistant.id,
-	};
-	if (outcome === "intentional-abort") {
-      gate.lastActivitySequence = Math.max(
-        gate.lastActivitySequence ?? -1,
-        event.sequence,
-      );
-      continue;
-	}
+		const interruptRequested = running.lifecycle.turn.kind === "interrupted" &&
+			(running.lifecycle.turn.previousActivitySequence == null ||
+				event.sequence > running.lifecycle.turn.previousActivitySequence);
+		const outcome = classifySettledOutcome({ assistant, interruptRequested });
+		const identity: SettledDeliveryIdentity = {
+			childId: running.id,
+			sessionFile: running.sessionFile,
+			assistantEntryId: assistant.id,
+		};
+		if (interruptRequested) {
+			running.lifecycle = consumeInterruptBoundary(running.lifecycle, event.sequence);
+		}
+		if (outcome === "intentional-abort") {
+			markSettledDelivered(gate, identity, event.sequence);
+			continue;
+		}
 
 	void enqueueSettledDelivery({
 		queue: runtime.settledDeliveryQueue,

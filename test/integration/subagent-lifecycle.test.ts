@@ -43,7 +43,6 @@ import {
 	PI_TIMEOUT,
 	type TestEnv,
 } from "./harness.ts";
-
 const backends = getAvailableBackends();
 
 function getWorkspaceActiveTab(workspaceId: string): string | null {
@@ -733,6 +732,7 @@ for (const backend of backends) {
 				`Screen should show ping notification. Got:\n${screen.slice(-800)}`,
 			);
 		});
+
 
 		it("resumes a Pi session and delivers its new result to the parent", async () => {
 			const id = uniqueId();

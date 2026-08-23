@@ -78,6 +78,8 @@ import {
 	inspectFinalAssistantMessage,
 	findObservedSessionRuntime,
 	getNewEntries,
+	readEntriesAfterBaseline,
+	findNewestAppendedAssistant,
 	createBtwSessionSnapshot,
 } from "./session.ts";
 import {
@@ -105,11 +107,24 @@ import {
 	markProcessRunning,
 	observeActivity,
 	observePaneInspection,
+	hasSettledAssistant,
 	projectLifecycle,
 	type LifecycleProjection,
 	type SubagentLifecycle,
 	type PaneInspection,
 } from "./lifecycle.ts";
+import {
+	createSettledDeliveryQueue,
+	enqueueSettledDelivery,
+	type SettledDeliveryQueue,
+} from "./settled-delivery.ts";
+import {
+	classifySettledOutcome,
+	type NewestAssistantEntry,
+	type SettledDeliveryIdentity,
+	type SettledOutcomeKind,
+	type SessionBaselineCursor,
+} from "./settled-contract.ts";
 import { listHerdrWorktrees } from "./herdr.ts";
 import {
 	captureWorktreeHandoff,
@@ -1071,6 +1086,7 @@ interface RunningSubagent {
 	launchScriptFile?: string;
 	activityFile?: string;
 	activity?: SubagentActivityState;
+	sessionBaseline?: SessionBaselineCursor;
 	activityRead?: {
 		ok: boolean;
 		reason?: "missing" | "invalid" | "wrong-id";
@@ -1123,6 +1139,7 @@ interface WorkflowCancelHooks {
 
 interface SubagentRuntime {
 	runningSubagents: Map<string, RunningSubagent>;
+	settledDeliveryQueue: SettledDeliveryQueue;
 	pendingWorkflow?: PendingWorkflow;
 	activeWorkflow?: WorkflowOwner;
 	workflowOutcomes: Map<string, WorkflowTerminalOutcome>;
@@ -1136,6 +1153,7 @@ interface SubagentRuntime {
 function createSubagentRuntime(): SubagentRuntime {
 	return {
 		runningSubagents: new Map<string, RunningSubagent>(),
+		settledDeliveryQueue: createSettledDeliveryQueue(),
 		workflowOutcomes: new Map<string, WorkflowTerminalOutcome>(),
 		workflowStartupScanned: false,
 	};
@@ -1145,6 +1163,9 @@ function createSubagentRuntime(): SubagentRuntime {
 const runtime: SubagentRuntime =
 	(globalThis as any)[RUNTIME_KEY] ??
 	((globalThis as any)[RUNTIME_KEY] = createSubagentRuntime());
+if (!runtime.settledDeliveryQueue) {
+	runtime.settledDeliveryQueue = createSettledDeliveryQueue();
+}
 if (!runtime.workflowOutcomes) {
 	runtime.workflowOutcomes = new Map<string, WorkflowTerminalOutcome>();
 }
@@ -1478,6 +1499,113 @@ function ensureLifecycle(running: RunningSubagent): SubagentLifecycle {
 	return lifecycle;
 }
 
+function settledAssistantFor(running: RunningSubagent): NewestAssistantEntry | null {
+	if (!running.sessionBaseline) return null;
+	try {
+		const read = readEntriesAfterBaseline(running.sessionFile, running.sessionBaseline);
+		return findNewestAppendedAssistant(read.entries);
+	} catch {
+		return null;
+	}
+}
+
+function wasSettled(running: RunningSubagent, assistant: NewestAssistantEntry | null): boolean {
+	if (!assistant || !running.lifecycle.settledDelivery) return false;
+	return hasSettledAssistant(running.lifecycle, {
+		childId: running.id,
+		sessionFile: running.sessionFile,
+		assistantEntryId: assistant.id,
+	});
+}
+
+function settledPresentation(
+	running: RunningSubagent,
+	assistant: NewestAssistantEntry,
+	outcome: SettledOutcomeKind,
+): string {
+	const subject = `Sub-agent "${running.name}" settled`;
+	if (outcome === "error") {
+		return boundResultPresentation(
+			`${subject} with a provider/agent error.\n\nError: ${assistant.errorMessage ?? "stopReason=error"}`,
+			formatSessionReference(running.sessionFile),
+		);
+	}
+	if (outcome === "unexpected-abort") {
+		return boundResultPresentation(
+			`${subject} with an unexpected abort.\n\nThe child session remains open and can be resumed.`,
+			formatSessionReference(running.sessionFile),
+		);
+	}
+	if (outcome === "empty") {
+		return boundResultPresentation(
+			`${subject} with an empty assistant response.`,
+			formatSessionReference(running.sessionFile),
+		);
+	}
+	return boundResultPresentation(
+		`${subject}.\n\n${assistant.text ?? ""}`,
+		formatSessionReference(running.sessionFile),
+	);
+}
+
+function observeSettledRunningSubagent(running: RunningSubagent): void {
+	const activity = running.activity;
+	if (!activity || activity.latestEvent !== "agent_settled") return;
+	const sequence = activity.sequence;
+	const gate = running.lifecycle.settledDelivery ?? {
+		lastActivitySequence: null,
+		delivered: new Set<string>(),
+	};
+	running.lifecycle.settledDelivery = gate;
+	if (gate.lastActivitySequence != null && sequence <= gate.lastActivitySequence) return;
+
+	const assistant = settledAssistantFor(running);
+	if (!assistant) return;
+	const outcome = classifySettledOutcome({
+		assistant,
+		interruptRequested: running.lifecycle.turn.kind === "interrupted",
+	});
+	const identity: SettledDeliveryIdentity = {
+		childId: running.id,
+		sessionFile: running.sessionFile,
+		assistantEntryId: assistant.id,
+	};
+	if (outcome === "intentional-abort") {
+		gate.lastActivitySequence = sequence;
+		return;
+	}
+
+	void enqueueSettledDelivery({
+		queue: runtime.settledDeliveryQueue,
+		ledger: gate,
+		childId: running.id,
+		identity,
+		activitySequence: sequence,
+		enqueue: () => {
+			if (!runtime.pi) throw new Error("Parent API is unavailable");
+			const completionApi = runtime.pi;
+			sendSubagentResult(completionApi, settledPresentation(running, assistant, outcome), {
+				kind: "settled",
+				name: running.name,
+				task: running.task,
+				agent: running.agent,
+				childId: running.id,
+				sessionFile: running.sessionFile,
+				assistantEntryId: assistant.id,
+				activitySequence: sequence,
+				turnIndex: activity.turnIndex ?? null,
+				outcome,
+				text: assistant.text,
+				stopReason: assistant.stopReason,
+				...(assistant.errorMessage ? { errorMessage: assistant.errorMessage } : {}),
+				empty: assistant.empty,
+			});
+		},
+	}).catch(() => {
+		// A failed parent enqueue leaves the tuple retryable on the next poll.
+	});
+}
+
 function observeRunningSubagent(
 	running: RunningSubagent,
 	observedAt = Date.now(),
@@ -1499,6 +1627,7 @@ function observeRunningSubagent(
 		read,
 		observedAt,
 	);
+	if (read.ok) observeSettledRunningSubagent(running);
 }
 
 function resolveInterruptTarget(params: {
@@ -2005,6 +2134,10 @@ async function watchSubagent(
 				observeRunningSubagent(running);
 			},
 		});
+
+		// Flush any settled delivery observed just before terminal evidence.
+		observeRunningSubagent(running);
+		await runtime.settledDeliveryQueue.enqueue(running.id, () => undefined);
 
 		const detectedAt = Date.now();
 		running.lifecycle = markCompletionDetected(
@@ -3171,7 +3304,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					runtimePlans,
 					watcherAbort.signal,
 				)
-					.then(({ running: completedRunning, result }) => {
+					.then(async ({ running: completedRunning, result }) => {
 						if (!shouldDeliverSubagentCompletion(completedRunning)) {
 							completedRunning.lifecycle = markDelivery(
 								completedRunning.lifecycle,
@@ -3212,6 +3345,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 							);
 							return;
 						}
+
+						const finalAssistant = settledAssistantFor(completedRunning);
+						if (wasSettled(completedRunning, finalAssistant)) return;
 
 						const presentation = resolveResultPresentation(
 							result,
@@ -3575,9 +3711,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					};
 				}
 
-				// Record entry count before resuming so we can extract new messages
-				const entryCountBefore = getNewEntries(params.sessionPath, 0).length;
-
 				const running: RunningSubagent = await launchPiSubagent({
 					kind: "resume",
 					id,
@@ -3599,7 +3732,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				running.abortController = watcherAbort;
 
 				watchSubagent(running, watcherAbort.signal)
-					.then((result) => {
+					.then(async (result) => {
 						if (!shouldDeliverSubagentCompletion(running)) {
 							running.lifecycle = markDelivery(running.lifecycle, "suppressed");
 							runningSubagents.delete(running.id);
@@ -3629,7 +3762,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 							return;
 						}
 
-						const allEntries = getNewEntries(params.sessionPath, entryCountBefore);
+						const finalAssistant = settledAssistantFor(running);
+						if (wasSettled(running, finalAssistant)) return;
+
+						const allEntries = running.sessionBaseline
+							? readEntriesAfterBaseline(params.sessionPath, running.sessionBaseline).entries
+							: [];
 						const summary =
 							findLastAssistantMessage(allEntries) ??
 							(result.errorMessage

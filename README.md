@@ -722,7 +722,7 @@ and verify them with `/subagent list` plus a smoke launch.
 | `session-mode` | string | Default child-session mode: `standalone`, `lineage-only`, or `fork` |
 | `spawning`    | boolean | Set `false` to deny all subagent-spawning tools                                                                                                                                                                                                                             |
 | `deny-tools`  | string  | Comma-separated `pi-lpt-herdr-subagents` tool names to suppress; this is not a universal cross-extension deny list                                                                                                                                                                  |
-| `auto-exit`   | boolean | Auto-shutdown when the agent finishes its turn — no `subagent_done` call needed. If the user sends any input, auto-exit is permanently disabled and the user takes over the session. Recommended for autonomous agents (scout, worker); not for interactive ones (planner). Also determines the default value of `interactive` (see below). |
+| `auto-exit`   | boolean | Auto-shutdown after a clean settled turn — no `subagent_done` call needed. Provider errors and aborted turns keep the session open so it can be resumed. If the user sends any input, auto-exit is permanently disabled and the user takes over the session. Recommended for autonomous agents (scout, worker); not for interactive ones (planner). Also determines the default value of `interactive` (see below). |
 | `interactive` | boolean | Override whether stall/recovery transitions wake the parent session. Defaults to the inverse of `auto-exit`: autonomous agents (`auto-exit: true`) are non-interactive and get stall pings; agents without `auto-exit` are interactive and stay quiet. Explicit values take precedence. |
 | `cwd`         | string  | Default working directory. Absolute paths are unambiguous; relative agent-frontmatter paths resolve from Pi's agent config directory (`PI_CODING_AGENT_DIR` or `~/.pi/agent`), not the project root                                                                                                                                                                                                            |
 | `disable-model-invocation` | boolean | Hide a role from discovery surfaces like `subagents_list`. The definition remains directly invocable by exact name via `subagent({ agent: "name", ... })`. |
@@ -752,11 +752,11 @@ session-mode: lineage-only
 
 ### `auto-exit`
 
-When set to `true`, the agent session shuts down automatically as soon as the agent finishes its turn — no explicit `subagent_done` call is needed.
+When set to `true`, the agent session shuts down automatically after a clean settled turn — no explicit `subagent_done` call is needed. Provider errors and aborted turns keep the session open so they can be resumed.
 
 **Behavior:**
 
-- The session closes after the agent's final message (on the `agent_end` event)
+- The session closes after a clean final message reaches the settled boundary
 - If the user sends **any input** before the agent finishes, auto-exit is permanently disabled for that session — the user takes over interactively
 - The modeHint injected into the agent's task is adjusted accordingly: autonomous agents see "Complete your task autonomously." rather than instructions to call `subagent_done`
 

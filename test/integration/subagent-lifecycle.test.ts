@@ -69,6 +69,30 @@ function getPaneTab(paneId: string): string | null {
 	);
 }
 
+interface IntegrationResultDetails {
+	kind?: unknown;
+	outcome?: unknown;
+	sessionFile?: unknown;
+}
+
+interface IntegrationSessionEntry {
+	type?: unknown;
+	customType?: unknown;
+	details?: IntegrationResultDetails;
+}
+
+function readSettledResult(sessionFile: string): IntegrationResultDetails {
+	const entries = readFileSync(sessionFile, "utf8")
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line) as IntegrationSessionEntry);
+	return (
+		entries.find(
+			(entry) => entry.type === "custom_message" && entry.customType === "subagent_result",
+		)?.details ?? {}
+	);
+}
+
 function listBtwPanes(workspaceId: string): string[] {
 	const tabs = JSON.parse(
 		execFileSync("herdr", ["tab", "list", "--workspace", workspaceId], {
@@ -805,11 +829,9 @@ for (const backend of backends) {
 			);
 		});
 
-		it("falls back after a provider failure and delivers the selected model", async () => {
+		it("delivers a settled provider error without ordered model fallback", async () => {
 			const id = uniqueId();
-			const markerFile = `/tmp/pi-integ-fallback-${id}.txt`;
 			const parentSession = join(env.dir, `fallback-parent-${id}.jsonl`);
-			trackTempFile(env, markerFile);
 			const surface = createTrackedSurface(env, `fallback-${id}`);
 			await waitForPaneReady(surface);
 			startPi(
@@ -819,50 +841,24 @@ for (const backend of backends) {
 					`Call subagent once with name: "Fallback-${id}".`,
 					`agent: "test-echo".`,
 					`model: "pi-integration/fallback-primary, pi-integration/fallback-secondary".`,
-					`task: "Run: echo 'FALLBACK_${id}' > '${markerFile}'".`,
+					`task: "Return exactly FALLBACK_ERROR_${id}".`,
 				].join("\n"),
 				{ extraArgs: `--session ${shellQuote(parentSession)}` },
 			);
-			assert.match(
-				await waitForFile(markerFile, PI_TIMEOUT),
-				new RegExp(`FALLBACK_${id}`),
-			);
-			assert.ok(
-				getProviderRequests().some(
-					(request) =>
-						request.model === "fallback-primary" && request.status === 503,
-				),
-			);
-			assert.ok(
-				getProviderRequests().some(
-					(request) =>
-						request.model === "fallback-secondary" && request.status === 200,
-				),
-			);
-			await waitForFile(
-				parentSession,
-				PI_TIMEOUT,
-				/"customType":"subagent_result"/,
-			);
-			const result = readFileSync(parentSession, "utf8")
-				.trim()
-				.split("\n")
-				.map((line) => JSON.parse(line))
-				.find(
-					(entry) =>
-						entry.type === "custom_message" && entry.customType === "subagent_result",
-				);
-			assert.deepEqual(result.details.fallbackAttempts, [
-				"pi-integration/fallback-primary",
-				"pi-integration/fallback-secondary",
-			]);
+
+			await waitForFile(parentSession, PI_TIMEOUT, /"customType":"subagent_result"/);
+			const result = readSettledResult(parentSession);
+			assert.equal(result.kind, "settled");
+			assert.equal(result.outcome, "error");
 			assert.equal(
-				result.details.runtimePlan.model,
-				"pi-integration/fallback-secondary",
+				getProviderRequests().some((request) => request.model === "fallback-secondary"),
+				false,
 			);
+			assert.equal(typeof result.sessionFile, "string");
+			if (typeof result.sessionFile === "string") assert.ok(existsSync(result.sessionFile));
 		});
 
-		it("reports every attempted model when all fallbacks fail", async () => {
+		it("reports a settled provider error when every configured model fails", async () => {
 			const id = uniqueId();
 			const parentSession = join(env.dir, `fallback-fail-parent-${id}.jsonl`);
 			const surface = createTrackedSurface(env, `fallback-fail-${id}`);
@@ -878,34 +874,18 @@ for (const backend of backends) {
 				].join("\n"),
 				{ extraArgs: `--session ${shellQuote(parentSession)}` },
 			);
-			await waitForFile(
-				parentSession,
-				PI_TIMEOUT,
-				/"customType":"subagent_result"/,
-			);
-			const result = readFileSync(parentSession, "utf8")
-				.trim()
-				.split("\n")
-				.map((line) => JSON.parse(line))
-				.find(
-					(entry) =>
-						entry.type === "custom_message" && entry.customType === "subagent_result",
-				);
-			assert.deepEqual(result.details.fallbackAttempts, [
-				"pi-integration/fallback-primary",
-				"pi-integration/fallback-fail",
-			]);
+			await waitForFile(parentSession, PI_TIMEOUT, /"customType":"subagent_result"/);
+			const result = readSettledResult(parentSession);
+			assert.equal(result.kind, "settled");
+			assert.equal(result.outcome, "error");
 			const failedRequests = getProviderRequests().filter((request) =>
 				request.model?.startsWith("fallback-"),
 			);
 			assert.deepEqual(
-				[...new Set(failedRequests.map((request) => request.model))].sort(),
-				["fallback-fail", "fallback-primary"],
+				[...new Set(failedRequests.map((request) => request.model))],
+				["fallback-primary"],
 			);
-			assert.equal(
-				failedRequests.every((request) => request.status === 503),
-				true,
-			);
+			assert.equal(failedRequests.every((request) => request.status === 503), true);
 		});
 	});
 }

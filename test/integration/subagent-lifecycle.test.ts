@@ -92,7 +92,6 @@ function readSettledResult(sessionFile: string): IntegrationResultDetails {
 	);
 }
 
-
 function listWorkspacePanes(workspaceId: string): Array<{ pane_id?: string; label?: string; agent_session?: { value?: string } }> {
 	return JSON.parse(execFileSync("herdr", ["pane", "list", "--workspace", workspaceId], { encoding: "utf8" }))
 		.result.panes as Array<{ pane_id?: string; label?: string; agent_session?: { value?: string } }>;
@@ -123,7 +122,6 @@ async function waitForAgentGone(paneId: string, workspaceId: string, timeout = P
 	}
 	throw new Error(`Timeout waiting for agent pane to close ${paneId}`);
 }
-
 function listBtwPanes(workspaceId: string): string[] {
 
 	const tabs = JSON.parse(

@@ -37,7 +37,10 @@ function writeSession(sessionFile: string, messages: Array<{ id: string; text: s
   writeFileSync(sessionFile, `${lines.join("\n")}\n`);
 }
 
-function writeEvents(eventsFile: string, events: Array<{ sequence: number; outcome: string }>) {
+function writeEvents(
+  eventsFile: string,
+  events: Array<{ sequence: number; outcome: string; assistantId?: string }>,
+) {
   for (const event of events) {
     appendFileSync(eventsFile, `${JSON.stringify({
       schema: 1,
@@ -45,12 +48,17 @@ function writeEvents(eventsFile: string, events: Array<{ sequence: number; outco
       sequence: event.sequence,
       recordedAt: event.sequence,
       outcome: event.outcome,
+      ...(event.assistantId ? { assistantId: event.assistantId } : {}),
       empty: false,
     })}\n`);
   }
 }
 
-function makeRunning(root: string, messages: Array<{ id: string; text: string; stopReason?: string }>, events: Array<{ sequence: number; outcome: string }>) {
+function makeRunning(
+  root: string,
+  messages: Array<{ id: string; text: string; stopReason?: string }>,
+  events: Array<{ sequence: number; outcome: string; assistantId?: string }>,
+) {
   const sessionFile = join(root, "child.jsonl");
   const eventsFile = join(root, "child.settled.jsonl");
   writeSession(sessionFile, messages);
@@ -69,6 +77,18 @@ function makeRunning(root: string, messages: Array<{ id: string; text: string; s
     interactive: false,
     runtimePlan: undefined,
   } as any;
+}
+
+function appendToolCall(sessionFile: string, id: string): void {
+  appendFileSync(sessionFile, `${JSON.stringify({
+    type: "message",
+    id,
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", name: "subagent_done" }],
+      stopReason: "toolUse",
+    },
+  })}\n`);
 }
 
 async function flush() {
@@ -128,4 +148,32 @@ describe("settled observer boundaries", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it(
+    "correlates terminal subagent_done tool calls with the latest settled assistant",
+    () => {
+      const root = mkdtempSync(join(tmpdir(), "settled-terminal-identity-"));
+      try {
+        const running = makeRunning(
+          root,
+          [
+            { id: "assistant-one", text: "ONE" },
+            { id: "assistant-two", text: "TWO" },
+          ],
+          [
+            { sequence: 1, outcome: "clean", assistantId: "assistant-1" },
+            { sequence: 2, outcome: "clean", assistantId: "assistant-1" },
+          ],
+        );
+        appendToolCall(running.sessionFile, "subagent-done-tool-call");
+        assert.deepEqual(__test__.terminalAssistantIdentityFor(running), {
+          childId: "child",
+          sessionFile: running.sessionFile,
+          assistantEntryId: "assistant-two",
+        });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

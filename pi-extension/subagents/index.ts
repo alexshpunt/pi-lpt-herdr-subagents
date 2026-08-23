@@ -1536,6 +1536,54 @@ function settledAssistantFor(
 	}
 }
 
+function terminalAssistantIdentityFor(
+	running: RunningSubagent,
+): SettledDeliveryIdentity | undefined {
+	const finalAssistant = settledAssistantFor(running);
+	if (!finalAssistant) return undefined;
+
+	let assistantEntryId = finalAssistant.id;
+	// An explicit subagent_done writes a tool-call assistant entry before the
+	// session shuts down. That control entry is not the response represented by
+	// the latest settled boundary, so correlate terminal cleanup with the
+	// durable settled identity instead of redelivering its text.
+	if (finalAssistant.stopReason === "toolUse" && running.settledEventsFile) {
+		const events = readSubagentSettledEventsFile(
+			running.settledEventsFile,
+			running.id,
+		).sort((left, right) => left.sequence - right.sequence);
+		const assistantPool = settledAssistants(running);
+		const usedAssistantIds = new Set<string>();
+		let latestSettledAssistant: NewestAssistantEntry | null = null;
+		for (const event of events) {
+			let assistant = event.assistantId
+				? settledAssistantForId(running, event.assistantId)
+				: null;
+			if (!assistant) {
+				assistant =
+					assistantPool.find(
+						(candidate) => !usedAssistantIds.has(candidate.id),
+					) ?? null;
+			}
+			if (!assistant) continue;
+			usedAssistantIds.add(assistant.id);
+			latestSettledAssistant = assistant;
+		}
+		if (
+			latestSettledAssistant &&
+			latestSettledAssistant.id !== finalAssistant.id
+		) {
+			assistantEntryId = latestSettledAssistant.id;
+		}
+	}
+
+	return {
+		childId: running.id,
+		sessionFile: running.sessionFile,
+		assistantEntryId,
+	};
+}
+
 function settledPresentation(
 	running: RunningSubagent,
 	assistant: NewestAssistantEntry,
@@ -2016,6 +2064,7 @@ export const __test__ = {
 	buildBtwLaunchCommand,
 	buildWorkflowChildCommand,
 	resolveWorkflowReviewNode,
+	terminalAssistantIdentityFor,
 	observeRunningSubagent,
 	resolveDenyTools,
 	resolveInterruptTarget,
@@ -3468,14 +3517,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 							return;
 						}
 
-						const finalAssistant = settledAssistantFor(completedRunning);
-            const finalIdentity = finalAssistant
-              ? {
-                  childId: completedRunning.id,
-                  sessionFile: completedRunning.sessionFile,
-                  assistantEntryId: finalAssistant.id,
-                }
-              : undefined;
+						const finalIdentity = terminalAssistantIdentityFor(completedRunning);
 						const presentation = resolveResultPresentation(
 							result,
 							completedRunning.name,
@@ -3916,14 +3958,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 							return;
 						}
 
-						const finalAssistant = settledAssistantFor(running);
-            const finalIdentity = finalAssistant
-              ? {
-                  childId: running.id,
-                  sessionFile: running.sessionFile,
-                  assistantEntryId: finalAssistant.id,
-                }
-              : undefined;
+						const finalIdentity = terminalAssistantIdentityFor(running);
 						const allEntries = running.sessionBaseline
               ? readEntriesAfterBaseline(
                   params.sessionPath,

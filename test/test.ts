@@ -2392,10 +2392,9 @@ describe("subagent-done.ts", () => {
 			assert.equal(shouldAutoExitOnAgentEnd(false, messages), false);
 		});
 
-		it("still exits when the latest turn ended with stopReason=error", () => {
-			// Auto-exit subagents must shut down on retry-exhaustion errors so the
-			// parent is woken. The error sidecar (written separately) carries the
-			// failure detail; staying open would just strand the worker.
+		it("stays open when the latest turn ended with stopReason=error", () => {
+			// Settled auto-exit children remain open for a later retry or explicit
+			// parent-side handling; only clean and empty outcomes may close them.
 			const messages = [
 				{
 					role: "assistant",
@@ -2403,7 +2402,7 @@ describe("subagent-done.ts", () => {
 					errorMessage: "529 overloaded",
 				},
 			];
-			assert.equal(shouldAutoExitOnAgentEnd(false, messages), true);
+			assert.equal(shouldAutoExitOnAgentEnd(false, messages), false);
 		});
 	});
 

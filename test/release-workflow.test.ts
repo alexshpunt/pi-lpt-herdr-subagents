@@ -67,7 +67,7 @@ function runDetect(
     if (options.previousVersion) {
       writeFileSync(
         join(dir, "package.json"),
-        JSON.stringify({ name: "pi-herdr-agents", version: options.previousVersion }),
+        JSON.stringify({ name: "pi-lpt-herdr-subagents", version: options.previousVersion }),
       );
       execFileSync("git", ["add", "package.json"], { cwd: dir });
       execFileSync("git", ["commit", "--quiet", "-m", "previous"], { cwd: dir });
@@ -80,7 +80,7 @@ function runDetect(
     writeFileSync(
       join(dir, "package.json"),
       JSON.stringify({
-        name: "pi-herdr-agents",
+        name: "pi-lpt-herdr-subagents",
         version: options.currentVersion ?? "0.0.2",
       }),
     );
@@ -196,7 +196,7 @@ globalThis.fetch = async (_url, options) => {
           GITHUB_OUTPUT: output,
           GITHUB_SHA: "a".repeat(40),
           NODE_OPTIONS: `--import=${fetchStub}`,
-          PACKAGE_NAME: "pi-herdr-agents",
+          PACKAGE_NAME: "pi-lpt-herdr-subagents",
           REGISTRY_SCENARIO: scenario,
           REGISTRY_URL: "https://registry.test/",
           VERSION: "0.0.2",
@@ -221,13 +221,13 @@ test("release workflow uses package.json identity and trusted publishing", async
     version: string;
   };
 
-  assert.equal(pkg.name, "pi-herdr-agents");
+  assert.equal(pkg.name, "pi-lpt-herdr-subagents");
   assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
   assert.match(pkg.scripts.test, /--experimental-strip-types/);
   assert.match(pkg.scripts["test:integration"], /--experimental-strip-types/);
   assert.match(workflow, /branches:\n\s+- main/);
   assert.match(workflow, /paths:\n\s+- package\.json/);
-  assert.match(workflow, /concurrency:\n\s+group: pi-herdr-agents-release/);
+  assert.match(workflow, /concurrency:\n\s+group: pi-lpt-herdr-subagents-release/);
   assert.match(workflow, /id-token:\s*write/);
   assert.match(workflow, /contents:\s*write/);
   assert.match(workflow, /node-version:\s*26\.3\.0/);

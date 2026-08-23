@@ -1,10 +1,13 @@
-# Pi Herdr Agents
+# Pi LPT Herdr Subagents
 
-![Pi Herdr Agents: parallel Pi agents running asynchronously in dedicated Herdr panes and managed worktrees.](https://raw.githubusercontent.com/giuseppecrj/pi-herdr-agents/main/docs/assets/pi-herdr-agents-gallery.png)
+![Pi LPT Herdr Subagents: parallel Pi agents running asynchronously in dedicated Herdr panes and managed worktrees.](https://raw.githubusercontent.com/alexshpunt/pi-lpt-herdr-subagents/main/docs/assets/pi-herdr-agents-gallery.png)
 
-Asynchronous subagents and approved review workflows for [Pi](https://github.com/earendil-works/pi), running exclusively in [Herdr](https://herdr.dev).
+LPT-owned asynchronous subagents and approved review workflows for [Pi](https://github.com/earendil-works/pi), running exclusively in [Herdr](https://herdr.dev).
 
 Delegate investigation, implementation, and review without blocking the parent session. Each child runs as a real Pi process in its own Herdr surface; results return automatically when the child finishes.
+
+
+This is the LPT fork of [`pi-herdr-agents`](https://github.com/giuseppecrj/pi-herdr-agents). The `upstream` Git remote tracks that project. LPT currently uses this fork as a reliable foundation for Herdr lifecycle, result delivery, and control work. Compatibility with upstream is intentionally not guaranteed.
 
 ## Features
 
@@ -29,14 +32,14 @@ Other terminal multiplexers are not supported. Worktrees isolate Git checkouts, 
 Install from npm:
 
 ```bash
-pi install npm:pi-herdr-agents
+pi install npm:pi-lpt-herdr-subagents
 ```
 
 Install project-locally or try it for one run:
 
 ```bash
-pi install -l npm:pi-herdr-agents
-pi -e npm:pi-herdr-agents
+pi install -l npm:pi-lpt-herdr-subagents
+pi -e npm:pi-lpt-herdr-subagents
 ```
 
 Then start Pi inside Herdr:
@@ -80,7 +83,7 @@ Use ordinary panes for read-only agents. Give each independent writing agent a u
 
 ## How it works
 
-![Pi Herdr Agents lifecycle: spawn a child, run it in Herdr, supervise live state, and deliver one bounded result to the parent.](https://raw.githubusercontent.com/giuseppecrj/pi-herdr-agents/main/docs/assets/async-subagent-lifecycle.png)
+![Pi LPT Herdr Subagents lifecycle: spawn a child, run it in Herdr, supervise live state, and deliver one bounded result to the parent.](https://raw.githubusercontent.com/alexshpunt/pi-lpt-herdr-subagents/main/docs/assets/async-subagent-lifecycle.png)
 
 A `subagent` call creates a dedicated Herdr pane or worktree, launches a child Pi session, and returns `started`. The parent watcher combines Herdr process state with child activity details and projects the result into a live widget:
 
@@ -106,7 +109,7 @@ If the entry exists, spawning and result extraction worked; investigate parent w
 Git package refs are pinned. To move an installed development copy back to the current `main`, install that ref explicitly and reload the active Pi session:
 
 ```bash
-pi install git:github.com/giuseppecrj/pi-herdr-agents@main
+pi install git:github.com/alexshpunt/pi-lpt-herdr-subagents@main
 # Then run /reload inside Pi.
 ```
 
@@ -275,8 +278,8 @@ containing this README and `package.json`, not `pi-extension/subagents/` or
 Herdr's `config.toml`. That file is package-local: npm or git package updates may
 overwrite it. Common global package roots are:
 
-- npm: `~/.pi/agent/npm/node_modules/pi-herdr-agents/`
-- git: `~/.pi/agent/git/<host>/<owner>/pi-herdr-agents/`
+- npm: `~/.pi/agent/npm/node_modules/pi-lpt-herdr-subagents/`
+- git: `~/.pi/agent/git/<host>/<owner>/pi-lpt-herdr-subagents/`
 
 Project-local installs use the corresponding `.pi/npm/` or `.pi/git/` root.
 From the actual package root, copy the example when you want local overrides:
@@ -565,7 +568,7 @@ not disguise a workflow as an agent definition.
 | Project | `.pi/agents/<name>.md` | The role belongs to one repository |
 | Global | `$PI_CODING_AGENT_DIR/agents/<name>.md` | The role should be available everywhere; the default root is `~/.pi/agent` |
 | Role pack | An installed Pi package's registered `roles/` directory | The role should be independently installable and shareable |
-| Bundled | This package's `agents/<name>.md` | Contributing a fallback role maintained with `pi-herdr-agents` |
+| Bundled | This package's `agents/<name>.md` | Contributing a fallback role maintained with `pi-lpt-herdr-subagents` |
 
 The filename stem is the launch key. `name` frontmatter is optional because it
 defaults to the filename stem. If supplied, keep it identical so overrides remain
@@ -667,10 +670,10 @@ export default (pi: any) => {
 ```
 
 Install both packages through Pi; the role pack remains inert if
-`pi-herdr-agents` is absent:
+`pi-lpt-herdr-subagents` is absent:
 
 ```bash
-pi install npm:pi-herdr-agents
+pi install npm:pi-lpt-herdr-subagents
 pi install npm:@acme/security-roles
 ```
 
@@ -718,7 +721,7 @@ and verify them with `/subagent list` plus a smoke launch.
 | `skills`      | string  | Comma-separated installed skill names to auto-load. Use this plural form for new definitions; legacy project/global definitions using singular `skill` remain compatible. |
 | `session-mode` | string | Default child-session mode: `standalone`, `lineage-only`, or `fork` |
 | `spawning`    | boolean | Set `false` to deny all subagent-spawning tools                                                                                                                                                                                                                             |
-| `deny-tools`  | string  | Comma-separated `pi-herdr-agents` tool names to suppress; this is not a universal cross-extension deny list                                                                                                                                                                  |
+| `deny-tools`  | string  | Comma-separated `pi-lpt-herdr-subagents` tool names to suppress; this is not a universal cross-extension deny list                                                                                                                                                                  |
 | `auto-exit`   | boolean | Auto-shutdown when the agent finishes its turn — no `subagent_done` call needed. If the user sends any input, auto-exit is permanently disabled and the user takes over the session. Recommended for autonomous agents (scout, worker); not for interactive ones (planner). Also determines the default value of `interactive` (see below). |
 | `interactive` | boolean | Override whether stall/recovery transitions wake the parent session. Defaults to the inverse of `auto-exit`: autonomous agents (`auto-exit: true`) are non-interactive and get stall pings; agents without `auto-exit` are interactive and stay quiet. Explicit values take precedence. |
 | `cwd`         | string  | Default working directory. Absolute paths are unambiguous; relative agent-frontmatter paths resolve from Pi's agent config directory (`PI_CODING_AGENT_DIR` or `~/.pi/agent`), not the project root                                                                                                                                                                                                            |
@@ -814,7 +817,7 @@ spawning: false
 
 ### `deny-tools`
 
-Fine-grained control over tools registered by `pi-herdr-agents`:
+Fine-grained control over tools registered by `pi-lpt-herdr-subagents`:
 
 ```yaml
 ---

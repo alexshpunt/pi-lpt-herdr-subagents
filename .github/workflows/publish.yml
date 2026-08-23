@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: pi-herdr-agents-release
+  group: pi-lpt-herdr-subagents-release
   cancel-in-progress: false
 
 jobs:

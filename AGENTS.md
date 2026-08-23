@@ -1,10 +1,10 @@
 # Repository instructions for agents
 
-These instructions apply to humans and coding agents changing `pi-herdr-agents`.
+These instructions apply to humans and coding agents changing `pi-lpt-herdr-subagents`.
 
 ## What this package is
 
-`pi-herdr-agents` (Pi Herdr Agents) is a Pi extension that launches asynchronous Pi child agents and approved read-only review workflows exclusively in Herdr. Ordinary runs use dedicated Herdr panes/tabs. Writing tasks may opt into one isolated Herdr-managed Git worktree per branch. Legacy role definitions that request an external CLI fail before Herdr creates resources.
+`pi-lpt-herdr-subagents` (Pi LPT Herdr Subagents) is the LPT fork of the Pi Herdr Agents extension that launches asynchronous Pi child agents and approved read-only review workflows exclusively in Herdr. Ordinary runs use dedicated Herdr panes/tabs. Writing tasks may opt into one isolated Herdr-managed Git worktree per branch. Legacy role definitions that request an external CLI fail before Herdr creates resources.
 
 The extension is fire-and-forget: `subagent` returns an acknowledgement, and completion is delivered to the parent automatically. Never add polling guidance that tells callers to sleep, tail sessions, or repeatedly check status.
 

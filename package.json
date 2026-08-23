@@ -1,7 +1,7 @@
 {
-  "name": "pi-herdr-agents",
+  "name": "pi-lpt-herdr-subagents",
   "version": "1.3.0",
-  "description": "Asynchronous Pi subagents and approved review workflows in Herdr, with optional isolated Git worktrees",
+  "description": "LPT-owned Herdr subagents for reliable Pi lifecycle, result, and control foundations",
   "keywords": [
     "pi-package",
     "pi",
@@ -18,12 +18,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/giuseppecrj/pi-herdr-agents.git"
+    "url": "git+https://github.com/alexshpunt/pi-lpt-herdr-subagents.git"
   },
   "bugs": {
-    "url": "https://github.com/giuseppecrj/pi-herdr-agents/issues"
+    "url": "https://github.com/alexshpunt/pi-lpt-herdr-subagents/issues"
   },
-  "homepage": "https://github.com/giuseppecrj/pi-herdr-agents#readme",
+  "homepage": "https://github.com/alexshpunt/pi-lpt-herdr-subagents#readme",
   "publishConfig": {
     "access": "public"
   },
@@ -54,7 +54,7 @@
     "skills": [
       "./skills"
     ],
-    "image": "https://raw.githubusercontent.com/giuseppecrj/pi-herdr-agents/main/docs/assets/pi-herdr-agents-gallery.png"
+    "image": "https://raw.githubusercontent.com/alexshpunt/pi-lpt-herdr-subagents/main/docs/assets/pi-herdr-agents-gallery.png"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.84.0",

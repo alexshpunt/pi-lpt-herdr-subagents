@@ -1,5 +1,10 @@
 import type { ActivityReadResult, SubagentActivityScope } from "./activity.ts";
 import type { CompletionResult } from "./completion.ts";
+import {
+  settledDeliveryKey,
+  type SettledDeliveryGate,
+  type SettledDeliveryIdentity,
+} from "./settled-contract.ts";
 
 export type HerdrAgentStatus =
   | "idle"
@@ -61,6 +66,8 @@ export interface SubagentLifecycle {
   hasWorked: boolean;
   lastActivitySequence: number | null;
   delivery: CompletionDelivery;
+  /** Repeated settled-turn delivery state, independent from terminal delivery. */
+  settledDelivery?: SettledDeliveryGate;
 }
 
 export interface LifecycleProjection {
@@ -80,6 +87,10 @@ export function createLifecycle(startedAt: number): SubagentLifecycle {
     hasWorked: false,
     lastActivitySequence: null,
     delivery: "pending",
+    settledDelivery: {
+      lastActivitySequence: null,
+      delivered: new Set(),
+    },
   };
 }
 
@@ -385,6 +396,64 @@ export function markFailed(
 export function markDelivery(lifecycle: SubagentLifecycle, delivery: CompletionDelivery): SubagentLifecycle {
   if (lifecycle.delivery !== "pending") return lifecycle;
   return { ...lifecycle, delivery };
+}
+function settledGate(lifecycle: SubagentLifecycle): SettledDeliveryGate {
+  return lifecycle.settledDelivery ?? { lastActivitySequence: null, delivered: new Set() };
+}
+
+/** Accept only a newer settled activity sequence for this child. */
+export function observeSettledActivity(
+  lifecycle: SubagentLifecycle,
+  activitySequence: number,
+): SubagentLifecycle {
+  const gate = settledGate(lifecycle);
+  if (
+    gate.lastActivitySequence != null &&
+    activitySequence <= gate.lastActivitySequence
+  ) {
+    return lifecycle;
+  }
+  return {
+    ...lifecycle,
+    settledDelivery: { ...gate, lastActivitySequence: activitySequence },
+  };
+}
+
+/** Return whether terminal content was already delivered as a settled turn. */
+export function hasSettledAssistant(
+  lifecycle: SubagentLifecycle,
+  identity: SettledDeliveryIdentity,
+): boolean {
+  return settledGate(lifecycle).delivered.has(settledDeliveryKey(identity));
+}
+
+/** Record one settled assistant after its parent enqueue succeeds. */
+export function markSettledAssistantDelivered(
+  lifecycle: SubagentLifecycle,
+  identity: SettledDeliveryIdentity,
+  activitySequence: number,
+): SubagentLifecycle {
+  const gate = settledGate(lifecycle);
+  const key = settledDeliveryKey(identity);
+  if (gate.delivered.has(key)) return lifecycle;
+  if (
+    gate.lastActivitySequence != null &&
+    activitySequence < gate.lastActivitySequence
+  ) {
+    return lifecycle;
+  }
+  const delivered = new Set(gate.delivered);
+  delivered.add(key);
+  return {
+    ...lifecycle,
+    settledDelivery: {
+      lastActivitySequence:
+        gate.lastActivitySequence == null
+          ? activitySequence
+          : Math.max(gate.lastActivitySequence, activitySequence),
+      delivered,
+    },
+  };
 }
 
 export function projectLifecycle(lifecycle: SubagentLifecycle, now: number): LifecycleProjection {

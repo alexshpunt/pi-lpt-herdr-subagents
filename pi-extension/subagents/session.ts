@@ -11,6 +11,11 @@ import {
 import { randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 
+import type {
+	NewestAssistantEntry,
+	SessionBaselineCursor,
+} from "./settled-contract.ts";
+
 export interface SessionEntry {
 	type: string;
 	id: string;
@@ -160,6 +165,117 @@ function readEntries(sessionFile: string): SessionEntry[] {
 		.split("\n")
 		.filter((line) => line.trim())
 		.map(parseEntry);
+}
+
+interface TolerantSessionRead {
+	entries: SessionEntry[];
+	partialTrailingLine: boolean;
+}
+
+/**
+ * Read a session while ignoring one incomplete final JSONL record.
+ *
+ * Pi writes session entries atomically in normal operation, but a parent can
+ * observe the file between the write and the trailing newline. The next poll
+ * can read the same entry once it is complete, so the incomplete record is
+ * deliberately reported rather than treated as a session error.
+ */
+function readEntriesTolerant(sessionFile: string): TolerantSessionRead {
+	if (!existsSync(sessionFile)) {
+		return { entries: [], partialTrailingLine: false };
+	}
+	const lines = readFileSync(sessionFile, "utf8")
+		.split("\n")
+		.filter((line) => line.trim());
+	const entries: SessionEntry[] = [];
+	let partialTrailingLine = false;
+	for (let index = 0; index < lines.length; index++) {
+		try {
+			entries.push(parseEntry(lines[index]));
+		} catch (error) {
+			if (index === lines.length - 1) {
+				partialTrailingLine = true;
+				continue;
+			}
+			throw error;
+		}
+	}
+	return { entries, partialTrailingLine };
+}
+
+/** Capture the session position and inherited assistant ids before a run. */
+export function captureSessionBaseline(
+	sessionFile: string,
+): SessionBaselineCursor {
+	const { entries } = readEntriesTolerant(sessionFile);
+	return {
+		sessionFile,
+		entryCount: entries.length,
+		leafId: entries.length > 0 ? entries[entries.length - 1].id : null,
+		assistantEntryIds: entries
+			.filter(
+				(entry) =>
+					entry.type === "message" &&
+					(entry as MessageEntry).message.role === "assistant",
+			)
+			.map((entry) => entry.id),
+	};
+}
+
+export interface EntriesAfterBaseline {
+	entries: SessionEntry[];
+	partialTrailingLine: boolean;
+}
+
+/** Read only records appended after a pre-run session baseline. */
+export function readEntriesAfterBaseline(
+	sessionFile: string,
+	baseline: SessionBaselineCursor,
+): EntriesAfterBaseline {
+	const read = readEntriesTolerant(sessionFile);
+	return {
+		entries: read.entries.slice(baseline.entryCount),
+		partialTrailingLine: read.partialTrailingLine,
+	};
+}
+
+/** Return the newest assistant entry in a post-baseline append. */
+export function findNewestAppendedAssistant(
+	entries: readonly SessionEntry[],
+): NewestAssistantEntry | null {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry.type !== "message") continue;
+		const message = (entry as MessageEntry).message;
+		if (message.role !== "assistant") continue;
+		const textBlocks = message.content.filter(
+			(block) => block.type === "text" && typeof block.text === "string",
+		);
+		const text = textBlocks.map((block) => block.text as string).join("\n");
+		const stopReason = (message as { stopReason?: unknown }).stopReason;
+		const errorMessage = (message as { errorMessage?: unknown }).errorMessage;
+		return {
+			id: entry.id,
+			text: text.trim() ? text : null,
+			contentLength: text.length,
+			empty: !text.trim(),
+			...(typeof stopReason === "string" ? { stopReason } : {}),
+			...(typeof errorMessage === "string" && errorMessage.trim()
+				? { errorMessage: errorMessage.trim() }
+				: {}),
+		};
+	}
+	return null;
+}
+
+/** Read and inspect the newest assistant appended after a child baseline. */
+export function inspectNewestAppendedAssistant(
+	sessionFile: string,
+	baseline: SessionBaselineCursor,
+): NewestAssistantEntry | null {
+	return findNewestAppendedAssistant(
+		readEntriesAfterBaseline(sessionFile, baseline).entries,
+	);
 }
 
 /**

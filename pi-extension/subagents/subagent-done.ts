@@ -8,33 +8,67 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { writeFileSync } from "node:fs";
 import { createSubagentActivityRecorder } from "./activity.ts";
-
+import {
+  classifySettledOutcome,
+  type AssistantStopReason,
+  type NewestAssistantEntry,
+  type SettledOutcomeKind,
+} from "./settled-contract.ts";
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
   return agentStarted;
 }
 
+function textFromContent(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part): part is { type?: string; text?: string } => part != null && typeof part === "object")
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text ?? "")
+    .join("");
+}
+
+/** Convert the latest assistant message into the frozen settled contract. */
+export function newestAssistantEntry(messages: any[] | undefined): NewestAssistantEntry | null {
+  if (!messages || messages.length === 0) return null;
+  const latest = messages[messages.length - 1];
+  if (latest?.role === "user") return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg?.role !== "assistant") continue;
+    const text = typeof msg.text === "string" ? msg.text : textFromContent(msg.content);
+    const contentLength = text.length;
+    return {
+      id: typeof msg.id === "string" && msg.id ? msg.id : `assistant-${i}`,
+      text: text || null,
+      contentLength,
+      stopReason: typeof msg.stopReason === "string" ? msg.stopReason as AssistantStopReason : undefined,
+      errorMessage: typeof msg.errorMessage === "string" ? msg.errorMessage : undefined,
+      empty: contentLength === 0,
+    };
+  }
+  return null;
+}
+
+/** Decide whether a settled response is allowed to close an auto-exit child. */
+export function classifyAutoExitOutcome(
+  messages: any[] | undefined,
+  interruptRequested = false,
+): SettledOutcomeKind | null {
+  const assistant = newestAssistantEntry(messages);
+  if (!assistant) return null;
+  return classifySettledOutcome({ assistant, interruptRequested });
+}
+
+/**
+ * Compatibility predicate retained for callers that only have an agent_end
+ * snapshot. The decision is now intentionally made at agent_settled.
+ */
 export function shouldAutoExitOnAgentEnd(
   _userTookOver: boolean,
   messages: any[] | undefined,
 ): boolean {
-  // Manual input should not strand an auto-exit subagent. If the latest agent
-  // turn completed normally, close the session. Escape/abort still leaves it
-  // open for inspection or another prompt.
-  //
-  // stopReason: "error" (e.g. exhausted retries on a provider overload) also
-  // returns true — we want to shut down so the parent is woken up — but we
-  // pair this with findLatestAssistantError() so the parent learns it was an
-  // error, not a clean completion.
-  if (messages) {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i];
-      if (msg?.role === "assistant") {
-        return msg.stopReason !== "aborted";
-      }
-    }
-  }
-
-  return true;
+  const outcome = classifyAutoExitOutcome(messages);
+  return outcome === "clean" || outcome === "empty";
 }
 
 export interface SubagentErrorInfo {
@@ -148,9 +182,12 @@ export default function (pi: ExtensionAPI) {
     );
   }
 
-  let userTookOver = false;
-  let agentStarted = false;
-
+  let latestAgentEndMessages: any[] | undefined;
+  let latestTurnIndex: number | undefined;
+  // Parent-side interrupt bookkeeping is intentionally separate. Until the
+  // parent wires an explicit interrupt request, an abort remains open and is
+  // classified as an unexpected abort for delivery purposes.
+  let interruptRequested = false;
   // Show widget + status bar on session start
   pi.on("session_start", (_event, ctx) => {
     recorder.sessionStart();
@@ -163,10 +200,6 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("input", () => {
     recorder.input();
-    // Ignore the initial task message that starts an autonomous subagent.
-    // Only inputs after the first agent run has started count as user takeover.
-    if (!shouldMarkUserTookOver(agentStarted)) return;
-    userTookOver = true;
   });
 
   pi.on("before_agent_start", () => {
@@ -174,48 +207,47 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_start", () => {
-    agentStarted = true;
     recorder.agentStart();
   });
 
-  pi.on("agent_end", (event, ctx) => {
-    const messages = (event as any).messages as any[] | undefined;
-    const shouldExit = autoExit && shouldAutoExitOnAgentEnd(userTookOver, messages);
-
-    if (shouldExit) {
-      // Surface stopReason: "error" turns (auto-retry exhausted, provider
-      // overload, etc.) to the parent via the .exit sidecar so the watcher
-      // can report a clear failure with the underlying error message.
-      // Without this the parent would only see exit code 0 and a stale
-      // assistant message, mistaking the crash for a successful completion.
-      const sessionFile = process.env.PI_SUBAGENT_SESSION;
-      if (sessionFile) {
-        try {
-          writeFileSync(
-            `${sessionFile}.exit`,
-            JSON.stringify(buildCompletionSidecar(messages)),
-          );
-        } catch {
-          // Best effort — the watcher can still detect the terminal sentinel
-          // after shutdown if the completion sidecar cannot be written.
-        }
-      }
-
-      recorder.agentEndDone();
-      ctx.shutdown();
-      return;
-    }
-
+  pi.on("agent_end", (event) => {
+    latestAgentEndMessages = (event as any).messages as any[] | undefined;
+    const eventTurnIndex = (event as any).turnIndex;
+    if (typeof eventTurnIndex === "number") latestTurnIndex = eventTurnIndex;
     recorder.agentEndWaiting();
-    if (autoExit) {
-      // Reset any recorded manual input marker. Auto-exit is decided by whether
-      // the latest agent turn completed normally, not by who initiated it.
-      userTookOver = false;
+  });
+
+  pi.on("agent_settled", (_event, ctx) => {
+    const outcome = classifyAutoExitOutcome(latestAgentEndMessages, interruptRequested);
+    const assistant = newestAssistantEntry(latestAgentEndMessages);
+    if (!outcome || !assistant) return;
+
+    recorder.agentSettled({
+      outcome,
+      assistantId: assistant.id,
+      stopReason: assistant.stopReason,
+      errorMessage: assistant.errorMessage,
+      empty: assistant.empty,
+      turnIndex: latestTurnIndex,
+      autoExit,
+    });
+
+    if (!autoExit || (outcome !== "clean" && outcome !== "empty")) return;
+
+    const sessionFile = process.env.PI_SUBAGENT_SESSION;
+    if (sessionFile) {
+      try {
+        writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done" }));
+      } catch {
+        // Best effort — the wrapper sentinel remains available after shutdown.
+      }
     }
+    ctx.shutdown();
   });
 
   pi.on("turn_start", (event) => {
-    recorder.turnStart((event as any).turnIndex);
+    latestTurnIndex = (event as any).turnIndex;
+    recorder.turnStart(latestTurnIndex);
   });
 
   pi.on("turn_end", (event) => {

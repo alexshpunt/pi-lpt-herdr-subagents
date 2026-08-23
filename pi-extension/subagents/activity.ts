@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { AssistantStopReason, SettledOutcomeKind } from "./settled-contract.ts";
 
 export type SubagentActivityPhase = "starting" | "active" | "waiting" | "done";
 export type SubagentActivityScope = "agent" | "turn" | "provider" | "streaming" | "tool";
@@ -10,6 +11,7 @@ export type SubagentActivityEvent =
   | "before_agent_start"
   | "agent_start"
   | "agent_end"
+  | "agent_settled"
   | "turn_start"
   | "turn_end"
   | "before_provider_request"
@@ -45,6 +47,12 @@ export interface SubagentActivityState {
   toolName?: string;
   toolStartedAt?: number;
   toolEndedAt?: number;
+  /** Outcome recorded at the fully-settled boundary. */
+  settledOutcome?: SettledOutcomeKind;
+  settledAssistantId?: string;
+  settledStopReason?: AssistantStopReason;
+  settledErrorMessage?: string;
+  settledEmpty?: boolean;
 }
 
 export type ActivityReadResult =
@@ -60,6 +68,15 @@ export interface SubagentActivityRecorder {
   agentStart(): void;
   agentEndWaiting(): void;
   agentEndDone(): void;
+  agentSettled(details: {
+    outcome: SettledOutcomeKind;
+    assistantId?: string;
+    stopReason?: AssistantStopReason;
+    errorMessage?: string;
+    empty?: boolean;
+    turnIndex?: number;
+    autoExit?: boolean;
+  }): void;
   turnStart(turnIndex?: number): void;
   turnEnd(turnIndex?: number): void;
   beforeProviderRequest(): void;
@@ -79,12 +96,20 @@ const ACTIVITY_UPDATE_THROTTLE_MS = 500;
 const MAX_WRITE_FAILURES = 3;
 const KNOWN_PHASES = new Set<SubagentActivityPhase>(["starting", "active", "waiting", "done"]);
 const KNOWN_SCOPES = new Set<SubagentActivityScope>(["agent", "turn", "provider", "streaming", "tool"]);
+const KNOWN_OUTCOMES = new Set<SettledOutcomeKind>([
+  "clean",
+  "empty",
+  "error",
+  "intentional-abort",
+  "unexpected-abort",
+]);
 const KNOWN_EVENTS = new Set<SubagentActivityEvent>([
   "session_start",
   "input",
   "before_agent_start",
   "agent_start",
   "agent_end",
+  "agent_settled",
   "turn_start",
   "turn_end",
   "before_provider_request",
@@ -163,6 +188,14 @@ function validateActivity(value: unknown, expectedRunningChildId: string): Activ
     return invalidActivity("unknown activeScope");
   }
 
+  if (object.settledOutcome != null &&
+    (typeof object.settledOutcome !== "string" || !KNOWN_OUTCOMES.has(object.settledOutcome as SettledOutcomeKind))) {
+    return invalidActivity("unknown settledOutcome");
+  }
+  const settledEmptyError = object.settledEmpty != null && typeof object.settledEmpty !== "boolean"
+    ? "settledEmpty must be a boolean when present"
+    : null;
+  if (settledEmptyError) return invalidActivity(settledEmptyError);
   const validationError = [
     validateFiniteNumber(object, "createdAt"),
     validateFiniteNumber(object, "updatedAt"),
@@ -179,6 +212,9 @@ function validateActivity(value: unknown, expectedRunningChildId: string): Activ
     validateOptionalActivityString(object, "messageEventType"),
     validateOptionalActivityString(object, "toolCallId"),
     validateOptionalActivityString(object, "toolName"),
+    validateOptionalActivityString(object, "settledAssistantId"),
+    validateOptionalActivityString(object, "settledStopReason"),
+    validateOptionalActivityString(object, "settledErrorMessage"),
   ].find((error) => error != null);
   if (validationError) return invalidActivity(validationError);
 
@@ -229,6 +265,7 @@ function createNoopRecorder(): SubagentActivityRecorder {
     agentStart() {},
     agentEndWaiting() {},
     agentEndDone() {},
+    agentSettled() {},
     turnStart() {},
     turnEnd() {},
     beforeProviderRequest() {},
@@ -418,6 +455,22 @@ export function createSubagentActivityRecorder(params: {
     },
     agentEndDone() {
       markDone("agent_end");
+    },
+    agentSettled(details) {
+      const autoExit = details.autoExit === true && (details.outcome === "clean" || details.outcome === "empty");
+      record("agent_settled", (current, observedAt) => {
+        clearActiveState(current);
+        current.phase = autoExit ? "done" : "waiting";
+        if (autoExit) delete current.waitingSince;
+        else current.waitingSince = observedAt;
+        current.settledOutcome = details.outcome;
+        current.settledAssistantId = details.assistantId;
+        current.settledStopReason = details.stopReason;
+        current.settledErrorMessage = details.errorMessage;
+        current.settledEmpty = details.empty;
+        if (details.turnIndex != null) current.turnIndex = details.turnIndex;
+      }, "immediate");
+      if (autoExit) disable();
     },
     turnStart(turnIndex) {
       record("turn_start", (current, observedAt) => {

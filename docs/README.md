@@ -11,6 +11,7 @@ Use this page to find the authoritative document for a task. Current shipped beh
 ## Domain language and active design
 
 - [`../CONTEXT.md`](../CONTEXT.md) — workflow domain language and prototype evidence.
+- [`settled-lifecycle-contract.md`](settled-lifecycle-contract.md) — shared settled outcome, identity, cursor, and delivery-gate interfaces for lifecycle streams.
 - [`orchestrated-review-workflow-plan.md`](orchestrated-review-workflow-plan.md) — shipped first-flow implementation and deferred follow-up. It records the reviewed legacy issue #6 revision (`2026-08-04T11:57:03Z`, `20a0d529770b…`) without depending on the retired issue tracker.
 
 Workflow preparation, exact approval, Worker execution, isolated read-only children, bounded parallel review and synthesis, explicit non-retryable failure evidence, fail-closed cancellation, reload/restart ownership, and the bundled authoring skill are shipped. Automated package acceptance covers unit tests, lint, and `npm pack --dry-run`. Deterministic Herdr integration is a manual release gate run from inside Herdr. ADRs 0004–0007 are accepted for the shipped first flow.

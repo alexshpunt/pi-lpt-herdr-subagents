@@ -4,3 +4,6 @@ config.json
 .pi/*
 !.pi/skills/
 !.pi/settings.json
+
+# Local agent coordination state
+.mesh/

@@ -94,6 +94,7 @@ import {
 	readSubagentActivityFile,
   readSubagentSettledEventsFile,
 	type ActivityReadResult,
+	type SettledActivityEvent,
 	type SubagentActivityState,
 } from "./activity.ts";
 import {
@@ -1536,6 +1537,88 @@ function settledAssistantFor(
 	}
 }
 
+/** Match one session assistant to the durable evidence for a settled boundary. */
+function matchesSettledAssistant(
+	assistant: NewestAssistantEntry,
+	event: SettledActivityEvent,
+): boolean {
+	if (event.stopReason != null && assistant.stopReason !== event.stopReason) {
+		return false;
+	}
+	if (event.errorMessage != null && assistant.errorMessage !== event.errorMessage) {
+		return false;
+	}
+	if (event.empty != null && assistant.empty !== event.empty) {
+		return false;
+	}
+	switch (event.outcome) {
+		case "clean": {
+			return (
+				!assistant.empty &&
+				!!assistant.text?.trim() &&
+				assistant.stopReason !== "toolUse" &&
+				assistant.stopReason !== "error" &&
+				assistant.stopReason !== "aborted"
+			);
+		}
+		case "empty": {
+			return assistant.empty;
+		}
+		case "error": {
+			return assistant.stopReason === "error" || assistant.errorMessage != null;
+		}
+		case "intentional-abort":
+		case "unexpected-abort": {
+			return assistant.stopReason === "aborted";
+		}
+	}
+}
+
+/**
+ * Correlate ordered settled boundaries with session assistants.
+ *
+ * Durable event ids are preferred, but older/fallback children can record an
+ * id that is not the JSONL entry id. In that case evidence and session order
+ * select the next matching final assistant, skipping tool-use control entries.
+ */
+function correlateSettledAssistants(
+	events: readonly SettledActivityEvent[],
+	assistantPool: readonly NewestAssistantEntry[],
+): Map<number, NewestAssistantEntry> {
+	const matches = new Map<number, NewestAssistantEntry>();
+	const usedAssistantIds = new Set<string>();
+	let sessionCursor = -1;
+
+	for (const event of events) {
+		let assistant: NewestAssistantEntry | null = null;
+		let assistantIndex = -1;
+		if (event.assistantId) {
+			assistantIndex = assistantPool.findIndex(
+				(candidate, index) =>
+					index > sessionCursor &&
+					candidate.id === event.assistantId &&
+					!usedAssistantIds.has(candidate.id) &&
+					matchesSettledAssistant(candidate, event),
+			);
+			if (assistantIndex >= 0) assistant = assistantPool[assistantIndex];
+		}
+		if (!assistant) {
+			assistantIndex = assistantPool.findIndex(
+				(candidate, index) =>
+					index > sessionCursor &&
+					!usedAssistantIds.has(candidate.id) &&
+					matchesSettledAssistant(candidate, event),
+			);
+			if (assistantIndex >= 0) assistant = assistantPool[assistantIndex];
+		}
+		if (!assistant) continue;
+		usedAssistantIds.add(assistant.id);
+		sessionCursor = assistantIndex;
+		matches.set(event.sequence, assistant);
+	}
+	return matches;
+}
+
 function terminalAssistantIdentityFor(
 	running: RunningSubagent,
 ): SettledDeliveryIdentity | undefined {
@@ -1553,21 +1636,11 @@ function terminalAssistantIdentityFor(
 			running.id,
 		).sort((left, right) => left.sequence - right.sequence);
 		const assistantPool = settledAssistants(running);
-		const usedAssistantIds = new Set<string>();
+		const correlated = correlateSettledAssistants(events, assistantPool);
 		let latestSettledAssistant: NewestAssistantEntry | null = null;
 		for (const event of events) {
-			let assistant = event.assistantId
-				? settledAssistantForId(running, event.assistantId)
-				: null;
-			if (!assistant) {
-				assistant =
-					assistantPool.find(
-						(candidate) => !usedAssistantIds.has(candidate.id),
-					) ?? null;
-			}
-			if (!assistant) continue;
-			usedAssistantIds.add(assistant.id);
-			latestSettledAssistant = assistant;
+			const assistant = correlated.get(event.sequence);
+			if (assistant) latestSettledAssistant = assistant;
 		}
 		if (
 			latestSettledAssistant &&
@@ -1614,24 +1687,6 @@ function settledPresentation(
 	);
 }
 
-function settledAssistantForId(
-  running: RunningSubagent,
-  assistantId: string,
-): NewestAssistantEntry | null {
-  if (!running.sessionBaseline) return null;
-  try {
-    const entries = readEntriesAfterBaseline(
-      running.sessionFile,
-      running.sessionBaseline,
-    ).entries;
-    return findNewestAppendedAssistant(
-      entries.filter((entry) => entry.id === assistantId),
-    );
-  } catch {
-    return null;
-  }
-}
-
 function settledAssistants(running: RunningSubagent): NewestAssistantEntry[] {
 	if (!running.sessionBaseline) return [];
 	try {
@@ -1651,7 +1706,7 @@ function observeSettledRunningSubagent(running: RunningSubagent): void {
 	).sort((left, right) => left.sequence - right.sequence);
 	if (events.length === 0) return;
 	const assistantPool = settledAssistants(running);
-	const usedAssistantIds = new Set<string>();
+	const correlated = correlateSettledAssistants(events, assistantPool);
 	const gate = running.lifecycle.settledDelivery ?? {
 		lastActivitySequence: null,
 		delivered: new Set<string>(),
@@ -1659,14 +1714,8 @@ function observeSettledRunningSubagent(running: RunningSubagent): void {
 	running.lifecycle.settledDelivery = gate;
 
   for (const event of events) {
-		let assistant = event.assistantId
-			? settledAssistantForId(running, event.assistantId)
-			: null;
-		if (!assistant) {
-			assistant = assistantPool.find((candidate) => !usedAssistantIds.has(candidate.id)) ?? null;
-		}
+		const assistant = correlated.get(event.sequence);
 		if (!assistant) continue;
-		usedAssistantIds.add(assistant.id);
 		const interruptRequested = running.lifecycle.turn.kind === "interrupted" &&
 			(running.lifecycle.turn.previousActivitySequence == null ||
 				event.sequence > running.lifecycle.turn.previousActivitySequence);

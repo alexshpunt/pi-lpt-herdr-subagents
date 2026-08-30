@@ -576,13 +576,7 @@ function buildPiCommand(
 	);
 	if (toolAllowlist) parts.push("--tools", shellQuote(toolAllowlist));
 	if (!request.handoff) {
-		for (const prompt of buildPromptArgs(
-			request.behavior.skills,
-			resolved.taskDelivery,
-			artifacts.taskArg,
-		)) {
-			parts.push(shellQuote(prompt));
-		}
+		parts.push(shellQuote(artifacts.taskArg));
 	}
 
 	const env: string[] = [];
@@ -602,6 +596,9 @@ function buildPiCommand(
 		env.push(`PI_SUBAGENT_NAME=${shellQuote(request.name)}`);
 		if (request.agent)
 			env.push(`PI_SUBAGENT_AGENT=${shellQuote(request.agent)}`);
+		env.push(
+			`PI_SUBAGENT_SKILLS=${shellQuote(normalizeSkillNames(request.behavior.skills ?? "").join(","))}`,
+		);
     env.push(`PI_SUBAGENT_AUTO_EXIT=${request.behavior.autoExit ? "1" : "0"}`);
 		env.push(`PI_SUBAGENT_SESSION=${shellQuote(artifacts.sessionFile)}`);
 		env.push(`PI_SUBAGENT_ID=${shellQuote(resolved.id)}`);
@@ -774,21 +771,14 @@ export function buildSubagentToolAllowlist(
 	return [...allow].join(",");
 }
 
-function buildPromptArgs(
-	skills: string | undefined,
-	taskDelivery: "direct" | "artifact",
-	taskArg: string,
-): string[] {
-	const skillPrompts = (skills ?? "")
-		.split(",")
-		.map((skill) => skill.trim())
-		.filter(Boolean)
-		.map((skill) => `/skill:${skill}`);
-	return [
-		...(taskDelivery === "artifact" && skillPrompts.length > 0 ? [""] : []),
-		...skillPrompts,
-		taskArg,
-	];
+/** Normalize requested skill names for safe, deterministic child transport. */
+export function normalizeSkillNames(skills: string): string[] {
+	return [...new Set(
+		skills
+			.split(",")
+			.map((skill) => skill.trim())
+			.filter(Boolean),
+	)];
 }
 
 function getDefaultSessionDirFor(cwd: string, agentDir: string): string {

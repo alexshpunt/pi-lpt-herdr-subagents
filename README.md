@@ -396,6 +396,13 @@ subagent({
 | `cwd`                  | string  | —              | Working directory, or source repository when `worktree` is set (see [Role Folders](#role-folders)) |
 | `worktree`             | object  | —              | Isolated Herdr-managed Git worktree; requires `branch`, with optional `base` (committed `HEAD` by default) |
 
+
+`skills` are loaded during ordinary child creation, before the assigned task runs. Pi resolves each requested name using its normal skill catalog, then the child receives all readable skill bodies once in one hidden initialization message alongside the task. The message is stored in the child session, so `subagent_resume` keeps the skill context without loading the skills again. This does not create `/skill:*` turns, extra child work, or extra parent results.
+
+For a named role, the role's `skills:` list is used by default. A direct `skills` value replaces that list; an explicit empty string (`skills: ""`) disables role skills. Blank and duplicate names are ignored. If a requested skill is missing or unreadable, the child shows one warning for that skill and continues; the warning is not sent to the model, the child report, or the parent result. Legacy singular `skill:` role frontmatter remains supported.
+
+This behavior applies to ordinary `subagent` children. Approved review-workflow children keep their separate read-only runtime with skills and extensions disabled (`--no-skills --no-extensions`).
+
 ### Naming coordinated children
 
 Before launching a new group, choose a short task slug and label each new child

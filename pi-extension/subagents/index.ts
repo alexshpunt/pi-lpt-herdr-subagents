@@ -1698,8 +1698,41 @@ function settledAssistants(running: RunningSubagent): NewestAssistantEntry[] {
 	}
 }
 
+function terminalAssistantBelongsToRunning(
+	running: RunningSubagent,
+	identity: SettledDeliveryIdentity,
+): boolean {
+	if (!running.settledEventsFile) return false;
+	try {
+		const events = readSubagentSettledEventsFile(
+			running.settledEventsFile,
+			running.id,
+		).sort((left, right) => left.sequence - right.sequence);
+		const correlated = correlateSettledAssistants(
+			events,
+			settledAssistants(running),
+		);
+		return [...correlated.values()].some(
+			(assistant) => assistant.id === identity.assistantEntryId,
+		);
+	} catch {
+		return false;
+	}
+}
+
+function shouldSuppressTerminalContent(
+	running: RunningSubagent,
+	finalAssistant: SettledDeliveryIdentity | undefined,
+): boolean {
+	return (
+		finalAssistant != null &&
+		(running.lifecycle.settledDelivery?.delivered.size ?? 0) > 0 &&
+		!terminalAssistantBelongsToRunning(running, finalAssistant)
+	);
+}
+
 function observeSettledRunningSubagent(running: RunningSubagent): void {
-  if (!running.settledEventsFile) return;
+	if (!running.settledEventsFile) return;
 	let events = readSubagentSettledEventsFile(
 		running.settledEventsFile,
 		running.id,
@@ -3567,6 +3600,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 						}
 
 						const finalIdentity = terminalAssistantIdentityFor(completedRunning);
+						const suppressTerminalContent = shouldSuppressTerminalContent(
+							completedRunning,
+							finalIdentity,
+						);
 						const presentation = resolveResultPresentation(
 							result,
 							completedRunning.name,
@@ -3576,7 +3613,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               completedRunning,
               finalIdentity,
               (contentAlreadyDelivered) => {
-                if (contentAlreadyDelivered) return;
+                if (contentAlreadyDelivered || suppressTerminalContent) return;
                 const completionApi = selectCompletionApi(pi, runtime.pi);
 						sendSubagentResult(completionApi, presentation, {
 							name: completedRunning.name,
@@ -4008,6 +4045,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 						}
 
 						const finalIdentity = terminalAssistantIdentityFor(running);
+						const suppressTerminalContent = shouldSuppressTerminalContent(
+							running,
+							finalIdentity,
+						);
 						const allEntries = running.sessionBaseline
               ? readEntriesAfterBaseline(
                   params.sessionPath,
@@ -4030,7 +4071,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               running,
               finalIdentity,
               (contentAlreadyDelivered) => {
-                if (contentAlreadyDelivered) return;
+                if (contentAlreadyDelivered || suppressTerminalContent) return;
                 const completionApi = selectCompletionApi(pi, runtime.pi);
 						sendSubagentResult(completionApi, presentation, {
 							name,

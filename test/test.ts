@@ -171,6 +171,10 @@ function createMockExtensionApi(extensionEvents = createEventBus()) {
 	};
 }
 
+function countOccurrences(source: string, value: string): number {
+	return source.split(value).length - 1;
+}
+
 function restoreEnvVar(name: string, value: string | undefined) {
 	if (value === undefined) {
 		delete process.env[name];
@@ -2341,6 +2345,105 @@ describe("subagent discovery", () => {
 	});
 });
 describe("subagent-done.ts", () => {
+
+	it("continues initialization and warns once per unreadable catalog skill without leaking warnings", async () => {
+		const dir = createTestDir();
+		try {
+			const previousSkills = process.env.PI_SUBAGENT_SKILLS;
+			const availablePath = join(dir, "available-SKILL.md");
+			const failedOnePath = join(dir, "removed-one-SKILL.md");
+			const failedTwoPath = join(dir, "removed-two-SKILL.md");
+			const availableMarker = "AVAILABLE_SKILL_BODY_ALE54";
+			writeFileSync(
+				availablePath,
+				`---\nname: available-skill\ndescription: readable fixture\n---\n\n${availableMarker}\n`,
+			);
+			process.env.PI_SUBAGENT_SKILLS =
+				"failed-one,available-skill,failed-one,failed-two,failed-two";
+
+			try {
+				const fake = createMockExtensionApi();
+				const notifications: Array<{ message: string; level: string }> = [];
+				subagentDoneExtension(fake.api);
+				const handler = fake.eventHandlers.get("before_agent_start")?.[0];
+				assert.ok(handler, "before_agent_start hook must be registered");
+
+				const result = await handler(
+					{
+						type: "before_agent_start",
+						prompt: "Return exactly CHILD_REPORT_ALE54",
+						systemPrompt: "child system prompt",
+						systemPromptOptions: {
+							skills: [
+								{
+									name: "failed-one",
+									description: "resolved fixture removed before initialization",
+									filePath: failedOnePath,
+									baseDir: dir,
+									sourceInfo: { source: "test", kind: "project" },
+									disableModelInvocation: false,
+								},
+								{
+									name: "available-skill",
+									description: "readable resolved fixture",
+									filePath: availablePath,
+									baseDir: dir,
+									sourceInfo: { source: "test", kind: "project" },
+									disableModelInvocation: false,
+								},
+								{
+									name: "failed-two",
+									description: "resolved fixture removed before initialization",
+									filePath: failedTwoPath,
+									baseDir: dir,
+									sourceInfo: { source: "test", kind: "project" },
+									disableModelInvocation: false,
+								},
+							],
+						},
+					},
+					{
+						ui: {
+							notify(message: string, level: string) {
+								notifications.push({ message, level });
+							},
+						},
+					},
+				);
+
+				const initialization = JSON.stringify(result?.message ?? "");
+				const warningText = notifications.map(({ message }) => message).join("\n");
+				const violations = [
+					...(!initialization.includes(availableMarker)
+						? ["work did not continue with the readable catalog skill"]
+						: []),
+					...(notifications.length !== 2
+						? [`expected two unique child UI warnings, got ${notifications.length}`]
+						: []),
+					...(notifications.some(({ level }) => level !== "warning")
+						? ["a failed skill notification was not a warning"]
+						: []),
+					...(countOccurrences(warningText, "failed-one") !== 1
+						? ["failed-one did not produce exactly one deduplicated warning"]
+						: []),
+					...(countOccurrences(warningText, "failed-two") !== 1
+						? ["failed-two did not produce exactly one deduplicated warning"]
+						: []),
+					...(initialization.includes("failed-one") || initialization.includes("failed-two")
+						? ["user-only warning content leaked into model initialization"]
+						: []),
+					...(fake.sentMessages.length > 0 || fake.sentUserMessages.length > 0
+						? ["user-only warning was persisted as child or parent-facing message content"]
+						: []),
+				];
+				assert.deepEqual(violations, []);
+			} finally {
+				restoreEnvVar("PI_SUBAGENT_SKILLS", previousSkills);
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 	it("does not register subagent_done for auto-exit children", () => {
 		const previousAutoExit = process.env.PI_SUBAGENT_AUTO_EXIT;
 		process.env.PI_SUBAGENT_AUTO_EXIT = "1";

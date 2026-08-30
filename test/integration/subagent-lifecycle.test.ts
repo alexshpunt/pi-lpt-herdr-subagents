@@ -18,7 +18,12 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { getProviderRequests, resetProviderRequests } from "./fake-provider.ts";
 import {
@@ -71,11 +76,15 @@ function getPaneTab(paneId: string): string | null {
 interface IntegrationResultDetails {
 	kind?: unknown;
 	outcome?: unknown;
+	childId?: unknown;
 	sessionFile?: unknown;
+	deliveryId?: unknown;
+	resultContent?: unknown;
 }
 
 interface IntegrationSessionEntry {
 	type?: unknown;
+	id?: unknown;
 	customType?: unknown;
 	details?: IntegrationResultDetails;
 }
@@ -89,6 +98,82 @@ function readSettledResult(sessionFile: string): IntegrationResultDetails {
 		entries.find(
 			(entry) => entry.type === "custom_message" && entry.customType === "subagent_result",
 		)?.details ?? {}
+	);
+}
+
+function readSessionEntries(sessionFile: string): IntegrationSessionEntry[] {
+	return readFileSync(sessionFile, "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as IntegrationSessionEntry);
+}
+
+interface PaneSessionRecord {
+	sessionId?: unknown;
+	sessionFile?: unknown;
+}
+
+async function waitForReplacementSession(
+	parentPaneId: string,
+	agentDir: string,
+	originalSessionFile: string,
+	replacementMarker: string,
+	timeout = PI_TIMEOUT,
+): Promise<{ sessionFile: string; sessionId: string }> {
+	const deadline = Date.now() + timeout;
+	const mapFile = join(
+		agentDir,
+		"pane-session-map",
+		`${encodeURIComponent(parentPaneId)}.json`,
+	);
+	while (Date.now() < deadline) {
+		// The marker is sent to and observed in this exact Herdr pane. The
+		// session map is written by that pane's Pi process on session_start,
+		// including for an otherwise ephemeral /new session.
+		if (!readPane(parentPaneId, 300).includes(replacementMarker)) {
+			await sleep(100);
+			continue;
+		}
+		try {
+			const record = JSON.parse(readFileSync(mapFile, "utf8")) as PaneSessionRecord;
+			if (
+				typeof record.sessionFile !== "string" ||
+				typeof record.sessionId !== "string" ||
+				record.sessionFile === originalSessionFile
+			) {
+				await sleep(100);
+				continue;
+			}
+			const entries = readSessionEntries(record.sessionFile);
+			const sessionIds = [
+				...new Set(
+					entries
+						.filter((entry) => entry.type === "session" && typeof entry.id === "string")
+						.map((entry) => entry.id as string),
+				),
+			];
+			if (sessionIds.length !== 1 || sessionIds[0] !== record.sessionId) {
+				throw new Error(
+					`Ambiguous or mismatched session identity for pane ${parentPaneId}`,
+				);
+			}
+			if (readFileSync(record.sessionFile, "utf8").includes(replacementMarker)) {
+				return { sessionFile: record.sessionFile, sessionId: record.sessionId };
+			}
+		} catch (error) {
+			if (error instanceof Error && error.message.startsWith("Ambiguous or mismatched")) {
+				throw error;
+			}
+			// The replacement may still be writing its first JSONL record.
+		}
+		await sleep(100);
+	}
+	throw new Error(`Timeout waiting for replacement session in parent pane ${parentPaneId}`);
+}
+
+function customResultEntries(entries: IntegrationSessionEntry[]): IntegrationSessionEntry[] {
+	return entries.filter(
+		(entry) => entry.type === "custom_message" && entry.customType === "subagent_result",
 	);
 }
 
@@ -190,8 +275,9 @@ for (const backend of backends) {
 			resetProviderRequests();
 		});
 
-		afterEach(() => {
-			cleanupTestEnv(env);
+
+		afterEach(async () => {
+			await cleanupTestEnv(env);
 			restoreBackend(prevMux);
 		});
 
@@ -520,10 +606,11 @@ for (const backend of backends) {
 			}
 		});
 
-		it("delivers completion after the parent starts a new session", async () => {
+		it("holds completion in a replacement session and delivers after the exact parent resumes", async () => {
 			const id = uniqueId();
 			const startFile = `/tmp/pi-integ-switch-start-${id}.txt`;
 			const markerFile = `/tmp/pi-integ-switch-done-${id}.txt`;
+			const parentSession = join(env.dir, `switch-parent-${id}.jsonl`);
 			const childDir = join(env.dir, "sibling-project");
 			mkdirSync(childDir);
 			trackTempFile(env, startFile);
@@ -531,7 +618,6 @@ for (const backend of backends) {
 
 			const surface = createTrackedSurface(env, `switch-${id}`);
 			await waitForPaneReady(surface);
-
 			const task = [
 				`Call the subagent tool with these EXACT parameters:`,
 				`  name: "Switch-${id}"`,
@@ -541,27 +627,197 @@ for (const backend of backends) {
 				`Do not do anything else. Just call the subagent tool once.`,
 			].join("\n");
 
-			startPi(surface, env.dir, task);
+			startPi(surface, env.dir, task, {
+				extraArgs: `--session ${shellQuote(parentSession)}`,
+				environment: { PI_INTEG_PERSIST_REPLACEMENTS_PANE: surface },
+			});
 			await waitForFile(startFile, PI_TIMEOUT, /START_/);
+			const parentSessionId = JSON.parse(
+				readFileSync(parentSession, "utf8").split("\n")[0],
+			).id;
+			assert.ok(parentSessionId, "the original parent session must have an id");
 
+			// /new makes the original session offline while keeping a replacement
+			// process alive. Add a newer unrelated transcript to prove that file
+			// recency cannot be used to identify the replacement.
 			runInPane(surface, "/new");
-
-			const content = await waitForFile(markerFile, PI_TIMEOUT, /DONE_/);
-			assert.ok(
-				content.includes(`DONE_${id}`),
-				"Subagent should finish after the parent session switch",
+			await waitForScreen(surface, /New session started/, PI_TIMEOUT, 300);
+			const replacementMarker = `EXACT_REPLACEMENT_${id}`;
+			const decoySession = join(
+				env.dir,
+				".pi",
+				"agent",
+				`decoy-${id}.jsonl`,
 			);
-
-			const screen = await waitForScreen(
+			writeFileSync(
+				decoySession,
+				[
+					JSON.stringify({ type: "session", id: `decoy-${id}` }),
+					JSON.stringify({
+						type: "custom_message",
+						customType: "subagent_result",
+						details: {
+							kind: "terminal",
+							outcome: "decoy",
+							childId: `decoy-child-${id}`,
+							deliveryId: `decoy-delivery-${id}`,
+							sessionFile: parentSession,
+						},
+					}),
+				].join("\n") + "\n",
+				"utf8",
+			);
+			trackTempFile(env, decoySession);
+			runInPane(surface, `Reply with exactly ${replacementMarker}.`);
+			await waitForScreen(surface, new RegExp(replacementMarker), PI_TIMEOUT, 300);
+			const replacement = await waitForReplacementSession(
 				surface,
-				new RegExp(`Switch-${id}.*completed|Sub-agent.*Switch-${id}`, "i"),
-				PI_TIMEOUT,
-				300,
+				join(env.dir, ".pi", "agent"),
+				parentSession,
+				replacementMarker,
 			);
-			assert.match(screen, new RegExp(`Switch-${id}`, "i"));
+			const replacementBeforeRaw = readFileSync(replacement.sessionFile, "utf8");
+			const replacementBeforeEntries = readSessionEntries(replacement.sessionFile);
+			assert.notEqual(
+				replacement.sessionId,
+				parentSessionId,
+				"/new must create a different session id",
+			);
+			assert.notEqual(
+				replacement.sessionFile,
+				parentSession,
+				"/new must create a different session file",
+			);
+
+			assert.notEqual(
+				replacement.sessionFile,
+				decoySession,
+				"replacement lookup must follow the parent pane, not a newer decoy transcript",
+			);
+			assert.equal(
+				customResultEntries(replacementBeforeEntries).length,
+				0,
+				"replacement JSONL must have no old result before child completion",
+			);
+			await waitForFile(markerFile, PI_TIMEOUT, /DONE_/);
+			await sleep(3_000);
+			const replacementScreen = readPane(surface, 300);
+			assert.doesNotMatch(
+				replacementScreen,
+				new RegExp(`Sub-agent .*Switch-${id}.*completed`, "i"),
+				"a replacement session must not receive the old session's completion",
+			);
+			const deliveredResults = () =>
+				readSessionEntries(parentSession).filter(
+					(entry) =>
+						entry.type === "custom_message" &&
+						entry.customType === "subagent_result" &&
+						entry.details?.sessionFile === parentSession,
+				);
+			assert.equal(
+				deliveredResults().length,
+				0,
+				"the original parent inbox must remain pending while that session is offline",
+			);
+			const replacementAfterRaw = readFileSync(replacement.sessionFile, "utf8");
+			const replacementAfterEntries = readSessionEntries(replacement.sessionFile);
+			assert.equal(
+				customResultEntries(replacementAfterEntries).length,
+				0,
+				"replacement JSONL must have no old result after child completion",
+			);
+
+			runInPane(surface, "/quit");
+			await waitForPiExit(surface, PI_TIMEOUT);
+
+			const resumeSurface = createTrackedSurface(env, `switch-resume-${id}`);
+			await waitForPaneReady(resumeSurface);
+			startPi(
+				resumeSurface,
+				env.dir,
+				`Wait for the pending result, then say EXACT_PARENT_RESUMED_${id}.`,
+				{ extraArgs: `--session ${shellQuote(parentSession)}` },
+			);
+			const resumeDeadline = Date.now() + PI_TIMEOUT;
+			let resumedResults = deliveredResults();
+			while (resumedResults.length === 0 && Date.now() < resumeDeadline) {
+				await sleep(100);
+				resumedResults = deliveredResults();
+			}
+			assert.ok(
+				resumedResults.length > 0,
+				`the exact parent should receive its pending result; screen=${readPane(resumeSurface, 300)}`,
+			);
+			assert.equal(
+				JSON.parse(readFileSync(parentSession, "utf8").split("\n")[0]).id,
+				parentSessionId,
+				"resuming the exact file must preserve its original session id",
+			);
+			const deliveryIds = resumedResults.map((entry) => entry.details?.deliveryId);
+			assert.ok(
+				deliveryIds.every((deliveryId) => typeof deliveryId === "string"),
+				"materialized results must carry durable delivery ids",
+			);
+			assert.equal(
+				new Set(deliveryIds).size,
+				resumedResults.length,
+				"each pending inbox result must materialize exactly once",
+			);
+			const childIds = resumedResults.map((entry) => entry.details?.childId);
+			assert.ok(
+				childIds.every((childId) => typeof childId === "string"),
+				"materialized results must carry the stable child id",
+			);
+			assert.equal(
+				new Set(childIds).size,
+				1,
+				"all pending results must identify the same child",
+			);
+			for (const stableId of [...deliveryIds, ...childIds]) {
+				assert.equal(
+					replacementBeforeRaw.includes(String(stableId)),
+					false,
+					`replacement JSONL must not contain ${String(stableId)} before completion`,
+				);
+				assert.equal(
+					replacementAfterRaw.includes(String(stableId)),
+					false,
+					`replacement JSONL must not contain ${String(stableId)} after completion`,
+				);
+			}
+
+			runInPane(resumeSurface, "/quit");
+			await waitForPiExit(resumeSurface, PI_TIMEOUT);
+
+			// A later startup/resume sees the delivery id already recorded in the
+			// session and must not append a duplicate result.
+			const secondResumeSurface = createTrackedSurface(env, `switch-resume-again-${id}`);
+			await waitForPaneReady(secondResumeSurface);
+			startPi(
+				secondResumeSurface,
+				env.dir,
+				`Say EXACT_PARENT_SECOND_START_${id}.`,
+				{ extraArgs: `--session ${shellQuote(parentSession)}` },
+			);
+			await waitForScreen(
+				secondResumeSurface,
+				new RegExp(`EXACT_PARENT_SECOND_START_${id}`),
+				PI_TIMEOUT,
+			);
+			assert.equal(
+				deliveredResults().length,
+				resumedResults.length,
+				"a subsequent exact-session startup must not duplicate the completion",
+			);
+			assert.deepEqual(
+				deliveredResults().map((entry) => entry.details?.deliveryId),
+				deliveryIds,
+				"subsequent exact-session startup must preserve the original delivery ids",
+			);
+			runInPane(secondResumeSurface, "/quit");
+			await waitForPiExit(secondResumeSurface, PI_TIMEOUT);
 		});
 
-		// ── In-progress activity snapshots ──
 
 		it("keeps a long active tool call from surfacing false stalled status", async () => {
 			const id = uniqueId();
@@ -857,6 +1113,89 @@ for (const backend of backends) {
 			assert.ok(
 				content.includes(`SYSPROMPT_${id}`),
 				`System prompt test marker should exist`,
+			);
+		});
+
+		it("withholds an owner's settled results until its nested child drains", async () => {
+			const id = uniqueId();
+			const ownerName = `DescendantOwner-${id}`;
+			const gateFile = `/tmp/pi-integ-descendant-gate-${id}`;
+			const parentSession = join(env.dir, `descendant-parent-${id}.jsonl`);
+			trackTempFile(env, gateFile);
+
+			const surface = createTrackedSurface(env, `descendant-parent-${id}`);
+			await waitForPaneReady(surface);
+			startPi(
+				surface,
+				env.dir,
+				[
+					"Call subagent with these EXACT parameters:",
+					`  name: "${ownerName}"`,
+					'  agent: "test-descendant-owner"',
+					`  task: "INTEGRATION_DESCENDANT_GATE: ${gateFile} Launch the descendant and stay open."`,
+					"Call the tool once and wait for its asynchronous result.",
+				].join("\n"),
+				{ extraArgs: `--session ${shellQuote(parentSession)}` },
+			);
+
+			const ownerPane = await waitForAgentPane(ownerName, env.workspaceId);
+			await waitForScreen(ownerPane, /Nested-[^\s]+[\s\S]*active/i, PI_TIMEOUT, 300);
+			const waitForOwnerResult = (marker: string) =>
+				waitForScreen(
+					ownerPane,
+					new RegExp(`(?:^|\\n)\\s*${marker}\\s*(?:\\n|$)`),
+					PI_TIMEOUT,
+					300,
+				);
+
+			for (const marker of ["OWNER_ONE", "OWNER_TWO", "OWNER_THREE", "OWNER_FOUR"]) {
+				const acknowledgement = execFileSync(
+					"herdr",
+					["agent", "prompt", ownerPane, `Return exactly ${marker}.`],
+					{ encoding: "utf8" },
+				);
+				assert.ok(acknowledgement.trim(), `Herdr must accept the ${marker} prompt`);
+				await waitForOwnerResult(marker);
+			}
+
+			const readResults = (): IntegrationSessionEntry[] => {
+				if (!existsSync(parentSession)) return [];
+				return readFileSync(parentSession, "utf8")
+					.split("\n")
+					.filter(Boolean)
+					.flatMap((line) => {
+						const entry = JSON.parse(line) as IntegrationSessionEntry;
+						return entry.type === "custom_message" && entry.customType === "subagent_result"
+							? [entry]
+							: [];
+					});
+			};
+
+			const prematureResults = readResults();
+			assert.equal(
+				prematureResults.length,
+				0,
+				"the logical parent must receive no owner result while the nested child is non-drained; " +
+					`received ${JSON.stringify(prematureResults.map((entry) => entry.details?.resultContent))}`,
+			);
+
+			writeFileSync(gateFile, "drain\n");
+			await waitForAgentGone(ownerPane, env.workspaceId);
+
+			const ownerContents = (entries: IntegrationSessionEntry[]) =>
+				entries
+					.map((entry) => String(entry.details?.resultContent))
+					.filter((content) => content.startsWith("OWNER_"));
+			const deadline = Date.now() + PI_TIMEOUT;
+			let results = readResults();
+			while (ownerContents(results).length < 5 && Date.now() < deadline) {
+				await sleep(50);
+				results = readResults();
+			}
+			assert.deepEqual(
+				ownerContents(results),
+				["OWNER_ONE", "OWNER_TWO", "OWNER_THREE", "OWNER_FOUR", "OWNER_FINAL"],
+				"held owner results and terminal completion must arrive once in original order after descendant delivery",
 			);
 		});
 

@@ -35,6 +35,7 @@ Workflow preparation, exact approval, Worker execution, isolated read-only child
 | [`0006`](adr/0006-limit-v1-execution-effects-to-isolated-worktrees.md) | Accepted | Limit the first workflow to read-only effects. |
 | [`0007`](adr/0007-require-fresh-review-for-workflow-scripts.md) | Accepted | Require fresh review in skill-authored review workflows. |
 | [`0008`](adr/0008-adopt-pi-only-subagent-execution.md) | Accepted; implemented | Remove the external CLI adapter and make subagent execution Pi-only. |
+| [`0009`](adr/0009-durable-recursive-subagent-ownership.md) | Accepted | Durable recursive descendant ownership and exact-parent delivery. |
 
 ## Research
 

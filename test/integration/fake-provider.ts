@@ -235,7 +235,16 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 			source,
 		);
 
-	await waitForIntegrationGate(source);
+	await waitForIntegrationGate(user);
+
+	const descendantOwner = source.includes("DESCENDANT_OWNER_FIXTURE");
+	if (
+		descendantOwner &&
+		names.has("subagent_done") &&
+		((lastRole !== "user" && source.includes("OWNER_FOUR")) || /Sub-agent "Nested-[^"]+" (?:completed|failed|needs help|settled)/i.test(source) || source.includes("GRANDCHILD_DONE"))
+	) {
+		return { toolCalls: [{ name: "subagent_done", arguments: { summary: "OWNER_FINAL" } }] };
+	}
 
 	if (lastRole === "tool") {
 		if (workflowPrompt) {
@@ -315,13 +324,35 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 		const resumeCall = subagentResumeCall(user);
 		if (resumeCall) return { toolCalls: [resumeCall] };
 	}
+	if (
+		descendantOwner &&
+		names.has("subagent") &&
+		!/Sub-agent "[^"]+" launched and is now running in the background/.test(source)
+	) {
+		const gate = source.match(/INTEGRATION_DESCENDANT_GATE:\s*(\S+)/)?.[1];
+		if (gate) {
+			const suffix = gate.replace(/[^A-Za-z0-9]/g, "").slice(-12);
+			return {
+				toolCalls: [
+					{
+						name: "subagent",
+						arguments: {
+							name: `Nested-${suffix}`,
+							agent: "test-echo",
+							task: `INTEGRATION_WAIT_FOR_FILE: ${gate} Return exactly GRANDCHILD_DONE`,
+						},
+					},
+				],
+			};
+		}
+	}
 
 	if (names.has("subagent")) {
 		if (/Sub-agent "[^"]+" launched and is now running in the background/.test(source)) {
 			const continuation = source.match(
 				/\b(?:say|respond with)\s+([A-Z][A-Za-z0-9_]*)/,
 			)?.[1];
-			return { text: continuation ?? "completed" };
+			return { text: markerText(user) ?? continuation ?? "completed" };
 		}
 		const calls = subagentCalls(source);
 		if (calls.length > 0) {
@@ -334,7 +365,8 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 				],
 			};
 		}
-		return { text: "completed" };
+		// If no subagent call was requested, let the provider handle other tools
+		// (for example bash in a forked child that also auto-loaded this extension).
 	}
 
 	if (names.has("bash")) {

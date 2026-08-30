@@ -18,6 +18,7 @@ import {
   readFileSync,
   writeFileSync,
   unlinkSync,
+  readlinkSync,
 } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,6 +35,7 @@ import {
   closePane,
   interruptPane,
   shellQuote,
+  waitForPaneAbsence,
 } from "../../pi-extension/subagents/terminal.ts";
 
 type MuxBackend = "herdr";
@@ -181,6 +183,7 @@ function writeTestProviderConfig(agentDir: string): void {
 }
 
 function createTestWorkspace(cwd: string): string {
+
   const output = execFileSync(
     "herdr",
     ["workspace", "create", "--cwd", cwd, "--label", `pi-integ-${Date.now()}`, "--no-focus"],
@@ -193,6 +196,8 @@ function createTestWorkspace(cwd: string): string {
   }
   return workspaceId;
 }
+
+
 
 /**
  * Create an isolated test environment with test agent definitions.
@@ -211,8 +216,37 @@ export function createTestEnv(backend: MuxBackend): TestEnv {
   process.env.HERDR_WORKSPACE_ID = workspaceId;
   mkdirSync(agentsDir, { recursive: true });
   if (USE_TEST_PROVIDER) {
-    mkdirSync(agentDir, { recursive: true });
+    mkdirSync(join(agentDir, "extensions"), { recursive: true });
     writeTestProviderConfig(agentDir);
+    // The outer test process force-loads this checkout with `-e`, but nested Pi
+    // processes start normally. Auto-discover the same checkout in the isolated
+    // agent directory so nested launches exercise the real extension as well.
+    writeFileSync(
+      join(agentDir, "extensions", "subagents-under-test.ts"),
+      `import extension from ${JSON.stringify(EXTENSION_SOURCE)};\n` +
+      `import { mkdirSync, writeFileSync } from "node:fs";\n` +
+      `import { join } from "node:path";\n` +
+      `export default function(pi) {\n` +
+      `  if (!(process.env.PI_DENY_TOOLS || '').split(',').includes('subagent')) extension(pi);\n` +
+      `  pi.on('session_start', (_event, ctx) => {\n` +
+      `    const paneId = process.env.HERDR_PANE_ID;\n` +
+      `    const agentDir = process.env.PI_CODING_AGENT_DIR;\n` +
+      `    if (!paneId || !agentDir) return;\n` +
+      `    const sessionManager = ctx.sessionManager;\n` +
+      `    let sessionFile = sessionManager.getSessionFile();\n` +
+      `    if (!sessionFile && process.env.PI_INTEG_PERSIST_REPLACEMENTS_PANE === paneId) {\n` +
+      `      sessionFile = join(agentDir, 'replacement-sessions', sessionManager.getSessionId() + '.jsonl');\n` +
+      `      mkdirSync(join(agentDir, 'replacement-sessions'), { recursive: true });\n` +
+      `      sessionManager.setSessionFile(sessionFile);\n` +
+      `    }\n` +
+      `    if (!sessionFile) return;\n` +
+      `    const mapDir = join(agentDir, 'pane-session-map');\n` +
+      `    mkdirSync(mapDir, { recursive: true });\n` +
+      `    writeFileSync(join(mapDir, encodeURIComponent(paneId) + '.json'), JSON.stringify({ sessionId: sessionManager.getSessionId(), sessionFile }), 'utf8');\n` +
+      `  });\n` +
+      `}\n`,
+      "utf8",
+    );
     process.env.PI_CODING_AGENT_DIR = agentDir;
   }
 
@@ -245,35 +279,164 @@ export function createTestEnv(backend: MuxBackend): TestEnv {
 /**
  * Clean up all resources created during the test.
  */
-export function cleanupTestEnv(env: TestEnv): void {
-  // Close only surfaces explicitly owned by the harness. The dedicated
-  // workspace is then closed as a final safety net for extension-created panes.
-  for (const surface of env.surfaces) {
-    try {
-      closePane(surface);
-    } catch {}
-  }
+const CLEANUP_TIMEOUT = Number(process.env.PI_TEST_CLEANUP_TIMEOUT ?? "15000");
+
+interface WorkspacePane {
+  pane_id?: unknown;
+}
+
+function workspacePaneIds(workspaceId: string): string[] | null {
   try {
-    execFileSync("herdr", ["workspace", "close", env.workspaceId], { encoding: "utf8" });
-  } catch {}
-  if (env.previousWorkspaceId) {
-    process.env.HERDR_WORKSPACE_ID = env.previousWorkspaceId;
-  } else {
-    delete process.env.HERDR_WORKSPACE_ID;
+    const output = execFileSync("herdr", ["pane", "list", "--workspace", workspaceId], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const panes = JSON.parse(output)?.result?.panes;
+    if (!Array.isArray(panes)) return null;
+    return panes.flatMap((pane: WorkspacePane) =>
+      typeof pane.pane_id === "string" ? [pane.pane_id] : [],
+    );
+  } catch {
+    // Unknown is handled fail-closed by the final audit below, which refuses
+    // to delete a possibly live cwd.
+    return null;
   }
-  if (env.previousAgentDir) {
-    process.env.PI_CODING_AGENT_DIR = env.previousAgentDir;
-  } else {
-    delete process.env.PI_CODING_AGENT_DIR;
+}
+
+function workspaceExists(workspaceId: string): boolean {
+  try {
+    const output = execFileSync("herdr", ["workspace", "list"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const workspaces = JSON.parse(output)?.result?.workspaces;
+    if (!Array.isArray(workspaces)) return true;
+    return workspaces.some(
+      (workspace: { workspace_id?: unknown }) => workspace.workspace_id === workspaceId,
+    );
+  } catch {
+    return true;
   }
+}
+
+function processesUsingPath(root: string): string[] {
+  let entries: string[];
+  try {
+    entries = readdirSync("/proc");
+  } catch {
+    return ["/proc unavailable"];
+  }
+  const prefix = `${root}/`;
+  return entries.flatMap((entry) => {
+    if (!/^\d+$/.test(entry)) return [];
+    try {
+      const cwd = readlinkSync(`/proc/${entry}/cwd`);
+      return cwd === root || cwd === `${root} (deleted)` || cwd.startsWith(prefix)
+        ? [entry]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+async function waitForProcessCwdRelease(root: string): Promise<void> {
+  const deadline = Date.now() + CLEANUP_TIMEOUT;
+  let processes = processesUsingPath(root);
+  while (processes.length > 0 && Date.now() < deadline) {
+    await sleep(100);
+    processes = processesUsingPath(root);
+  }
+  if (processes.length > 0) {
+    throw new Error(
+      `Timed out waiting for integration processes to leave ${root}; ` +
+        `remaining pids=${JSON.stringify(processes)}`,
+    );
+  }
+}
+
+
+async function waitForWorkspaceTeardown(workspaceId: string): Promise<void> {
+
+  const deadline = Date.now() + CLEANUP_TIMEOUT;
+  let lastPanes: string[] | null = [];
+  while (Date.now() < deadline) {
+    lastPanes = workspacePaneIds(workspaceId);
+    if (!workspaceExists(workspaceId)) return;
+    for (const pane of lastPanes ?? []) {
+      try {
+        closePane(pane);
+      } catch {}
+    }
+    try {
+      execFileSync("herdr", ["workspace", "close", workspaceId], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+    } catch {}
+    await sleep(100);
+  }
+
+  lastPanes = workspacePaneIds(workspaceId);
+  if (lastPanes === null || lastPanes.length > 0 || workspaceExists(workspaceId)) {
+    throw new Error(
+      `Timed out cleaning integration workspace ${workspaceId}; ` +
+        `remaining panes=${JSON.stringify(lastPanes)}`,
+    );
+  }
+}
+
+/**
+ * Clean up all resources created during the test.
+ *
+ * Herdr closes panes asynchronously. Keep the test cwd until every pane in
+ * the owned workspace is gone; otherwise a still-running shell retains a
+ * deleted cwd and the workspace can survive the test's audit.
+ */
+/** Wait until a test-owned filesystem path is absent. */
+export async function waitForPathAbsence(path: string): Promise<void> {
+  const deadline = Date.now() + CLEANUP_TIMEOUT;
+  while (existsSync(path) && Date.now() < deadline) await sleep(100);
+  if (existsSync(path)) throw new Error(`Timed out waiting for test path removal: ${path}`);
+}
+
+export async function cleanupTestEnv(env: TestEnv): Promise<void> {
+
+  let cleanupError: unknown;
+  try {
+    for (const surface of env.surfaces) {
+      try {
+        closePane(surface);
+      } catch {}
+      try {
+        await waitForPaneAbsence(surface, { timeoutMs: CLEANUP_TIMEOUT, intervalMs: 50 });
+      } catch {}
+    }
+    await waitForWorkspaceTeardown(env.workspaceId);
+    await waitForProcessCwdRelease(env.dir);
+  } catch (error) {
+    cleanupError = error;
+  } finally {
+    if (env.previousWorkspaceId) {
+      process.env.HERDR_WORKSPACE_ID = env.previousWorkspaceId;
+    } else {
+      delete process.env.HERDR_WORKSPACE_ID;
+    }
+    if (env.previousAgentDir) {
+      process.env.PI_CODING_AGENT_DIR = env.previousAgentDir;
+    } else {
+      delete process.env.PI_CODING_AGENT_DIR;
+    }
+  }
+
+  if (cleanupError) throw cleanupError;
+
   for (const file of env.tempFiles) {
     try {
       unlinkSync(file);
     } catch {}
   }
-  try {
-    rmSync(env.dir, { recursive: true, force: true });
-  } catch {}
+  rmSync(env.dir, { recursive: true, force: true });
 }
 
 /**
@@ -319,11 +482,18 @@ export function startPi(
   surface: string,
   testDir: string,
   task: string,
-  opts?: { model?: string; extraArgs?: string },
+  opts?: {
+    model?: string;
+    extraArgs?: string;
+    environment?: Record<string, string>;
+  },
 ): void {
   const model = opts?.model ?? TEST_MODEL;
   const extra = opts?.extraArgs ?? "";
   const agentDir = USE_TEST_PROVIDER ? join(testDir, ".pi", "agent") : "";
+  const extensionSource = USE_TEST_PROVIDER
+    ? join(agentDir, "extensions", "subagents-under-test.ts")
+    : EXTENSION_SOURCE;
 
   // Force pi to load the working-tree extension (not an installed pi-package
   // snapshot). `-ne` disables extension auto-discovery, `-e <path>` loads the
@@ -332,9 +502,12 @@ export function startPi(
   const cmd = [
     `cd ${shellQuote(testDir)} &&`,
     agentDir ? `PI_CODING_AGENT_DIR=${shellQuote(agentDir)}` : "",
+    ...Object.entries(opts?.environment ?? {}).map(
+      ([key, value]) => `${key}=${shellQuote(value)}`,
+    ),
     `pi`,
     `-ne`,
-    `-e ${shellQuote(EXTENSION_SOURCE)}`,
+    `-e ${shellQuote(extensionSource)}`,
     `--model ${shellQuote(model)}`,
     extra,
     shellQuote(task),

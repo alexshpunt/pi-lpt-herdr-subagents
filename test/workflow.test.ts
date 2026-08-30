@@ -28,10 +28,13 @@ import {
 	disposeWorkflowReaderCheckout,
 	executeWorkflow,
 	recoverWorkflowStartup,
+  deliverRecoveredWorkflow,
 	prepareWorkflow,
 	validateWorkflowApproval,
 	type WorkflowRole,
 } from "../pi-extension/subagents/workflow.ts";
+
+import { appendLineageEvent, appendLineageInbox, registerLineage } from "../pi-extension/subagents/lineage.ts";
 
 function createRepository() {
 	const root = mkdtempSync(join(tmpdir(), "workflow-test-"));
@@ -1081,6 +1084,26 @@ return results;
 			false,
 		);
 		assert.equal(readFileSync(interruptedPath, "utf8"), interrupted);
+	});
+
+	it("waits for workflow child inbox drain before publishing restart interruption", () => {
+		const runId = "restart-with-child";
+		const runDir = join(root, ".pi", "plans", runId);
+		mkdirSync(runDir, { recursive: true });
+		const parentSession = { id: "parent-id", file: join(root, "parent.jsonl") };
+		writeFileSync(join(runDir, "run.jsonl"), JSON.stringify({ id: "approved", type: "approved", preparingSession: parentSession }) + "\n" + JSON.stringify({ id: "started", type: "started" }) + "\n");
+		const lineage = registerLineage({ artifactDir: runDir, nodeId: "node", parentWorkflowRunId: runId });
+		appendLineageEvent(lineage.rootDir, "terminal:node", "terminal", "node", { outcome: "done", resultContent: "done" });
+		const waiting = recoverWorkflowStartup(root).find((record) => record.runId === runId);
+		assert.equal(waiting?.interrupted, false);
+		appendLineageInbox(lineage.rootDir, "node", "terminal:node", { workflowRunId: runId }, { kind: "terminal", resultContent: "done" });
+		appendLineageEvent(lineage.rootDir, "terminal-delivered:node", "terminal_delivered", "node", { deliveryId: "terminal:node" });
+		const recovered = recoverWorkflowStartup(root).find((record) => record.runId === runId);
+		assert.equal(recovered?.interrupted, true);
+		let delivered = "";
+		assert.equal(deliverRecoveredWorkflow(recovered!, parentSession.id, parentSession.file, (content) => { delivered = content; }), true);
+		assert.match(delivered, /interrupted after a process restart/);
+		assert.equal(deliverRecoveredWorkflow(recovered!, parentSession.id, parentSession.file, () => { throw new Error("duplicate"); }), true);
 	});
 
 	it("uses a compare-and-set terminal gate so only one path wins", () => {

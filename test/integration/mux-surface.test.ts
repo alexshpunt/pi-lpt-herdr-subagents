@@ -10,13 +10,14 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import {
   getAvailableBackends,
   setBackend,
   restoreBackend,
   createTestEnv,
   cleanupTestEnv,
+  createSubagentPane,
   createTrackedSurface,
   createSubagentWorktree,
   getFocusedSurface,
@@ -27,6 +28,7 @@ import {
   interruptPane,
   uniqueId,
   waitForPaneReady,
+  waitForPathAbsence,
   trackTempFile,
   waitForFile,
   waitForScreen,
@@ -50,12 +52,66 @@ for (const backend of backends) {
       env = createTestEnv(backend);
     });
 
-    afterEach(() => {
-      cleanupTestEnv(env);
+    afterEach(async () => {
+      await cleanupTestEnv(env);
       restoreBackend(prevMux);
     });
 
+
+    it("leaves a foreign pi-integ worktree root untouched", async () => {
+      const worktreeDir = process.env.PI_INTEGRATION_HERDR_WORKTREE_DIR;
+      assert.ok(worktreeDir, "isolated runner must expose its owned worktree root");
+      const foreignRoot = `${worktreeDir}/pi-integ-foreign-${uniqueId()}`;
+      mkdirSync(foreignRoot, { recursive: true });
+      writeFileSync(`${foreignRoot}/sentinel`, "foreign\n");
+
+      try {
+        await cleanupTestEnv(env);
+        assert.equal(
+          existsSync(`${foreignRoot}/sentinel`),
+          true,
+          "cleanup must not scan and remove roots created after environment setup",
+        );
+      } finally {
+        rmSync(foreignRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("waits for cleanup of panes not explicitly tracked by the harness", async () => {
+
+      const leakedSurface = createSubagentPane(`untracked-${uniqueId()}`);
+      await waitForPaneReady(leakedSurface);
+
+      await cleanupTestEnv(env);
+
+      const workspaces = JSON.parse(
+        execFileSync("herdr", ["workspace", "list"], { encoding: "utf8" }),
+      ).result.workspaces as Array<{ workspace_id?: string }>;
+      assert.equal(
+        workspaces.some((workspace) => workspace.workspace_id === env.workspaceId),
+        false,
+        "owned workspace must be gone after finite teardown",
+      );
+      assert.throws(
+        () => execFileSync("herdr", ["pane", "get", leakedSurface], { encoding: "utf8" }),
+        "untracked pane must not survive workspace teardown",
+      );
+    });
+
+
+    it("does not remove a cwd until a deleted-cwd pane process is gone", async () => {
+      const leakedSurface = createSubagentPane(`deleted-cwd-${uniqueId()}`);
+      await waitForPaneReady(leakedSurface);
+      rmSync(env.dir, { recursive: true, force: true });
+
+      await cleanupTestEnv(env);
+
+      assert.equal(existsSync(env.dir), false, "test cwd should be removed after pane teardown");
+    });
+
     it("keeps focus on the current pane while creating and targeting subagent tabs", async () => {
+
+
       const focusedPane = getFocusedSurface(backend);
       assert.ok(focusedPane, "Expected herdr to report the currently focused pane");
 
@@ -123,6 +179,7 @@ for (const backend of backends) {
         assert.equal(listedWorktree.branch, branch);
       } finally {
         execFileSync("herdr", ["worktree", "remove", "--workspace", worktree.workspaceId, "--json"]);
+        await waitForPathAbsence(worktree.path);
         execFileSync("git", ["branch", "-D", branch], { cwd: env.dir, stdio: "ignore" });
       }
     });

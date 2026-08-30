@@ -28,8 +28,8 @@ policy constant is `SETTLED_TOOL_ERROR_POLICY`.
 
 | Outcome | Parent | Child |
 | --- | --- | --- |
-| `clean` | deliver | auto-exit |
-| `empty` | deliver explicit empty result | auto-exit |
+| `clean` | record for delivery after recursive descendants drain | record auto-exit intent; close after recursive descendants drain |
+| `empty` | record explicit empty result for delivery after recursive descendants drain | record auto-exit intent; close after recursive descendants drain |
 | `error` | deliver explicit error | keep open |
 | `intentional-abort` | suppress | keep open |
 | `unexpected-abort` | deliver explicit aborted problem | keep open |
@@ -56,6 +56,22 @@ Settled delivery and terminal completion are separate gates:
   settled identities. It can deliver multiple turns for one child.
 - `TerminalDeliveryGate` remains `pending`, `delivered`, or `suppressed` and
   represents the one terminal outcome. Settled delivery must never consume it.
+
+Before either gate crosses the parent boundary, the durable lineage reducer
+checks recursive descendants. A child drains only after its own terminal outcome
+and exact immediate-parent inbox delivery are recorded, and every descendant
+has drained. Failed inbox publication remains pending without timeout or
+rerouting. A pending session inbox remains bound to its recorded parent session
+ID and file, and materializes when that exact session is restored.
+
+Active materialization is protected by a durable lineage gate plus one exclusive
+claim per delivery ID. The gate compares all still-pending inbox entries for the
+same exact parent sink by activity sequence, so independent Pi processes cannot
+materialize a later settled, error, or terminal result before an earlier one. A
+competing observer waits; after a crash it checks exact-session evidence and the
+claiming process incarnation (PID plus Linux `/proc/<pid>/stat` start time) before
+acknowledging or reclaiming. Platforms without that identity fail closed, so send
+and acknowledgement retries cannot duplicate or reorder a parent result.
 
 `SettledParentPayload` carries the explicit parent fields: child id, session
 file, assistant entry id, activity sequence, turn index, outcome, text, stop

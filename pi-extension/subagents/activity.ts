@@ -204,6 +204,20 @@ function isSettledActivityEvent(
   );
 }
 
+/**
+ * Return settled boundaries in their authoritative activity order. Publication
+ * order is not stable when observers race with the child writer.
+ */
+export function orderSettledActivityEvents(
+  events: readonly SettledActivityEvent[],
+): SettledActivityEvent[] {
+  return [...events].sort(
+    (left, right) =>
+      left.sequence - right.sequence ||
+      (left.assistantId ?? "").localeCompare(right.assistantId ?? ""),
+  );
+}
+
 /** Read complete JSONL settled records and ignore one incomplete trailing line. */
 export function readSubagentSettledEventsFile(
   eventsFile: string,

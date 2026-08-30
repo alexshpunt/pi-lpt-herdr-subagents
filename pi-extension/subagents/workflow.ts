@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { Worker } from "node:worker_threads";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isLineageNodeDrained, reduceLineage } from "./lineage.ts";
 import {
 	isThinkingLevel,
 	parseExactModelRef,
@@ -611,10 +612,12 @@ const WORKFLOW_TERMINAL_EVENTS = new Set<WorkflowTerminalState>([
 ]);
 
 export interface WorkflowStartupRecord {
-	runId: string;
-	journalPath: string;
-	lastEvent?: Record<string, unknown>;
-	interrupted: boolean;
+  runId: string;
+  journalPath: string;
+  lastEvent?: Record<string, unknown>;
+  interrupted: boolean;
+  parentSessionId?: string;
+  parentSessionFile?: string;
 }
 
 function readLastValidWorkflowEvent(path: string): Record<string, unknown> | undefined {
@@ -643,6 +646,72 @@ function readLastValidWorkflowEvent(path: string): Record<string, unknown> | und
 	return undefined;
 }
 
+function readWorkflowParent(path: string): { parentSessionId?: string; parentSessionFile?: string } {
+  try {
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+      try {
+        const value = JSON.parse(line) as Record<string, unknown>;
+        if (value.type !== "approved") continue;
+        const session = value.preparingSession as Record<string, unknown> | undefined;
+        return {
+          parentSessionId: typeof session?.id === "string" ? session.id : undefined,
+          parentSessionFile: typeof session?.file === "string" ? session.file : undefined,
+        };
+      } catch {}
+    }
+  } catch {}
+  return {};
+}
+
+/** Return true while the coordinator process that owns a workflow is alive.
+ * Extension reloads keep that process and its Worker running; a full Pi
+ * restart does not. Missing or malformed PID evidence is never considered
+ * live, so recovery remains conservative.
+ */
+function workflowCoordinatorAlive(path: string): boolean {
+  let pid: unknown;
+  try {
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+      try {
+        const value = JSON.parse(line) as Record<string, unknown>;
+        if (value.type === "started") pid = value.coordinatorPid;
+      } catch {}
+    }
+  } catch {
+    return false;
+  }
+  if (!Number.isInteger(pid) || (pid as number) <= 0) return false;
+  try {
+    process.kill(pid as number, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Materialize one recovered interrupted envelope for its exact parent. */
+export function deliverRecoveredWorkflow(
+  record: WorkflowStartupRecord,
+  sessionId: string,
+  sessionFile: string,
+  send: (content: string, details: Record<string, unknown>) => void,
+): boolean {
+  if (!record.interrupted || record.parentSessionFile !== sessionFile || record.parentSessionId !== sessionId) return false;
+  try {
+    const journal = readFileSync(record.journalPath, "utf8");
+    if (journal.split("\n").some((line) => line.includes('"type":"delivery"') && line.includes('"status":"sent"'))) return true;
+    const envelope = record.lastEvent?.envelope;
+    if (!envelope || typeof envelope !== "object") return false;
+    const content = `Workflow ${record.runId} interrupted after a process restart.\n\nResult:\n${JSON.stringify(envelope)}\n\nJournal: ${record.journalPath}`;
+    send(content, { ...(envelope as Record<string, unknown>), journal: record.journalPath });
+    const separator = journal.length > 0 && !journal.endsWith("\n") ? "\n" : "";
+    appendFileSync(record.journalPath, `${separator}${JSON.stringify({ id: randomUUID(), type: "delivery", terminalEventId: record.lastEvent?.id, state: "interrupted", targetSession: sessionFile, status: "sent" })}\n`, "utf8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function workflowRepositoryIdentity(cwd: string): string {
 	return realpathSync(git(cwd, ["rev-parse", "--show-toplevel"]));
 }
@@ -653,79 +722,84 @@ function workflowRepositoryIdentity(cwd: string): string {
  * checkout or child process is touched.
  */
 export function recoverWorkflowStartup(
-	cwd: string,
-	liveRunIds: ReadonlySet<string> = new Set(),
+  cwd: string,
+  liveRunIds: ReadonlySet<string> = new Set(),
 ): WorkflowStartupRecord[] {
-	let root: string;
-	try {
-		root = workflowRepositoryIdentity(cwd);
-	} catch {
-		return [];
-	}
-	const plans = join(root, ".pi", "plans");
-	let entries;
-	try {
-		entries = readdirSync(plans, { withFileTypes: true, encoding: "utf8" });
-	} catch {
-		return [];
-	}
-	const records: WorkflowStartupRecord[] = [];
-	for (const entry of entries) {
-		if (!entry.isDirectory()) continue;
-		const runId = entry.name;
-		const journalPath = join(plans, runId, "run.jsonl");
-		let stat: ReturnType<typeof lstatSync>;
-		try {
-			stat = lstatSync(journalPath);
-		} catch {
-			continue;
-		}
-		if (!stat.isFile() || stat.isSymbolicLink()) continue;
-		const lastEvent = readLastValidWorkflowEvent(journalPath);
-		const record: WorkflowStartupRecord = {
-			runId,
-			journalPath,
-			lastEvent,
-			interrupted: false,
-		};
-		if (!lastEvent || liveRunIds.has(runId)) {
-			records.push(record);
-			continue;
-		}
-		const type = lastEvent.type;
-		if (typeof type !== "string" || type === "approved") {
-			records.push(record);
-			continue;
-		}
-		if (type === "delivery" || WORKFLOW_TERMINAL_EVENTS.has(type as WorkflowTerminalState)) {
-			records.push(record);
-			continue;
-		}
-		const event = {
-			id: randomUUID(),
-			type: "interrupted",
-			at: new Date().toISOString(),
-			envelope: {
-				runId,
-				state: "interrupted",
-				error: {
-					code: "process_restarted",
-					message: "Workflow was interrupted by a full process restart.",
-				},
-			},
-		};
-		try {
-			const journal = readFileSync(journalPath, "utf8");
-			const separator = journal.length > 0 && !journal.endsWith("\n") ? "\n" : "";
-			appendFileSync(journalPath, `${separator}${JSON.stringify(event)}\n`, "utf8");
-			record.lastEvent = event;
-			record.interrupted = true;
-		} catch {
-			// Preserve the journal and report its last known evidence.
-		}
-		records.push(record);
-	}
-	return records;
+  let root: string;
+  try { root = workflowRepositoryIdentity(cwd); } catch { return []; }
+  const plans = join(root, ".pi", "plans");
+  let entries;
+  try { entries = readdirSync(plans, { withFileTypes: true, encoding: "utf8" }); } catch { return []; }
+  const records: WorkflowStartupRecord[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const runId = entry.name;
+    const journalPath = join(plans, runId, "run.jsonl");
+    let stat: ReturnType<typeof lstatSync>;
+    try { stat = lstatSync(journalPath); } catch { continue; }
+    if (!stat.isFile() || stat.isSymbolicLink()) continue;
+    let lastEvent = readLastValidWorkflowEvent(journalPath);
+    const parent = readWorkflowParent(journalPath);
+    const record: WorkflowStartupRecord = { runId, journalPath, lastEvent, interrupted: false, ...parent };
+    if (!lastEvent || liveRunIds.has(runId)) { records.push(record); continue; }
+    const type = lastEvent.type;
+    if (typeof type !== "string" || type === "approved" || type === "delivery" || WORKFLOW_TERMINAL_EVENTS.has(type as WorkflowTerminalState)) {
+      records.push(record);
+      continue;
+    }
+    // An extension reload can run startup hooks while the owning Pi process
+    // and workflow Worker are still alive. Leave that workflow untouched;
+    // only a full process restart may create interruption evidence.
+    if (workflowCoordinatorAlive(journalPath)) {
+      records.push(record);
+      continue;
+    }
+
+    // A workflow node may outlive the coordinator process. Do not replay the
+    // script or publish an interrupted envelope until every recorded node has
+    // reached its own terminal inbox boundary.
+    const lineageDir = join(plans, runId, "lineage");
+    let blocked = false;
+    try {
+      const roots = readdirSync(lineageDir, { withFileTypes: true, encoding: "utf8" })
+        .filter((value) => value.isDirectory())
+        .map((value) => join(lineageDir, value.name));
+      for (const lineageRoot of roots) {
+        const state = reduceLineage(lineageRoot);
+        const nodes = [...state.nodes.values()].filter((node) => node.parentWorkflowRunId === runId);
+        if (nodes.some((node) => !isLineageNodeDrained(state, node.nodeId))) blocked = true;
+      }
+    } catch { blocked = false; }
+    const nextType = blocked ? "interrupted_pending" : "interrupted";
+    if (type !== nextType) {
+      const event = {
+        id: randomUUID(),
+        type: nextType,
+        at: new Date().toISOString(),
+        ...(nextType === "interrupted" ? {
+          envelope: {
+            runId,
+            state: "interrupted",
+            error: { code: "process_restarted", message: "Workflow was interrupted by a full process restart." },
+          },
+        } : {}),
+      };
+      try {
+        const journal = readFileSync(journalPath, "utf8");
+        const separator = journal.length > 0 && !journal.endsWith("\n") ? "\n" : "";
+        appendFileSync(journalPath, `${separator}${JSON.stringify(event)}\n`, "utf8");
+        lastEvent = event;
+        record.lastEvent = event;
+        record.interrupted = nextType === "interrupted";
+      } catch {
+        // Preserve the journal and report its last known evidence.
+      }
+    } else {
+      record.interrupted = type === "interrupted";
+    }
+    records.push(record);
+  }
+  return records;
 }
 
 export function createWorkflowJournal(

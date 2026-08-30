@@ -91,8 +91,7 @@ git diff --check
 
 Run LSP diagnostics on every changed TypeScript file; lint and tests do not catch every TypeScript error.
 
-For Herdr or lifecycle changes, run the deterministic suite from inside Herdr. Run only one integration suite at a time on a Herdr instance; concurrent suites compete for terminal focus and process capacity and can cause false timeouts or leaked test resources.
-
+For Herdr or lifecycle changes, run the deterministic suite from inside Herdr. The shipped runner creates a separate test-owned headless Herdr server with private socket, config, state, and worktree paths. It clears inherited Herdr identity, fails closed if its endpoint cannot be bootstrapped safely, and never uses or cleans the persistent user server. Concurrent runs have separate endpoints; no shared Herdr test slot needs manual coordination.
 When a test reports that a `pi-integ-*` worktree path already exists, first check whether the same test already created that worktree and the deterministic provider dispatched the tool twice after asynchronous completion. Deterministic providers must make each requested tool call one-shot after its started result appears. Remove only verified test-owned residue after confirming that no workspace or process owns it.
 
 ```bash

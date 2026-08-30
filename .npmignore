@@ -10,3 +10,7 @@ sessions/
 run.jsonl
 .reviews/
 *.tgz
+.lpt/
+.mesh/
+.agents/
+.tmp/

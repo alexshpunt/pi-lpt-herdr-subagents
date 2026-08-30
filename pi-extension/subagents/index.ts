@@ -63,6 +63,7 @@ import {
 	formatApprovalPacket,
 	prepareWorkflow,
 	recoverWorkflowStartup,
+  deliverRecoveredWorkflow,
 	sameWorkflowCandidate,
 	validateWorkflowApproval,
 	type PendingWorkflow,
@@ -93,6 +94,7 @@ import {
 import {
 	readSubagentActivityFile,
   readSubagentSettledEventsFile,
+  orderSettledActivityEvents,
 	type ActivityReadResult,
 	type SettledActivityEvent,
 	type SubagentActivityState,
@@ -130,6 +132,22 @@ import {
 	type SessionBaselineCursor,
 } from "./settled-contract.ts";
 import { listHerdrWorktrees } from "./herdr.ts";
+import {
+  appendLineageEvent,
+  appendLineageInbox,
+  claimLineageInboxMaterialization,
+  completeLineageInboxMaterialization,
+  releaseLineageInboxMaterialization,
+  hasLineageEvent,
+  discoverLineageRoots,
+  hasUndrainedDescendants,
+  lineageEnvironment,
+  pendingLineageInboxes,
+  readLineageAttachment,
+  reduceLineage,
+  registerLineage,
+  type LineageRegistration,
+} from "./lineage.ts";
 import {
 	captureWorktreeHandoff,
 	launchPiSubagent,
@@ -331,6 +349,7 @@ const SPAWNING_TOOLS = new Set([
 	"subagent_interrupt",
 	"subagents_list",
 	"subagent_resume",
+	"subagent_cancel",
 ]);
 
 /**
@@ -875,6 +894,7 @@ function finalizeSubagentSurface(
 	running: RunningSubagent,
 	state: "ready_for_review" | "failed" | "needs_help",
 	ignoreCloseError = false,
+	closeOrdinaryPane = true,
 ): WorktreeHandoff | undefined {
 	if (running.worktree) {
 		let handoff = captureWorktreeHandoff(running.worktree);
@@ -894,6 +914,7 @@ function finalizeSubagentSurface(
 		return handoff;
 	}
 
+	if (!closeOrdinaryPane) return undefined;
 	try {
 		closePane(running.surface);
 	} catch (error) {
@@ -971,7 +992,10 @@ function sendSubagentResult(
 	content: string,
 	details: Record<string, unknown>,
 ): void {
-	const resultContent = boundResultPresentation(content, "");
+	const resultContent =
+		typeof details.resultContent === "string"
+			? details.resultContent
+			: boundResultPresentation(content, "");
 	const promptContent = boundResultPresentation(
 		`${resultContent}\n\n${RESULT_CONTINUATION_PROMPT}`,
 		"",
@@ -1086,6 +1110,7 @@ interface SubagentResult {
 
 interface PendingTerminalDelivery {
   finalAssistant?: SettledDeliveryIdentity;
+  resultContent?: string;
   queued: boolean;
   finalize: (contentAlreadyDelivered: boolean) => void;
 }
@@ -1094,6 +1119,7 @@ interface PendingTerminalDelivery {
  * State for a launched (but not yet completed) subagent.
  */
 interface RunningSubagent {
+	lineage?: LineageRegistration;
 	id: string;
 	name: string;
 	task: string;
@@ -1131,6 +1157,8 @@ interface RunningSubagent {
 	runtimePlan: ResolvedRuntimePlan | undefined;
   /** Pending terminal parent enqueue; retained until sendMessage succeeds. */
   pendingTerminalDelivery?: PendingTerminalDelivery;
+  cleanupPending?: boolean;
+  cancellationAttempt?: Promise<boolean>;
 	worktree?: WorktreeLaunch;
 }
 
@@ -1141,6 +1169,7 @@ interface WorkflowChildHandle {
 
 interface WorkflowOwner {
 	runId: string;
+	lineageRoot?: LineageRegistration;
 	candidate: PendingWorkflow;
 	children: Map<string, WorkflowChildHandle>;
 	controller: AbortController;
@@ -1195,12 +1224,188 @@ if (runtime.workflowStartupScanned === undefined) {
 }
 const runningSubagents = runtime.runningSubagents;
 
+
+/** Materialize inbox records left by a crash into this exact session once. */
+function restorePendingLineageInboxes(ctx: ExtensionContext): void {
+	const manager = ctx.sessionManager;
+	if (
+		!manager ||
+		typeof manager.getSessionId !== "function" ||
+		typeof manager.getSessionFile !== "function" ||
+		typeof manager.getSessionDir !== "function"
+	) return;
+	const sessionId = manager.getSessionId();
+	const sessionFile = manager.getSessionFile();
+	if (!sessionFile) return;
+	if (!runtime.pi) return;
+	const roots = discoverLineageRoots(manager.getSessionDir(), sessionFile);
+	for (const rootDir of roots) {
+		for (const inbox of pendingLineageInboxes(rootDir, sessionId, sessionFile)) {
+      const resultContent = inbox.payload.resultContent;
+      if (typeof resultContent !== "string") continue;
+      const claim = claimLineageInboxMaterialization({
+        rootDir,
+        deliveryId: inbox.deliveryId,
+        nodeId: inbox.nodeId,
+        hasExactSessionEvidence: () => sessionContainsDelivery(sessionFile, inbox.deliveryId),
+      });
+      if (claim.status !== "acquired") continue;
+      try {
+        sendSubagentResult(runtime.pi, resultContent, {
+          kind: inbox.payload.kind ?? "terminal",
+          childId: inbox.nodeId,
+          sessionFile: inbox.sessionFile,
+          deliveryId: inbox.deliveryId,
+          resultContent,
+        });
+        if (!completeLineageInboxMaterialization(rootDir, inbox.deliveryId, inbox.nodeId, claim.token)) {
+          throw new Error("Unable to publish inbox materialization acknowledgement");
+        }
+      } catch {
+        releaseLineageInboxMaterialization({
+          rootDir,
+          deliveryId: inbox.deliveryId,
+          nodeId: inbox.nodeId,
+          token: claim.token,
+          hasExactSessionEvidence: () => sessionContainsDelivery(sessionFile, inbox.deliveryId),
+        });
+      }
+			}
+		}
+}
+/** Rebuild direct-child watchers from durable launch metadata after a process restart. */
+function startRecoveredWatcher(running: RunningSubagent): void {
+  const controller = new AbortController();
+  running.abortController = controller;
+  void watchSubagent(running, controller.signal).then((result) => {
+    if (result.ping) {
+      queueTerminalDelivery(running, undefined, () => {
+        if (runtime.pi) runtime.pi.sendMessage({ customType: "subagent_ping", content: result.ping?.message ?? "Recovered subagent needs help.", display: true, details: { name: running.name, childId: running.id, sessionFile: running.sessionFile } }, { triggerTurn: true, deliverAs: "steer" });
+      }, result.ping.message);
+      return;
+    }
+    const summary = result.summary ?? result.errorMessage ?? "Recovered subagent completed.";
+    const presentation = resolveResultPresentation({ ...result, summary, sessionFile: running.sessionFile }, running.name, running.runtimePlan?.runtimeMismatch);
+    queueTerminalDelivery(running, terminalAssistantIdentityFor(running), () => {
+      if (runtime.pi) sendSubagentResult(runtime.pi, presentation, { name: running.name, task: running.task, childId: running.id, exitCode: result.exitCode, sessionFile: running.sessionFile, deliveryId: `terminal:${running.id}`, resultContent: summary });
+    }, summary);
+  }).catch(() => {
+    // Unknown inspection or a deliberate parent shutdown leaves durable ownership pending.
+  });
+}
+
+/** Rebuild direct-child watchers from durable launch metadata after a process restart. */
+function startRecoveredWorkflowWatcher(running: RunningSubagent, rootDir: string, runId: string, ctx: ExtensionContext): void {
+  const controller = new AbortController();
+  running.abortController = controller;
+  void watchSubagent(running, controller.signal).then((result) => {
+    const summary = result.summary ?? result.errorMessage ?? "Recovered workflow node completed.";
+    appendLineageEvent(rootDir, `terminal:${running.id}`, "terminal", running.id, {
+      outcome: result.exitCode === 0 ? "success" : "failure", resultContent: summary,
+    });
+    appendLineageInbox(rootDir, running.id, `terminal:${running.id}`, { workflowRunId: runId }, { kind: "terminal", resultContent: summary });
+    appendLineageEvent(rootDir, `terminal-delivered:${running.id}`, "terminal_delivered", running.id, { deliveryId: `terminal:${running.id}` });
+    const manager = ctx.sessionManager as any;
+    const sessionId = typeof manager?.getSessionId === "function" ? manager.getSessionId() : "";
+    const sessionFile = typeof manager?.getSessionFile === "function" ? manager.getSessionFile() : "";
+    if (sessionId && sessionFile) for (const record of recoverWorkflowStartup(ctx.cwd)) {
+      deliverRecoveredWorkflow(record, sessionId, sessionFile, (content, details) => {
+        runtime.pi?.sendMessage({ customType: "herdr_workflow_result", content, display: true, details }, { triggerTurn: true, deliverAs: "steer" });
+      });
+    }
+  }).catch(() => {});
+}
+
+function restoreLineageRuntime(ctx: ExtensionContext): void {
+  const manager = ctx.sessionManager;
+  if (!manager || typeof manager.getSessionId !== "function" || typeof manager.getSessionFile !== "function" || typeof manager.getSessionDir !== "function") return;
+  const sessionId = manager.getSessionId();
+  const sessionFile = manager.getSessionFile();
+  if (!sessionFile) return;
+  const attachment = readLineageAttachment(sessionFile);
+  const roots = discoverLineageRoots(manager.getSessionDir(), sessionFile);
+  try {
+    for (const run of readdirSync(join(ctx.cwd, ".pi", "plans"), { withFileTypes: true })) {
+      if (!run.isDirectory()) continue;
+      for (const lineage of readdirSync(join(ctx.cwd, ".pi", "plans", run.name, "lineage"), { withFileTypes: true })) {
+        if (lineage.isDirectory()) roots.push(join(ctx.cwd, ".pi", "plans", run.name, "lineage", lineage.name));
+      }
+    }
+  } catch {}
+  for (const rootDir of new Set(roots)) {
+    const state = reduceLineage(rootDir);
+    for (const node of state.nodes.values()) {
+      const isAttachedNode = attachment?.rootDir === rootDir && attachment.nodeId === node.nodeId;
+      // Workflow nodes publish into the workflow-run inbox; never expose their
+      // intermediate result through the originating session watcher.
+      const workflowNode = !!node.parentWorkflowRunId;
+      const cancellationPending = !!node.cancellation?.intent && !node.terminal;
+      if (!isAttachedNode && (node.parentSessionId !== sessionId || node.parentSessionFile !== sessionFile)) continue;
+      if (!node.sessionFile || !node.surface) continue;
+      if (!workflowNode && !cancellationPending && (!node.activityFile || !node.settledEventsFile)) continue;
+      const drained = node.terminal && node.terminalDelivered;
+      if (drained && !node.cleanupPending) continue;
+      if (runningSubagents.has(node.nodeId)) continue;
+      let baseline: SessionBaselineCursor;
+      try { baseline = captureSessionBaseline(node.sessionFile); } catch { baseline = { sessionFile: node.sessionFile, entryCount: 0, leafId: null, assistantEntryIds: [] }; }
+      const lineage: LineageRegistration = {
+        rootDir,
+        rootId: state.rootId,
+        nodeId: node.nodeId,
+        ...(node.parentNodeId ? { parentNodeId: node.parentNodeId } : {}),
+        ...(node.parentSessionId ? { parentSessionId: node.parentSessionId } : {}),
+        ...(node.parentSessionFile ? { parentSessionFile: node.parentSessionFile } : {}),
+        ...(node.parentWorkflowRunId ? { parentWorkflowRunId: node.parentWorkflowRunId } : {}),
+        launchKind: (node.launchKind as LineageRegistration["launchKind"]) ?? "fresh",
+      };
+      const running: RunningSubagent = {
+        lineage,
+        id: node.nodeId,
+        name: node.name ?? node.nodeId,
+        task: node.task ?? "recovered subagent",
+        agent: node.agent,
+        surface: node.surface,
+        startTime: node.startTime ?? Date.now(),
+        sessionFile: node.sessionFile,
+        activityFile: node.activityFile,
+        settledEventsFile: node.settledEventsFile,
+        sessionBaseline: baseline,
+        interactive: false,
+        runtimePlan: undefined,
+        lifecycle: createLifecycle(node.startTime ?? Date.now()),
+        cleanupPending: !!node.cleanupPending,
+      };
+      runningSubagents.set(running.id, running);
+      if (cancellationPending) {
+        void attemptPendingCancellation(running);
+      } else if (workflowNode && !drained) {
+        startRecoveredWorkflowWatcher(running, rootDir, node.parentWorkflowRunId!, ctx);
+      } else if (node.terminal && !node.terminalDelivered) {
+        queueTerminalDelivery(running, undefined, () => {
+          if (runtime.pi && runtime.latestCtx?.sessionManager.getSessionId() === sessionId && runtime.latestCtx.sessionManager.getSessionFile() === sessionFile) {
+            sendSubagentResult(runtime.pi, node.terminal?.resultContent ?? "Recovered subagent terminal result.", { name: running.name, childId: running.id, sessionFile: running.sessionFile, resultContent: node.terminal?.resultContent ?? "Recovered subagent terminal result." });
+          }
+        }, node.terminal.resultContent);
+      } else if (!drained) {
+        startRecoveredWatcher(running);
+      } else {
+        // Cleanup-pending rows are retried after restart without redelivering.
+        if (tryCleanupSubagentSurface(running)) runningSubagents.delete(running.id);
+      }
+    }
+  }
+}
+
 export function shouldPreserveSubagentsOnShutdown(reason: unknown): boolean {
+	// A deliberate quit (and an unknown shutdown reason) must not turn durable
+	// descendants into cancellations. Explicit cancellation owns its own gate.
 	return (
+		reason == null ||
 		reason === "reload" ||
 		reason === "new" ||
 		reason === "resume" ||
-		reason === "fork"
+		reason === "fork" ||
+		reason === "quit"
 	);
 }
 
@@ -1386,9 +1591,12 @@ function renderSubagentWidgetLines(
 		const runtimeTag = agent.runtimePlan
 			? `${agent.runtimePlan.modelId}|${agent.runtimePlan.thinking} · `
 			: "";
+		const lifecycleLabel = agent.cleanupPending
+			? "cleanup pending"
+			: formatLifecycleWidgetLabel(projection, now).trim();
 		const right = statusConfig.enabled
-			? ` ${runtimeTag}${formatLifecycleWidgetLabel(projection, now).trim()} `
-			: ` ${runtimeTag}starting… `;
+			? ` ${runtimeTag}${lifecycleLabel} `
+			: ` ${runtimeTag}${agent.cleanupPending ? "cleanup pending" : "starting…"} `;
 
 		lines.push(borderLine(left, right, width, accent));
 	}
@@ -1631,10 +1839,10 @@ function terminalAssistantIdentityFor(
 	// the latest settled boundary, so correlate terminal cleanup with the
 	// durable settled identity instead of redelivering its text.
 	if (finalAssistant.stopReason === "toolUse" && running.settledEventsFile) {
-		const events = readSubagentSettledEventsFile(
+		const events = orderSettledActivityEvents(readSubagentSettledEventsFile(
 			running.settledEventsFile,
 			running.id,
-		).sort((left, right) => left.sequence - right.sequence);
+		));
 		const assistantPool = settledAssistants(running);
 		const correlated = correlateSettledAssistants(events, assistantPool);
 		let latestSettledAssistant: NewestAssistantEntry | null = null;
@@ -1687,6 +1895,25 @@ function settledPresentation(
 	);
 }
 
+/**
+ * Do not start releasing held turns from a partial session snapshot. The
+ * activity sidecar is flushed before its settled record, and observers from
+ * different Pi processes can therefore see the latest assistant set in a
+ * different order. Every non-control assistant must have a matching durable
+ * settled boundary before the release batch is allowed to enter the queue.
+ */
+function hasCompleteSettledEvidence(
+  events: readonly SettledActivityEvent[],
+  assistants: readonly NewestAssistantEntry[],
+  correlated: ReadonlyMap<number, NewestAssistantEntry>,
+): boolean {
+  if (events.length === 0) return false;
+  const matched = new Set([...correlated.values()].map((assistant) => assistant.id));
+  return assistants.every((assistant) =>
+    assistant.stopReason === "toolUse" || matched.has(assistant.id),
+  );
+}
+
 function settledAssistants(running: RunningSubagent): NewestAssistantEntry[] {
 	if (!running.sessionBaseline) return [];
 	try {
@@ -1698,15 +1925,51 @@ function settledAssistants(running: RunningSubagent): NewestAssistantEntry[] {
 	}
 }
 
+function exactParentSessionActive(running: RunningSubagent): boolean {
+  const lineage = running.lineage;
+  if (!lineage) return true;
+  if (lineage.parentWorkflowRunId) return false;
+  if (!lineage.parentSessionId || !lineage.parentSessionFile) return false;
+  const ctx = runtime.latestCtx;
+  if (!ctx) return false;
+  try {
+    return ctx.sessionManager.getSessionId() === lineage.parentSessionId &&
+      ctx.sessionManager.getSessionFile() === lineage.parentSessionFile;
+  } catch {
+    return false;
+  }
+}
+
+function sessionContainsDelivery(sessionFile: string, deliveryId: string): boolean {
+  try { return readFileSync(sessionFile, "utf8").includes(deliveryId); } catch { return false; }
+}
+
+function lineageStateFor(running: RunningSubagent) {
+  return running.lineage ? reduceLineage(running.lineage.rootDir) : undefined;
+}
+
+
+/** Wait for durable descendant delivery before releasing a terminal result. */
+async function waitForDescendantDrain(running: Pick<RunningSubagent, "lineage" | "id">): Promise<void> {
+	while (running.lineage && hasUndrainedDescendants(reduceLineage(running.lineage.rootDir), running.id)) {
+		await new Promise<void>((resolve) => setTimeout(resolve, 50));
+	}
+}
+
 function observeSettledRunningSubagent(running: RunningSubagent): void {
   if (!running.settledEventsFile) return;
-	let events = readSubagentSettledEventsFile(
+	let events = orderSettledActivityEvents(readSubagentSettledEventsFile(
 		running.settledEventsFile,
 		running.id,
-	).sort((left, right) => left.sequence - right.sequence);
+	));
 	if (events.length === 0) return;
 	const assistantPool = settledAssistants(running);
 	const correlated = correlateSettledAssistants(events, assistantPool);
+	const lineage = lineageStateFor(running);
+	const ownsDescendant = lineage
+		? [...lineage.nodes.values()].some((node) => node.parentNodeId === running.id)
+		: false;
+	if (ownsDescendant && !hasCompleteSettledEvidence(events, assistantPool, correlated)) return;
 	const gate = running.lifecycle.settledDelivery ?? {
 		lastActivitySequence: null,
 		delivered: new Set<string>(),
@@ -1740,41 +2003,100 @@ function observeSettledRunningSubagent(running: RunningSubagent): void {
 		identity,
       activitySequence: event.sequence,
       allowOlder: true,
-		enqueue: () => {
+		enqueue: async () => {
+			const deliveryId = `settled:${running.id}:${event.sequence}:${assistant.id}`;
+			await waitForDescendantDrain(running);
+			if (running.lineage) {
+				if (!appendLineageInbox(running.lineage.rootDir, running.id, deliveryId, {
+					sessionId: running.lineage.parentSessionId,
+					sessionFile: running.lineage.parentSessionFile,
+					workflowRunId: running.lineage.parentWorkflowRunId,
+				}, { kind: "settled", resultContent: assistant.text ?? "", activitySequence: event.sequence })) {
+					throw new Error("Unable to publish settled inbox");
+				}
+        const parentActive = exactParentSessionActive(running) && Boolean(runtime.pi);
+        if (parentActive) {
+          const claim = claimLineageInboxMaterialization({
+            rootDir: running.lineage.rootDir,
+            deliveryId,
+            nodeId: running.id,
+            hasExactSessionEvidence: () => sessionContainsDelivery(running.lineage!.parentSessionFile!, deliveryId),
+          });
+          if (claim.status === "busy") throw new Error("Settled inbox materialization is claimed by another observer");
+          if (claim.status === "acquired") {
+            try {
+              sendSubagentResult(runtime.pi!, settledPresentation(running, assistant, outcome), {
+                kind: "settled", name: running.name, task: running.task, agent: running.agent,
+                childId: running.id, sessionFile: running.sessionFile, assistantEntryId: assistant.id,
+                deliveryId, activitySequence: event.sequence, turnIndex: event.turnIndex ?? null,
+                outcome, text: assistant.text, resultContent: assistant.text ?? "", stopReason: assistant.stopReason,
+                ...(assistant.errorMessage ? { errorMessage: assistant.errorMessage } : {}), empty: assistant.empty,
+              });
+              if (!completeLineageInboxMaterialization(running.lineage.rootDir, deliveryId, running.id, claim.token)) {
+                throw new Error("Unable to publish settled materialization acknowledgement");
+              }
+            } catch (error) {
+              releaseLineageInboxMaterialization({
+                rootDir: running.lineage.rootDir,
+                deliveryId,
+                nodeId: running.id,
+                token: claim.token,
+                hasExactSessionEvidence: () => sessionContainsDelivery(running.lineage!.parentSessionFile!, deliveryId),
+              });
+              throw error;
+            }
+          }
+        }
+				appendLineageEvent(running.lineage.rootDir, deliveryId, "settled_delivered", running.id, { resultId: assistant.id, activitySequence: event.sequence });
+				return;
+			}
 			if (!runtime.pi) throw new Error("Parent API is unavailable");
-			const completionApi = runtime.pi;
-        sendSubagentResult(
-          completionApi,
-          settledPresentation(running, assistant, outcome),
-          {
-				kind: "settled",
-				name: running.name,
-				task: running.task,
-				agent: running.agent,
-				childId: running.id,
-				sessionFile: running.sessionFile,
-				assistantEntryId: assistant.id,
-            activitySequence: event.sequence,
-            turnIndex: event.turnIndex ?? null,
-				outcome,
-				text: assistant.text,
-				stopReason: assistant.stopReason,
-            ...(assistant.errorMessage
-              ? { errorMessage: assistant.errorMessage }
-              : {}),
-				empty: assistant.empty,
-          },
-        );
-      },
+			sendSubagentResult(runtime.pi, settledPresentation(running, assistant, outcome), {
+				kind: "settled", name: running.name, task: running.task, agent: running.agent,
+				childId: running.id, sessionFile: running.sessionFile, assistantEntryId: assistant.id,
+				activitySequence: event.sequence, turnIndex: event.turnIndex ?? null, outcome,
+				text: assistant.text, resultContent: assistant.text ?? "", stopReason: assistant.stopReason,
+				...(assistant.errorMessage ? { errorMessage: assistant.errorMessage } : {}), empty: assistant.empty,
+			});
+		},
     }).catch(() => {
       // A failed parent enqueue leaves this event retryable on the next poll.
 			});
   }
 }
 
+function tryCleanupSubagentSurface(running: RunningSubagent): boolean {
+  if (running.worktree) return true;
+  try {
+    finalizeSubagentSurface(running, "ready_for_review", false, true);
+    running.cleanupPending = false;
+    if (running.lineage) {
+      const ackId = `cleanup-done:${running.id}`;
+      if (!appendLineageEvent(running.lineage.rootDir, ackId, "cleanup_done", running.id) && !hasLineageEvent(running.lineage.rootDir, ackId, "cleanup_done")) throw new Error("Unable to publish cleanup acknowledgement");
+    }
+    return true;
+  } catch (error) {
+    const text = String(error);
+    if (text.includes("pane_not_found") || text.includes("not found")) {
+      running.cleanupPending = false;
+      if (running.lineage) {
+        const ackId = `cleanup-done:${running.id}`;
+        if (!appendLineageEvent(running.lineage.rootDir, ackId, "cleanup_done", running.id) && !hasLineageEvent(running.lineage.rootDir, ackId, "cleanup_done")) throw new Error("Unable to publish cleanup acknowledgement");
+      }
+      return true;
+    }
+    running.cleanupPending = true;
+    if (running.lineage) appendLineageEvent(running.lineage.rootDir, `cleanup-pending:${running.id}`, "cleanup_pending", running.id, { error: text });
+    return false;
+  }
+}
+
 function attemptPendingTerminalDelivery(running: RunningSubagent): void {
   const pending = running.pendingTerminalDelivery;
   if (!pending || pending.queued) return;
+  // Queue the terminal job even when a descendant is still active. The owner
+  // watcher may finish as soon as its pane closes, so a pre-queue return would
+  // strand the terminal result with no later observer to retry it.
   pending.queued = true;
   const ledger = running.lifecycle.settledDelivery ?? {
     lastActivitySequence: null,
@@ -1786,25 +2108,79 @@ function attemptPendingTerminalDelivery(running: RunningSubagent): void {
     ledger,
     childId: running.id,
     finalAssistant: pending.finalAssistant,
-    finalize: (contentAlreadyDelivered) => {
-      pending.finalize(contentAlreadyDelivered);
+    finalize: async (contentAlreadyDelivered) => {
+      // The terminal observer can run before the last descendant observer has
+      // published its terminal-delivered event. Wait here rather than relying
+      // on another tick from a pane that may already be gone.
+      await waitForDescendantDrain(running);
+      const deliveryId = `terminal:${running.id}`;
+      if (running.lineage) {
+        if (!appendLineageEvent(running.lineage.rootDir, deliveryId, "terminal", running.id, {
+          outcome: "terminal", ...(pending.resultContent ? { resultContent: pending.resultContent } : {}),
+        })) {
+          const existing = reduceLineage(running.lineage.rootDir).nodes.get(running.id)?.terminal;
+          if (!existing) throw new Error("Unable to publish terminal lineage event");
+        }
+        if (!appendLineageInbox(running.lineage.rootDir, running.id, deliveryId, {
+          sessionId: running.lineage.parentSessionId,
+          sessionFile: running.lineage.parentSessionFile,
+          workflowRunId: running.lineage.parentWorkflowRunId,
+        }, { kind: "terminal", ...(pending.resultContent ? { resultContent: pending.resultContent } : {}) })) {
+          throw new Error("Unable to publish terminal inbox");
+        }
+        const parentActive = exactParentSessionActive(running) && Boolean(runtime.pi);
+        if (parentActive) {
+          const claim = claimLineageInboxMaterialization({
+            rootDir: running.lineage.rootDir,
+            deliveryId,
+            nodeId: running.id,
+            hasExactSessionEvidence: () => sessionContainsDelivery(running.lineage!.parentSessionFile!, deliveryId),
+          });
+          if (claim.status === "busy") throw new Error("Terminal inbox materialization is claimed by another observer");
+          if (claim.status === "acquired") {
+            try {
+              pending.finalize(contentAlreadyDelivered);
+              if (!completeLineageInboxMaterialization(running.lineage.rootDir, deliveryId, running.id, claim.token)) {
+                throw new Error("Unable to publish terminal materialization acknowledgement");
+              }
+            } catch (error) {
+              releaseLineageInboxMaterialization({
+                rootDir: running.lineage.rootDir,
+                deliveryId,
+                nodeId: running.id,
+                token: claim.token,
+                hasExactSessionEvidence: () => sessionContainsDelivery(running.lineage!.parentSessionFile!, deliveryId),
+              });
+              throw error;
+            }
+          }
+        }
+      } else {
+        pending.finalize(contentAlreadyDelivered);
+      }
+      const delivered = !running.lineage || appendLineageEvent(running.lineage.rootDir, `terminal-delivered:${running.id}`, "terminal_delivered", running.id, { deliveryId });
+      if (!delivered && !reduceLineage(running.lineage!.rootDir).nodes.get(running.id)?.terminalDelivered) throw new Error("Unable to publish terminal delivery evidence");
       running.pendingTerminalDelivery = undefined;
       running.lifecycle = markDelivery(running.lifecycle, "delivered");
-      runningSubagents.delete(running.id);
+      const cleaned = tryCleanupSubagentSurface(running);
+      running.cleanupPending = !cleaned;
+      if (cleaned) runningSubagents.delete(running.id);
       updateWidget();
-		},
-	}).catch(() => {
+    },
+  }).catch(() => {
     if (running.pendingTerminalDelivery === pending) pending.queued = false;
-	});
+    updateWidget();
+  });
 }
 
 function queueTerminalDelivery(
   running: RunningSubagent,
   finalAssistant: SettledDeliveryIdentity | undefined,
   finalize: (contentAlreadyDelivered: boolean) => void,
+  resultContent?: string,
 ): void {
   if (running.pendingTerminalDelivery) return;
-  running.pendingTerminalDelivery = { finalAssistant, queued: false, finalize };
+  running.pendingTerminalDelivery = { finalAssistant, resultContent, queued: false, finalize };
   attemptPendingTerminalDelivery(running);
 }
 
@@ -1830,7 +2206,12 @@ function observeRunningSubagent(
 		observedAt,
 	);
 	observeSettledRunningSubagent(running);
+  if (running.lineage && reduceLineage(running.lineage.rootDir).nodes.get(running.id)?.cancellation?.intent) void attemptPendingCancellation(running);
 	attemptPendingTerminalDelivery(running);
+	if (running.cleanupPending && tryCleanupSubagentSurface(running)) {
+		runningSubagents.delete(running.id);
+		updateWidget();
+	}
 }
 
 function resolveInterruptTarget(params: {
@@ -1887,6 +2268,99 @@ interface SubagentInterruptDetails {
 	id?: string;
 	name?: string;
 	status?: "interrupt_requested";
+}
+
+interface SubagentCancelDetails {
+	error?: string;
+	id?: string;
+	name?: string;
+	status?: "cancelled" | "cancellation_pending";
+}
+
+function sameProcessIdentity(captured: readonly number[], current: readonly number[]): boolean {
+  // Processes may exit between restarts; a newly appearing PID means the pane
+  // identity was reused and must not be terminated by this cancellation.
+  return current.every((pid) => captured.includes(pid));
+}
+
+/** Retry a durable cancellation intent, failing closed on uncertain identity. */
+async function attemptPendingCancellation(running: RunningSubagent): Promise<boolean> {
+  if (!running.lineage) return false;
+  if (running.cancellationAttempt) return running.cancellationAttempt;
+  const attempt = (async () => {
+    const lineage = running.lineage!;
+    const state = reduceLineage(lineage.rootDir);
+    const node = state.nodes.get(running.id);
+    if (!node?.cancellation?.intent || node.terminal) return false;
+    let pids = node.cancellation.pids;
+    if (pids.length === 0) {
+      let info: { pids: number[] };
+      try { info = getPaneProcessInfo(node.cancellation.surface ?? running.surface); } catch { return false; }
+      if (info.pids.length === 0) return false;
+      if (!appendLineageEvent(lineage.rootDir, `cancel-identity:${running.id}`, "cancel_identity", running.id, { surface: node.cancellation.surface ?? running.surface, pids: info.pids })) return false;
+      pids = info.pids;
+    } else {
+      try {
+        const current = getPaneProcessInfo(node.cancellation.surface ?? running.surface);
+        if (current.pids.length > 0 && !sameProcessIdentity(pids, current.pids)) return false;
+      } catch {
+        // The pane may already be gone; the persisted PID identity remains the
+        // only safe identity to prove has exited.
+      }
+    }
+    try { closePane(node.cancellation.surface ?? running.surface); } catch {}
+    let gone: boolean;
+    try { gone = await waitForPaneAbsence(node.cancellation.surface ?? running.surface, { timeoutMs: 5_000, intervalMs: 50 }); } catch { gone = false; }
+    let survivors: number[];
+    try { survivors = await waitForProcessesExit(pids, { timeoutMs: 5_000, intervalMs: 50 }); } catch { survivors = pids; }
+    if (!gone || survivors.length > 0) return false;
+    const after = reduceLineage(lineage.rootDir).nodes.get(running.id);
+    if (after?.terminal) return false;
+    if (!appendLineageEvent(lineage.rootDir, `cancel-proven:${running.id}`, "cancel_proven", running.id, { surface: node.cancellation.surface ?? running.surface, pids })) {
+      const proven = reduceLineage(lineage.rootDir).nodes.get(running.id)?.cancellation?.proven;
+      if (!proven) return false;
+    }
+    if (!appendLineageEvent(lineage.rootDir, `terminal:${running.id}`, "terminal", running.id, { outcome: "cancelled", resultContent: "Subagent cancelled." })) {
+      return !!reduceLineage(lineage.rootDir).nodes.get(running.id)?.terminal;
+    }
+    if (!running.pendingTerminalDelivery) {
+      running.pendingTerminalDelivery = {
+        finalAssistant: undefined,
+        resultContent: "Subagent cancelled.",
+        queued: false,
+        finalize: (_contentAlreadyDelivered) => {
+          if (!exactParentSessionActive(running)) return;
+          if (runtime.pi) sendSubagentResult(runtime.pi, "Subagent cancelled.", { name: running.name, task: running.task, childId: running.id, exitCode: 1, sessionFile: running.sessionFile, deliveryId: `terminal:${running.id}`, resultContent: "Subagent cancelled.", cancellation: true });
+        },
+      };
+    }
+    attemptPendingTerminalDelivery(running);
+    return true;
+  })().finally(() => { running.cancellationAttempt = undefined; });
+  running.cancellationAttempt = attempt;
+  return attempt;
+}
+
+async function handleSubagentCancel(params: { id?: string; name?: string }): Promise<AgentToolResult<SubagentCancelDetails>> {
+  const resolved = resolveInterruptTarget(params);
+  if ("error" in resolved) return { content: [{ type: "text" as const, text: resolved.error }], details: { error: resolved.error } };
+  const running = resolved.running;
+  const lineage = running.lineage;
+  if (!lineage) return { content: [{ type: "text" as const, text: "Cancellation pending: durable lineage is unavailable." }], details: { id: running.id, name: running.name, status: "cancellation_pending" } };
+  const current = reduceLineage(lineage.rootDir).nodes.get(running.id);
+  if (current?.terminal) {
+    const delivered = !!current.terminalDelivered;
+    return { content: [{ type: "text" as const, text: delivered ? `Cancellation already completed for subagent "${running.name}".` : "Cancellation pending: another terminal outcome won the race." }], details: { id: running.id, name: running.name, status: delivered ? "cancelled" : "cancellation_pending" } };
+  }
+  if (!current?.cancellation?.intent && !appendLineageEvent(lineage.rootDir, `cancel-intent:${running.id}`, "cancel_intent", running.id, { surface: running.surface })) {
+    const recorded = reduceLineage(lineage.rootDir).nodes.get(running.id)?.cancellation?.intent;
+    if (!recorded) return { content: [{ type: "text" as const, text: "Cancellation pending: could not persist cancellation intent." }], details: { id: running.id, name: running.name, status: "cancellation_pending" } };
+  }
+  const proved = await attemptPendingCancellation(running);
+  const after = reduceLineage(lineage.rootDir).nodes.get(running.id);
+  const complete = proved && !running.pendingTerminalDelivery && !!after?.terminalDelivered;
+  const raced = !!after?.terminal && after.terminal.outcome !== "cancelled";
+  return { content: [{ type: "text" as const, text: raced ? "Cancellation pending: another terminal outcome won the race." : complete ? `Cancellation verified for subagent "${running.name}".` : `Cancellation pending for subagent "${running.name}" until termination proof, descendants, and delivery complete.` }], details: { id: running.id, name: running.name, status: complete ? "cancelled" : "cancellation_pending" } };
 }
 
 function handleSubagentInterrupt(
@@ -2040,6 +2514,7 @@ function buildWorkflowChildCommand(params: {
 	tools: string[];
 	rolePrompt?: string;
 	task: string;
+	lineage?: LineageRegistration;
 }): string {
 	const parts = [
 		"pi",
@@ -2065,6 +2540,11 @@ function buildWorkflowChildCommand(params: {
 	const denied =
 		"caller_ping,subagent_done,subagent,subagent_interrupt,subagent_resume,subagents_list,herdr_workflow";
 	const env = [
+		...(params.lineage
+			? Object.entries(lineageEnvironment(params.lineage)).map(
+					([key, value]) => `${key}=${shellQuote(value)}`,
+				)
+			: []),
 		`PI_DENY_TOOLS=${shellQuote(denied)}`,
 		`PI_SUBAGENT_AUTO_EXIT=1`,
 		`PI_SUBAGENT_NAME=${shellQuote(params.name)}`,
@@ -2115,8 +2595,10 @@ export const __test__ = {
 	resolveWorkflowReviewNode,
 	terminalAssistantIdentityFor,
 	observeRunningSubagent,
+	waitForDescendantDrain,
 	resolveDenyTools,
 	resolveInterruptTarget,
+  handleSubagentCancel,
 	requestSubagentInterrupt,
 	handleSubagentInterrupt,
 	resolveResultPresentation,
@@ -2388,6 +2870,7 @@ async function watchSubagent(
 				};
 			}
 			summary =
+				result.summary ??
 				findLastAssistantMessage(allEntries) ??
 				(result.errorMessage
 					? `Subagent error: ${result.errorMessage}`
@@ -2409,6 +2892,8 @@ async function watchSubagent(
 				: result.exitCode === 0
 					? "ready_for_review"
 					: "failed",
+			false,
+			false,
 		);
 		running.lifecycle =
 			result.exitCode === 0
@@ -2432,7 +2917,7 @@ async function watchSubagent(
 			...(worktreeHandoff ? { worktree: worktreeHandoff } : {}),
 		};
 	} catch (err: any) {
-		const worktreeHandoff = finalizeSubagentSurface(running, "failed", true);
+		const worktreeHandoff = finalizeSubagentSurface(running, "failed", true, false);
 		running.lifecycle = markFailed(
 			running.lifecycle,
 			signal.aborted ? "Subagent cancelled." : (err?.message ?? String(err)),
@@ -2562,14 +3047,24 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 	// subagents whose watchers survived a reload.
 	pi.on("session_start", (_event, ctx) => {
 		runtime.latestCtx = ctx;
+		restoreLineageRuntime(ctx);
+		restorePendingLineageInboxes(ctx);
 		if (!runtime.workflowStartupScanned) {
 			runtime.workflowStartupScanned = true;
-			recoverWorkflowStartup(
-				ctx.cwd,
-				runtime.activeWorkflow
-					? new Set([runtime.activeWorkflow.runId])
-					: new Set(),
-			);
+      const recoveredWorkflows = recoverWorkflowStartup(
+        ctx.cwd,
+        runtime.activeWorkflow ? new Set([runtime.activeWorkflow.runId]) : new Set(),
+      );
+      const sessionManager = ctx.sessionManager as any;
+      const recoveredSessionId = typeof sessionManager?.getSessionId === "function" ? sessionManager.getSessionId() : undefined;
+      const recoveredSessionFile = typeof sessionManager?.getSessionFile === "function" ? sessionManager.getSessionFile() : undefined;
+      if (recoveredSessionId && recoveredSessionFile) {
+        for (const record of recoveredWorkflows) {
+          deliverRecoveredWorkflow(record, recoveredSessionId, recoveredSessionFile, (content, details) => {
+            pi.sendMessage({ customType: "herdr_workflow_result", content, display: true, details }, { triggerTurn: true, deliverAs: "steer" });
+          });
+        }
+      }
 		}
 		const pendingSession = runtime.pendingWorkflow?.parentSession;
 		if (
@@ -2713,6 +3208,30 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			);
 		}
 		const id = `workflow-${candidate.runId}-${Math.random().toString(16).slice(2, 10)}`;
+		// Register the workflow node before creating its Herdr pane. All nodes in
+		// one run share a durable lineage root, while their sink remains the run.
+		const lineage = owner.lineageRoot
+			? registerLineage({
+					artifactDir: dirname(candidate.path),
+					nodeId: id,
+					parentWorkflowRunId: candidate.runId,
+
+					parentSessionId: candidate.parentSession.id,
+					parentSessionFile: candidate.parentSession.file,
+					launchKind: "workflow",
+					inheritedRootDir: owner.lineageRoot.rootDir,
+					inheritedRootId: owner.lineageRoot.rootId,
+				})
+			: registerLineage({
+					artifactDir: dirname(candidate.path),
+					nodeId: id,
+					parentWorkflowRunId: candidate.runId,
+
+					parentSessionId: candidate.parentSession.id,
+					parentSessionFile: candidate.parentSession.file,
+					launchKind: "workflow",
+				});
+		owner.lineageRoot ??= lineage;
     const sessionFile = join(
       dirname(candidate.path),
       "sessions",
@@ -2732,7 +3251,20 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				return workflowFailure("cancelled", "Workflow cancelled.");
 			mkdirSync(dirname(sessionFile), { recursive: true });
 			surface = createSubagentPane(`${candidate.runId}: ${nodeId}`);
+      appendLineageEvent(lineage.rootDir, `metadata:${id}:${Date.now()}`, "launch_metadata", id, {
+        name: nodeId, task: prompt, surface, sessionFile, startTime: Date.now(),
+      });
 			owner.children.set(id, { controller: childController, surface });
+			// Record launch order before waiting on shell readiness. Worker agent
+			// requests arrive in script order; journaling here keeps that durable
+			// order deterministic even when panes become ready at different times.
+			journal.append("agent_started", {
+				id,
+				node: nodeId,
+				role: role.name,
+				sessionFile,
+				tools: policy.tools,
+			});
 			await waitForShellReady(surface, { signal: childController.signal });
 			if (childController.signal.aborted)
 				return workflowFailure("cancelled", "Workflow cancelled.");
@@ -2746,13 +3278,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				tools: policy.tools,
 				rolePrompt: role.body,
 				task: prompt,
-			});
-			journal.append("agent_started", {
-				id,
-				node: nodeId,
-				role: role.name,
-				sessionFile,
-				tools: policy.tools,
+				lineage,
 			});
 			runScriptInPane(surface, command, {
 				scriptPath: join(dirname(candidate.path), "launch", `${id}.sh`),
@@ -2760,6 +3286,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			launched = true;
 			const watched = await watchSubagent(
 				{
+          lineage,
 					id,
 					name: nodeId,
 					task: prompt,
@@ -2810,6 +3337,18 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				);
 			}
 			const summary = finalAssistant.text;
+			appendLineageEvent(lineage.rootDir, `terminal:${id}`, "terminal", id, {
+				outcome: watched.exitCode === 0 ? "success" : "failure",
+        resultContent: summary,
+			});
+			appendLineageInbox(
+				lineage.rootDir,
+				id,
+				`terminal:${id}`,
+				{ workflowRunId: candidate.runId },
+				{ kind: "terminal", summary },
+			);
+			appendLineageEvent(lineage.rootDir, `terminal-delivered:${id}`, "terminal_delivered", id, { deliveryId: `terminal:${id}` });
 			const observed = findObservedSessionRuntime(childEntries);
 			const observedModel =
 				observed.provider && observed.modelId
@@ -3078,7 +3617,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 		roles: WorkflowRole[],
 	) => {
 		owner.journal = journal;
-		journal.append("started");
+		journal.append("started", { coordinatorPid: process.pid });
 		let execution: WorkflowTerminalOutcome;
 		try {
 			owner.checkout = createWorkflowReaderCheckout(candidate, journal);
@@ -3562,7 +4101,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 								},
 								{ triggerTurn: true, deliverAs: "steer" },
 							);
-              });
+              }, ping.message);
 							return;
 						}
 
@@ -3576,7 +4115,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               completedRunning,
               finalIdentity,
               (contentAlreadyDelivered) => {
-                if (contentAlreadyDelivered) return;
+                const settledFinal = finalIdentity
+                  ? settledAssistants(completedRunning).find((assistant) => assistant.id === finalIdentity.assistantEntryId)
+                  : undefined;
+
+                if (contentAlreadyDelivered && (!result.summary || result.summary === settledFinal?.text)) return;
                 const completionApi = selectCompletionApi(pi, runtime.pi);
 						sendSubagentResult(completionApi, presentation, {
 							name: completedRunning.name,
@@ -3585,9 +4128,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 							exitCode: result.exitCode,
 							elapsed: result.elapsed,
 							sessionFile: result.sessionFile,
+							deliveryId: `terminal:${completedRunning.id}`,
                   ...(result.errorMessage
                     ? { errorMessage: result.errorMessage }
                     : {}),
+                  ...(result.summary ? { resultContent: result.summary } : {}),
 							...(result.fallbackAttempts
 								? { fallbackAttempts: result.fallbackAttempts }
 								: {}),
@@ -3596,8 +4141,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 								? { runtimePlan: completedRunning.runtimePlan }
 								: {}),
 						});
-              },
-            );
+              }, result.summary);
 					})
 					.catch((err) => {
             if (running.pendingTerminalDelivery) {
@@ -3624,10 +4168,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 								task: running.task,
 								error: err?.message,
 								sessionFile: running.sessionFile,
+								deliveryId: `terminal:${running.id}`,
 								...(running.worktree ? { worktree: running.worktree } : {}),
 							},
 						);
-					});
+					}, presentation);
           });
 
 				// Return immediately
@@ -3802,6 +4347,20 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 		});
 
 	// ── subagents_list tool ──
+
+	// ── subagent_cancel tool ──
+	if (shouldRegister("subagent_cancel"))
+		pi.registerTool({
+			name: "subagent_cancel",
+			label: "Cancel Subagent",
+			description: "Cancel one exact subagent and deliver a result only after pane absence and process exit are verified. Uncertain termination remains pending.",
+			parameters: Type.Object({
+				id: Type.Optional(Type.String({ description: "Exact running subagent id" })),
+				name: Type.Optional(Type.String({ description: "Exact running subagent display name" })),
+			}),
+			async execute(_toolCallId, params) { return handleSubagentCancel(params); },
+		});
+
 	if (shouldRegister("subagents_list"))
 		pi.registerTool({
 			name: "subagents_list",
@@ -3904,7 +4463,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				autoExit: Type.Optional(
 					Type.Boolean({
 						description:
-							"Whether the resumed session should automatically exit after completing its response. Defaults to true for autonomous follow-up work; set false for interactive resumed sessions.",
+							"Whether a clean or empty response records auto-exit intent. Delivery and closure for the resumed session occur only after recursively owned descendants drain. Defaults to true for autonomous follow-up work; set false for interactive resumed sessions.",
 					}),
 				),
 			}),
@@ -3945,6 +4504,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					return muxUnavailableResult();
 				}
 
+				const parentSessionFile = ctx.sessionManager.getSessionFile();
+				if (!parentSessionFile) {
+					return { content: [{ type: "text", text: "Error: no parent session file." }], details: { error: "no session file" } };
+				}
+
 				if (!existsSync(params.sessionPath)) {
 					return {
 						content: [
@@ -3965,6 +4529,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					message: params.message,
 					parent: {
 						sessionId: ctx.sessionManager.getSessionId(),
+						sessionFile: parentSessionFile,
 						sessionDir: ctx.sessionManager.getSessionDir(),
 					},
 					behavior: { autoExit: params.autoExit },
@@ -4030,7 +4595,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               running,
               finalIdentity,
               (contentAlreadyDelivered) => {
-                if (contentAlreadyDelivered) return;
+                const settledFinal = finalIdentity
+                  ? settledAssistants(running).find((assistant) => assistant.id === finalIdentity.assistantEntryId)
+                  : undefined;
+                if (contentAlreadyDelivered && (!result.summary || result.summary === settledFinal?.text)) return;
                 const completionApi = selectCompletionApi(pi, runtime.pi);
 						sendSubagentResult(completionApi, presentation, {
 							name,
@@ -4038,15 +4606,16 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 							exitCode: result.exitCode,
 							elapsed: result.elapsed,
 							sessionFile: params.sessionPath,
+							deliveryId: `terminal:${running.id}`,
                   ...(result.errorMessage
                     ? { errorMessage: result.errorMessage }
                     : {}),
+                  resultContent: summary,
                   ...(running.runtimePlan
                     ? { runtimePlan: running.runtimePlan }
                     : {}),
 						});
-              },
-            );
+              }, summary);
 					})
 					.catch((err) => {
             if (running.pendingTerminalDelivery) {
@@ -4068,9 +4637,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               sendSubagentResult(
                 selectCompletionApi(pi, runtime.pi),
                 presentation,
-							{ name, error: err?.message, sessionFile: params.sessionPath },
+							{ name, error: err?.message, sessionFile: params.sessionPath, deliveryId: `terminal:${running.id}` },
 						);
-					});
+					}, presentation);
           });
 
 				return {

@@ -37,7 +37,7 @@ Completed read and review panes close after result capture while child session f
 _Avoid_: Retaining every clean pane, deleting review evidence
 
 **Restart boundary**:
-Workflow ownership survives Pi lifecycle transitions handled inside the same process, including `/reload`. A full process restart performs interruption reconciliation only: it marks a stale run interrupted, retains sessions, journals, branches, and worktrees as evidence, and requires a newly approved run. There is no replay, restart of children, cleanup, or history surface.
+Workflow ownership survives Pi lifecycle transitions handled inside the same process, including `/reload`. After a full process restart, recovery marks a stale run `interrupted_pending`, restores its recorded child ownership, waits for node results in the workflow inbox, and publishes one interrupted envelope after they drain. It retains sessions, journals, branches, and worktrees as evidence and requires a newly approved run. There is no script replay, child restart, automatic evidence cleanup, or history surface.
 _Avoid_: Automatic replay, durable workflow manager, lost-artifact claim
 
 **Execution artifact directory**:
@@ -171,3 +171,13 @@ _Avoid_: Unapproved node, workflow execution
 - **Self-hosting result:** child `pi -ne -e subagent-done.ts` avoided duplicate loading of the repository and globally installed subagent extensions.
 - **Answered later:** cancel-all is shipped as `herdr_workflow cancel` under a process-global terminal gate: active panes capture Herdr process identities before close, checkout dispose requires confirmed exit, and unconfirmed termination retains the checkout and ends `failed` with `cancel_termination_failed`.
 - **Not answered:** writer review visibility; typed retryability remains deferred, while real launch-failure classification is covered by the shipped workflow failure envelope and same-process `/reload` ownership is covered by the process-global workflow owner.
+
+
+## Descendant-safe lifecycle
+
+A **descendant** is a child launched by a subagent. The **logical immediate parent**
+is the exact session or workflow run that owns its result. A node is **drained**
+only when its terminal outcome is delivered to that sink and all descendants are
+drained recursively. A closed parent session keeps an offline inbox; results are
+materialized only when that exact session is restored. Workflow node results stay in a run inbox; after a coordinator restart, nodes drain first and exactly one interrupted envelope is published without replaying the script. **Cleanup** is separate from
+delivery, so a missing pane can be cleaned idempotently without replaying a result.

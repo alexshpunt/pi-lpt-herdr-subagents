@@ -305,7 +305,7 @@ for (const backend of backends) {
 					false,
 				);
 			} finally {
-				cleanupTestEnv(env);
+				await cleanupTestEnv(env);
 			}
     });
 
@@ -337,7 +337,7 @@ for (const backend of backends) {
 				assert.equal(completions.length, 4);
 				assert.equal(completions.every((event) => event.exitCode === 0 && event.sessionExists && event.finalAssistantContentLength === 0 && event.finalAssistantStopReason === "stop"), true);
 			} finally {
-				cleanupTestEnv(env);
+				await cleanupTestEnv(env);
 			}
 		});
 
@@ -429,7 +429,7 @@ for (const backend of backends) {
 				assert.equal(events.at(-1).status, "sent");
 				assert.equal(events.at(-2).envelope.state, "completed");
 			} finally {
-				cleanupTestEnv(env);
+				await cleanupTestEnv(env);
 			}
 		});
 
@@ -464,7 +464,7 @@ for (const backend of backends) {
 						// The fixture owns cleanup even when the assertion fails.
 					}
 				}
-				cleanupTestEnv(env);
+				await cleanupTestEnv(env);
 			}
 		});
 
@@ -607,7 +607,7 @@ for (const backend of backends) {
 					);
 				}
 			} finally {
-				cleanupTestEnv(env);
+				await cleanupTestEnv(env);
 			}
   });
 	});

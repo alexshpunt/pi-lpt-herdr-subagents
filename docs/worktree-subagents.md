@@ -1,6 +1,6 @@
 # Worktree subagents
 
-This guide is the operational reference for running writing agents in isolated Git worktrees with `pi-herdr-agents`. For the complete tool API, installation, and status model, see the [README](../README.md). For the product and open-source research behind these choices, see the [research report](research/worktree-subagent-orchestration.md).
+This guide is the operational reference for running writing agents in isolated Git worktrees with `pi-lpt-herdr-subagents`. For the complete tool API, installation, and status model, see the [README](../README.md). For the product and open-source research behind these choices, see the [research report](research/worktree-subagent-orchestration.md).
 
 ## Quick start
 
@@ -105,7 +105,7 @@ Possible states are:
 | `needs_help` | Child called `caller_ping`; workspace retained |
 | `failed` | Creation, launch, or execution failed; any created workspace is retained |
 
-The manifest supports ownership and inspection; v1 does not provide automatic reconciliation after a full Pi/Herdr restart. Do not edit manifests by hand.
+The manifest supports worktree ownership and inspection, but it does not reattach managed-worktree lifecycle after a full Pi/Herdr restart. A separate durable lineage journal restores recursive ownership, exact-parent delivery, and ordinary-pane cleanup. The retained worktree remains review evidence. Do not edit manifests or lineage records by hand.
 
 ## Completion handoff
 
@@ -174,9 +174,9 @@ The extension never pushes, creates a PR, merges, cherry-picks, or changes the p
 - **Creation failure:** the manifest is marked failed. If Herdr created the branch but returned an incomplete response, the extension reconciles a unique branch match through `/worktree list` and records any recovered workspace/path.
 - **Launch failure after creation:** the manifest is marked failed and the workspace, forked session, and path are retained. The destination is not focused unless Pi startup is confirmed.
 - **Worker failure:** summary and available Git state are returned; the workspace remains open.
-- **`caller_ping`:** the child exits with `needs_help`; continue worktree-bound follow-up in the retained workspace rather than through `subagent_resume`.
-- **Parent `/reload`, `/new`, `/resume`, or `/fork`:** active in-memory watchers transfer to the replacement parent session.
-- **Full process restart or crash:** the worktree remains, but v1 does not automatically rediscover and resume its watcher.
+- **`caller_ping`:** the child records `needs_help`; delivery and exit wait until recursively owned descendants drain. Continue worktree-bound follow-up in the retained workspace rather than through `subagent_resume`.
+- **Pending parent result:** remains bound to its recorded parent session ID and session file, and materializes when that exact session is restored.
+- **Full process restart or crash:** durable lineage and exact-parent inbox records are restored for new launches. The retained worktree remains review evidence; its managed lifecycle is not reattached by `subagent_resume`, and uncertain pane/process inspection stays pending.
 
 `subagent_resume` resumes a session in a new ordinary Herdr pane. It does not reattach the managed worktree lifecycle or produce a new worktree handoff. For worktree follow-up, focus the retained workspace and resume manually from its shell:
 
@@ -212,7 +212,7 @@ This first version intentionally does not provide:
 - automatic push, PR creation, merge, or cherry-pick
 - automatic worktree or branch removal
 - worktree-aware `subagent_resume`
-- durable restart reconciliation
+- automatic worktree reattachment on resume (durable lineage restores ownership and delivery, but not managed-worktree attachment)
 - dependency DAG scheduling or merge queues
 - stacked-branch management
 - multi-repository workspaces

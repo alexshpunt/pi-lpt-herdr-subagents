@@ -20,15 +20,19 @@ Stop and ask the user to start pi inside herdr if `HERDR_ENV` is not `1` or the 
 
 ## Integration suite
 
-Run only one integration suite at a time on a Herdr instance. Before starting, confirm that no other checkout or agent is running `test/integration/*.test.ts`; concurrent suites compete for terminal focus and process capacity and can cause false timeouts or leaked test resources.
-
 From the repository root, run the deterministic required suite:
 
 ```bash
 npm run test:integration
 ```
 
-The harness loads the extension directly from the working tree, creates isolated test agents, and routes every parent and child Pi session to a local scripted provider. It still exercises real Pi and Herdr lifecycle behavior without provider credentials, network calls, or model-output assertions.
+The harness loads the extension directly from the working tree, creates isolated test agents, and routes every parent and child Pi session to a local scripted provider. The shipped runner starts a separate headless Herdr server with a private socket, config, state directory, and worktree directory. Normal completion and `SIGINT`/`SIGTERM`/`SIGHUP` use one idempotent shutdown: it confirms the child and server process groups have exited, escalates to `SIGKILL` after bounded grace, and removes owned paths only afterward. It clears inherited subagent and Herdr identity variables, so a missing endpoint cannot fall back to the persistent user server. It still exercises real Pi and Herdr lifecycle behavior without provider credentials, network calls, or model-output assertions. Concurrent runs use separate endpoints, so they do not need a manually coordinated shared Herdr slot.
+
+For a focused run, pass the test file after `--`:
+
+```bash
+npm run test:integration -- test/integration/mux-surface.test.ts
+```
 
 Integration tests must own and tear down their Herdr workspaces, processes, temporary repositories, and worktrees, including on failure. Wait for observable journal, pane, process, file, or screen conditions. Do not use a fixed sleep to synchronize a transition; deliberate elapsed-time scenarios are the exception.
 
@@ -44,8 +48,6 @@ Report passing, failing, and skipped tests. Do not claim full verification when 
 
 ```bash
 git status --short
-herdr workspace list
-find "$HOME/.herdr/worktrees" "${TMPDIR:-/tmp}" /tmp -name 'pi-integ-*' -print 2>/dev/null
 ```
 
-Confirm that no `pi-integ-*` workspace, process, temporary repository, or worktree remains. `herdr workspace list` already returns JSON. If a failed test leaves an artifact, verify that it is test-owned before removing it. Close a test-owned workspace with `herdr workspace close <workspace-id>`. Do not remove unrelated user workspaces, processes, files, or worktrees.
+The runner owns its private server and state directory, and removes them after the child test process exits. Confirm the runner reports no failure and that no `herdr server` child from the runner remains. Do not scan or remove global `pi-integ-*` paths: a concurrent foreign root is not this run's resource. If a failed run leaves an artifact, identify ownership from the runner's private socket/state path before removing it. Do not remove unrelated user workspaces, processes, files, or worktrees.

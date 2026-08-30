@@ -18,6 +18,8 @@ This is the LPT fork of [`pi-herdr-agents`](https://github.com/giuseppecrj/pi-he
 - **Conversation handoff** — continue the active Pi conversation in a new worktree with `/worktree` while preserving the parent session.
 - **Approved review workflows** — prepare and run bounded, read-only multi-agent reviews with fresh evidence and one synthesized result.
 - **Reusable roles** — use bundled agents, project or global definitions, and installable role packs.
+- **Descendant-safe delivery** — launches record durable lineage before resource creation; settled and terminal results wait for recursive descendants and deliver once to the exact parent.
+- **Verified cancellation** — `subagent_cancel` is separate from non-terminal `subagent_interrupt` and only reports cancellation after pane and process termination are proven.
 
 ## Requirements
 
@@ -121,20 +123,21 @@ Subagent tabs, panes, and worktree workspaces are created without stealing keybo
 
 ### Extensions
 
-**Subagents** — 5 main-session tools + 6 commands, plus 2 child-only tools:
+**Subagents** — 6 main-session tools + 6 commands, plus 2 child-only tools:
 
 | Tool                 | Description                                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------- |
 | `subagent`           | Spawn a sub-agent in a dedicated herdr pane (async — returns immediately)             |
 | `subagent_interrupt` | Interrupt a running Pi-backed subagent's current turn                                       |
+| `subagent_cancel`    | Cancel one child only after pane absence and process exit are verified; uncertain termination stays pending |
 | `subagents_list`     | List available agent definitions                                                            |
 | `subagent_resume`    | Resume a previous Pi-backed sub-agent session in a new ordinary pane (async)                          |
 | `herdr_workflow`     | Prepare, start, or cancel one exact approved project-local review workflow                   |
 
 | Pi child-only tool | Description |
 | ---------------- | ------------------------------------------------------------------------- |
-| `caller_ping` | Exit and ask the parent for help |
-| `subagent_done` | Mark an interactive child complete and exit; autonomous agents auto-exit |
+| `caller_ping` | Record a help request; notify the parent and exit after recursively owned descendants drain |
+| `subagent_done` | Record interactive completion intent; return results and exit after recursively owned descendants drain |
 
 | Command                    | Description                          |
 | -------------------------- | ------------------------------------ |
@@ -229,7 +232,7 @@ launch workflow.
 5. Main agent processes result     → continues with new context
 ```
 
-Multiple subagents run concurrently — each steers its result back independently as it finishes. Active watchers survive parent `/reload`, `/new`, `/resume`, and `/fork` transitions, so completion is delivered into the replacement session. Quitting Pi still stops parent-side delivery. The live widget above the input tracks every agent still in flight:
+Multiple subagents run concurrently. Each settled or terminal result waits until every recursively owned descendant has drained, then returns once to the exact parent. Held settled results keep their original order. A failed inbox publication remains pending without timeout or rerouting. Pending results remain bound to their recorded parent session ID and session file, and materialize when that exact session is restored. Quitting Pi stops the current watchers but keeps durable ownership for startup recovery. The live widget above the input tracks every agent still in flight:
 
 ```
 ╭─ Subagents ──────────────────── 1 active · 2 open ─╮
@@ -239,21 +242,21 @@ Multiple subagents run concurrently — each steers its result back independentl
 ╰─────────────────────────────────────────────────────────╯
 ```
 
-Completion messages render with a colored background and are expandable with `Ctrl+O`. Results larger than 16,000 characters are abbreviated in the parent context while preserving their beginning, conclusion, and session path; the complete result remains in the child session. The extension includes that bounded result and a continuation instruction directly in the single custom `subagent_result` message that triggers or steers Pi, avoiding empty turns caused by a separate context-free wake-up. The renderer uses the unadorned bounded result from structured details. Completed rows are removed from the widget as soon as their result is delivered or suppressed.
+Completion messages render with a colored background and are expandable with `Ctrl+O`. Results larger than 16,000 characters are abbreviated in the parent context while preserving their beginning, conclusion, and session path; the complete result remains in the child session. The extension includes that bounded result and a continuation instruction directly in the single custom `subagent_result` message that triggers or steers Pi, avoiding empty turns caused by a separate context-free wake-up. The renderer uses the unadorned bounded result from structured details. Completed rows are removed from the widget as soon as their result is delivered or suppressed. If ordinary-pane cleanup fails, the delivered child remains visible as `cleanup pending` until pane absence is confirmed.
 
 ### Settled turns and child lifecycle
 
 A persistent child can return one parent result at every settled turn without closing its session. The five outcomes are:
 
-- clean: deliver the result; an `auto-exit` child closes after that boundary;
-- empty: deliver the empty result; an `auto-exit` child closes after that boundary;
+- clean: record the settled result and, for an `auto-exit` child, terminal intent at that boundary; delivery and closure wait until recursively owned descendants drain;
+- empty: record the explicit empty result and, for an `auto-exit` child, terminal intent at that boundary; delivery and closure wait until recursively owned descendants drain;
 - provider/agent error: deliver the error and keep the child open;
 - intentional interrupt: stay silent and keep the child open;
 - unexpected abort: deliver an abort notice and keep the child open.
 
-A non-auto-exit child can finish with `subagent_done`; `caller_ping` exits to request help. An auto-exit child closes after a clean or empty settled boundary. Provider errors and aborts remain open. Settled delivery and terminal delivery use separate identity gates, so a clean auto-exit race cannot send the same result twice. A failed parent enqueue remains retryable.
+A non-auto-exit child records completion intent with `subagent_done`; `caller_ping` records help intent. An auto-exit child records terminal intent at a clean or empty settled boundary. Done, help, and auto-exit delivery and closure wait until recursively owned descendants drain; until then, the child stays owned. Any user input permanently disables auto-exit for that session. Provider errors and aborts remain open. Interrupt and stall are non-terminal and continue to block ancestor drain. Settled delivery and terminal delivery use separate identity gates, so a clean auto-exit race cannot send the same result twice. A failed parent enqueue remains retryable.
 
-Same-process `/reload`, `/new`, `/resume`, and `/fork` preserve active watchers and their delivery state. A full Pi process restart is outside this guarantee: active watchers are not restored and pending delivery is not replayed.
+Pending results remain bound to their recorded parent session ID and session file, and materialize when that exact session is restored. Legacy runs without lineage are never inferred or acted on.
 
 
 ### In-progress status updates
@@ -422,7 +425,7 @@ The child starts at the returned worktree root. Tell writing agents to test and 
 
 Successful, failed, and help-requesting runs retain their workspace. Completion includes the worktree path, Herdr workspace, branch, base/head SHAs, commits ahead, changed and untracked files, and clean/dirty/conflicted state. Here, `clean` means no uncommitted files; the branch may still contain commits. If Git inspection fails, state is reported as unknown rather than guessed.
 
-An ownership manifest is written under the parent session's `artifacts/<session-id>/worktree-runs/` directory before Herdr creates resources. V1 does not automatically recover watchers after a full process restart, and `subagent_resume` does not reattach the managed worktree lifecycle.
+An ownership manifest and durable lineage record are written before Herdr creates resources. After a full process restart, the extension restores recorded ownership, pending exact-parent delivery, and independent ordinary-pane cleanup. The retained worktree remains review evidence; `subagent_resume` still opens an ordinary pane and does not reattach the managed worktree lifecycle.
 
 The extension does **not** push, create a PR, merge, cherry-pick, or remove the worktree or branch automatically. For task selection, lifecycle states, review commands, failure recovery, and safe cleanup, read [Worktree subagents](docs/worktree-subagents.md). The [research report](docs/research/worktree-subagent-orchestration.md) records the rationale and deferred roadmap.
 
@@ -441,6 +444,10 @@ subagent_interrupt({ name: "Scout" });
 This sends Escape to the child pane, cancelling the in-progress model turn. The subagent session stays alive — the pane, session file, and background polling all remain intact. After the interrupt, the widget immediately labels the child as `interrupted` (counted as **open**, not active processing). Stale pre-interrupt activity snapshots are ignored so a lagging Herdr/`active` reading cannot overwrite the interrupt. The process elapsed timer keeps running because the pane is still open; only the interrupted-state duration freezes relative to the interrupt request. If the child starts work later, newer observations return it to `active`; completion, failure, and `caller_ping` still flow through normally.
 
 This is a turn-level interrupt, not a method for forcibly terminating a subagent session.
+
+### Cancelling a subagent session
+
+Use `subagent_cancel` with an exact child ID or an unambiguous name when the session itself must end. Cancellation intent and process identity are recorded before any pane action. The result is not reported as cancelled until pane absence and process exit are proven; uncertain or changed identity stays pending for retry. Repeated calls reuse the same durable cancellation, and a natural completion race has only one terminal winner. Worktree and session evidence remain available.
 
 ---
 
@@ -463,7 +470,7 @@ herdr_workflow({ action: "cancel", runId: "run-1" });
 - Start requires the latest real user message in the same parent session to be exactly `APPROVE <8 lowercase hex characters>`. It revalidates the complete candidate, consumes approval once, creates the append-only journal, and runs in the background.
 - Review children are fresh Pi sessions with derived read-only tools in one detached checkout pinned to the approved base. Parent uncommitted files are absent, intermediate child results stay inside the workflow, and operational failures remain explicit non-retryable evidence for parent-guided recovery.
 - Approved workflow JavaScript runs in a restricted `vm` inside a Worker thread. Neither mechanism is a security boundary; run only project code that the user has inspected and approved.
-- Same-process `/reload` keeps workflow ownership and the Worker alive. A full process restart performs interruption reconciliation only: it marks a stale running journal event `interrupted`, retains sessions/journals/checkouts, and does not replay, restart children, clean up, or expose history.
+- Same-process `/reload` keeps workflow ownership and the Worker alive. After a full process restart, recovery records `interrupted_pending`, waits for recorded child nodes to drain into the workflow inbox, then publishes exactly one interrupted envelope. It does not replay the script, restart children, expose intermediate results, or remove retained evidence.
 
 ### Cancel contract
 
@@ -474,19 +481,19 @@ herdr_workflow({ action: "cancel", runId: "run-1" });
 - If process identity cannot be captured for an active pane, the pane remains present after close, or any captured process still lives after the bounded wait, the checkout is retained and the run ends `failed` with `cancel_termination_failed`. Successful cancellation is not reported in that case.
 - A successful cancel writes one `cancelled` terminal journal event and one result-free delivery. Repeated cancel is idempotent and returns the authoritative terminal outcome (including a prior fail-closed result).
 
-There is no list, status, resume, or history action in v1. Workflow ownership and the Worker survive `/reload` in the same Pi process, and the latest parent API receives one final delivery. A full process restart reconciles interruption without replay: startup marks only the last known running journal event as `interrupted`, leaves sessions, journals, and reader checkouts in place, and requires a new approved run.
+There is no list, status, resume, or history action in v1. Workflow ownership and the Worker survive `/reload` in the same Pi process, and the latest parent API receives one final delivery. A full process restart does not replay the workflow: child results stay in the run inbox, recovery waits for the recorded nodes to drain, then sends one interrupted envelope to the exact preparing session. Sessions, journals, and reader checkouts remain in place, and further work requires a new approved run.
 
 ### Bundled `orchestrate` skill
 
 The package bundles the native `/skill:orchestrate` procedure. It accepts local paths, URLs, tickets, or combinations that the parent can already access. The parent performs read-only preflight discovery and materializes exact remote or tracker evidence before writing one unique `.pi/plans/<run>/workflow.js` at a committed base. The skill authors distinct fresh read-only review nodes in bounded parallel and one fresh synthesis node; nodes can share a review role, and a retry keeps the same node and runtime only for an explicit `retryable: true` failure. It does not use public `subagent()` for workflow nodes and does not author writers, commits, external effects, nested workflows, replay, or a fixed task schema.
 
-The parent calls `herdr_workflow prepare`, presents its packet unchanged, and waits for the exact `APPROVE <8-character lowercase hash prefix>` reply before calling `start`. After start, one final delivery is sent without polling. Cancellation is fail-closed and retains evidence when process exit cannot be confirmed. Same-process `/reload` preserves ownership; full restart records interruption without replay, restart, cleanup, or history. Workflow JavaScript runs in a Worker-hosted `vm` for event-loop availability only; neither the Worker nor `vm` is a security boundary, and worktrees do not provide process or security isolation.
+The parent calls `herdr_workflow prepare`, presents its packet unchanged, and waits for the exact `APPROVE <8-character lowercase hash prefix>` reply before calling `start`. After start, one final delivery is sent without polling. Cancellation is fail-closed and retains evidence when process exit cannot be confirmed. Same-process `/reload` preserves ownership. After a full restart, recovery records `interrupted_pending` while descendants drain into the workflow inbox, then sends one interrupted envelope without script replay, child restart, automatic evidence cleanup, or history. Workflow JavaScript runs in a Worker-hosted `vm` for event-loop availability only; neither the Worker nor `vm` is a security boundary, and worktrees do not provide process or security isolation.
 
 ---
 
 ## caller_ping — Child-to-Parent Help Request
 
-The `caller_ping` tool lets a Pi-backed subagent request help from its parent agent. When called, the child session **exits** and the parent receives a notification with the help message. The parent can then **resume** the child session with a response using `subagent_resume`.
+The `caller_ping` tool lets a Pi-backed subagent request help from its parent agent. When called, the child records help intent. If descendants are still running, delivery and exit wait until they drain; afterward the exact parent receives the help message and the child exits. The parent can then resume the child session with a response using `subagent_resume`.
 
 **`caller_ping` parameters:**
 
@@ -497,12 +504,12 @@ The `caller_ping` tool lets a Pi-backed subagent request help from its parent ag
 - `sessionPath` (required): Path to the child session `.jsonl` file
 - `name` (optional): Display name for the resumed pane (defaults to `Resume`)
 - `message` (optional): Follow-up prompt to send after resuming
-- `autoExit` (optional): Whether the resumed session should auto-exit after its next response. Defaults to `true` for autonomous follow-up work; set `false` when resuming for an interactive handoff.
+- `autoExit` (optional): Whether the resumed session should record auto-exit intent after its next clean or empty response, then deliver and close after recursively owned descendants drain. Defaults to `true` for autonomous follow-up work; set `false` for an interactive handoff.
 
 **Interaction flow:**
 
 1. Child calls `caller_ping({ message: "Not sure which schema to use" })`
-2. Child session exits (like `subagent_done`)
+2. If descendants remain, the child keeps ownership and waits for them to drain; then its session exits (like `subagent_done`)
 3. Parent receives a steer notification: *"Sub-agent Worker needs help: Not sure which schema to use"*
 4. Parent resumes the child session via `subagent_resume` with the response
 5. Child picks up where it left off with the parent's guidance
@@ -514,7 +521,7 @@ The `caller_ping` tool lets a Pi-backed subagent request help from its parent ag
 await caller_ping({
   message: "Found two conflicting migration files — should I use v1 or v2?"
 });
-// Session exits here. Parent receives the ping, then resumes this session
+// Session exits after descendants drain. Parent receives the ping, then resumes this session
 // with guidance like "Use v2, v1 is deprecated"
 ```
 
@@ -744,7 +751,7 @@ and verify them with `/subagent list` plus a smoke launch.
 | `session-mode` | string | Default child-session mode: `standalone`, `lineage-only`, or `fork` |
 | `spawning`    | boolean | Set `false` to deny all subagent-spawning tools                                                                                                                                                                                                                             |
 | `deny-tools`  | string  | Comma-separated `pi-lpt-herdr-subagents` tool names to suppress; this is not a universal cross-extension deny list                                                                                                                                                                  |
-| `auto-exit`   | boolean | Auto-shutdown after a clean or empty settled outcome — no `subagent_done` call needed. Provider errors and aborted turns keep the session open so it can be resumed. If the user sends any input, auto-exit is permanently disabled and the user takes over the session. Recommended for autonomous agents (scout, worker); not for interactive ones (planner). Also determines the default value of `interactive` (see below). |
+| `auto-exit`   | boolean | Record terminal intent at a clean or empty settled outcome — no `subagent_done` call needed — then deliver and shut down after recursively owned descendants drain. Provider errors and aborted turns keep the session open so it can be resumed. If the user sends any input, auto-exit is permanently disabled and the user takes over the session. Recommended for autonomous agents (scout, worker); not for interactive ones (planner). Also determines the default value of `interactive` (see below). |
 | `interactive` | boolean | Override whether stall/recovery transitions wake the parent session. Defaults to the inverse of `auto-exit`: autonomous agents (`auto-exit: true`) are non-interactive and get stall pings; agents without `auto-exit` are interactive and stay quiet. Explicit values take precedence. |
 | `cwd`         | string  | Default working directory. Absolute paths are unambiguous; relative agent-frontmatter paths resolve from Pi's agent config directory (`PI_CODING_AGENT_DIR` or `~/.pi/agent`), not the project root                                                                                                                                                                                                            |
 | `disable-model-invocation` | boolean | Hide a role from discovery surfaces like `subagents_list`. The definition remains directly invocable by exact name via `subagent({ agent: "name", ... })`. |
@@ -774,11 +781,11 @@ session-mode: lineage-only
 
 ### `auto-exit`
 
-When set to `true`, the agent session shuts down automatically after a clean or empty settled outcome — no explicit `subagent_done` call is needed. Provider errors and aborted turns keep the session open so they can be resumed.
+When set to `true`, a clean or empty settled outcome records terminal intent — no explicit `subagent_done` call is needed. The result is delivered and the session shuts down only after recursively owned descendants drain. Provider errors and aborted turns keep the session open so they can be resumed.
 
 **Behavior:**
 
-- The session closes after a clean final message or an empty final response reaches the settled boundary
+- A clean final message or empty final response records terminal intent at the settled boundary; delivery and closure wait until recursively owned descendants drain
 - If the user sends **any input** before the agent finishes, auto-exit is permanently disabled for that session — the user takes over interactively
 - The modeHint injected into the agent's task is adjusted accordingly: autonomous agents see "Complete your task autonomously." rather than instructions to call `subagent_done`
 
@@ -922,7 +929,12 @@ Run the required end-to-end suite from inside Herdr:
 npm run test:integration
 ```
 
-The deterministic suite launches real Pi sessions, Herdr panes, and worktrees without provider credentials. The optional live-provider smoke test is not a merge gate:
+The deterministic suite launches real Pi sessions, Herdr panes, and worktrees without provider credentials. Each command bootstraps a separate test-owned headless Herdr server with a private socket, config, state directory, and worktree directory. It clears inherited Herdr identity and fails closed if that private endpoint cannot start, so it cannot fall back to the persistent user server. Normal exit and `SIGINT`, `SIGTERM`, or `SIGHUP` use one idempotent shutdown that verifies child and server process groups have exited, escalates after bounded grace, and removes only the run's owned paths. Concurrent runs use separate endpoints and need no shared Herdr test slot. Pass a test file after `--` for a focused run:
+```bash
+npm run test:integration -- test/integration/mux-surface.test.ts
+```
+
+The optional live-provider smoke test is not a merge gate:
 
 ```bash
 PI_TEST_MODEL="openai-codex/gpt-5.6-luna" PI_TEST_TIMEOUT=180000 \

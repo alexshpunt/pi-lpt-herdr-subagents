@@ -7,6 +7,7 @@ export interface CompletionResult {
   reason: "done" | "ping" | "sentinel" | "error";
   exitCode: number;
   ping?: { name: string; message: string };
+  summary?: string;
   errorMessage?: string;
 }
 
@@ -14,7 +15,7 @@ export interface CompletionOptions {
   intervalMs: number;
   readTerminalTail: () => Promise<string>;
   inspectPane?: () => Promise<import("./lifecycle.ts").PaneInspection>;
-  /** Bounded artifact grace after explicit pane disappearance. Default: 500ms. */
+  /** Bounded artifact grace after terminal or pane completion evidence. Default: 500ms. */
   paneDisappearanceGraceMs?: number;
   onPaneInspection?: (
     inspection: import("./lifecycle.ts").PaneInspection,
@@ -29,6 +30,7 @@ export function interpretExitSidecar(data: unknown): CompletionResult {
     type?: unknown;
     name?: unknown;
     message?: unknown;
+    summary?: unknown;
     errorMessage?: unknown;
   };
 
@@ -51,7 +53,11 @@ export function interpretExitSidecar(data: unknown): CompletionResult {
     return { reason: "error", exitCode: 1, errorMessage };
   }
 
-  if (payload?.type === "done") return { reason: "done", exitCode: 0 };
+  if (payload?.type === "done") return {
+    reason: "done",
+    exitCode: 0,
+    ...(typeof payload.summary === "string" && payload.summary.trim() ? { summary: payload.summary } : {}),
+  };
 
   return {
     reason: "error",
@@ -133,7 +139,15 @@ export async function waitForCompletion(
 
     try {
       const exitCode = terminalExitCode(await options.readTerminalTail());
-      if (exitCode !== null) return { reason: "sentinel", exitCode };
+      if (exitCode !== null) {
+        // The shell sentinel can race the child-side exit sidecar. Give the
+        // durable intent a short chance to win so an explicit final summary is
+        // not mistaken for a previously delivered settled turn.
+        const sidecarResult = options.sessionFile
+          ? await waitForDisappearanceArtifacts(signal, options)
+          : null;
+        return sidecarResult ?? { reason: "sentinel", exitCode };
+      }
     } catch {
       // Terminal reads are only sentinel/output probes; Herdr status is polled
       // independently below, even when terminal reads succeed.

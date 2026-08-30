@@ -6,6 +6,11 @@ import { describe, it } from "node:test";
 import subagents, { __test__ } from "../pi-extension/subagents/index.ts";
 import { createLifecycle, markInterruptRequested } from "../pi-extension/subagents/lifecycle.ts";
 
+import {
+  orderSettledActivityEvents,
+  type SettledActivityEvent,
+} from "../pi-extension/subagents/activity.ts";
+import { appendLineageEvent, registerLineage } from "../pi-extension/subagents/lineage.ts";
 function createApi(send: (message: any) => void) {
   return {
     events: { on() {}, emit() {} },
@@ -98,6 +103,22 @@ async function flush() {
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
 }
+
+it("orders settled publication permutations by activity sequence", () => {
+  const publicationOrder = [4, 2, 1, 3];
+  const events: SettledActivityEvent[] = publicationOrder.map((sequence) => ({
+    schema: 1,
+    childId: "child-1",
+    sequence,
+    recordedAt: 1000 - sequence,
+    assistantId: `assistant-${sequence}`,
+    outcome: "clean",
+  }));
+  assert.deepEqual(
+    orderSettledActivityEvents(events).map((event) => event.sequence),
+    [1, 2, 3, 4],
+  );
+});
 
 describe("settled observer boundaries", () => {
   it("retries an older no-id boundary after a later boundary succeeds", async () => {
@@ -238,4 +259,32 @@ describe("settled observer boundaries", () => {
       }
     },
   );
+
+
+  it("retries terminal release when the descendant drains after observation", async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "settled-terminal-drain-"));
+    try {
+      const owner = registerLineage({ artifactDir: rootDir, nodeId: "owner" });
+      const running = { id: owner.nodeId, lineage: owner };
+      appendLineageEvent(owner.rootDir, "launch:descendant", "launch", "descendant", {
+        parentNodeId: owner.nodeId,
+      });
+
+      let resolved = false;
+      const pending = __test__.waitForDescendantDrain(running).then(() => {
+        resolved = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.equal(resolved, false);
+
+      appendLineageEvent(owner.rootDir, "terminal:descendant", "terminal", "descendant", {
+        outcome: "done",
+      });
+      appendLineageEvent(owner.rootDir, "terminal-delivered:descendant", "terminal_delivered", "descendant");
+      await pending;
+      assert.equal(resolved, true);
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
 });

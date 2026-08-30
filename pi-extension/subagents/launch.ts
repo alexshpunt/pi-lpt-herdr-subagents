@@ -10,6 +10,15 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
+  appendLineageEvent,
+  lineageFromEnvironment,
+  lineageEnvironment,
+  registerLineage,
+  isLineageNodeDrained,
+  reduceLineage,
+  type LineageRegistration,
+} from "./lineage.ts";
+import {
   getSubagentActivityFile,
   getSubagentSettledEventsFile,
 } from "./activity.ts";
@@ -79,7 +88,8 @@ export interface FreshPiLaunchRequest {
 		sessionDir: string;
 		agentDir?: string;
 	};
-	runtimePlan: ResolvedRuntimePlan;
+	runtimePlan: ResolvedRuntimePlan;	lineage?: LineageRegistration;
+
 	behavior: {
 		tools?: string;
 		skills?: string;
@@ -101,6 +111,7 @@ export interface ResumePiLaunchRequest {
 	message?: string;
 	parent: {
 		sessionId: string;
+		sessionFile: string;
 		sessionDir: string;
 	};
 	behavior?: {
@@ -112,6 +123,7 @@ export interface ResumePiLaunchRequest {
 export type PiLaunchRequest = FreshPiLaunchRequest | ResumePiLaunchRequest;
 
 export interface PiRunningChild {
+	lineage?: LineageRegistration;
 	id: string;
 	name: string;
 	task: string;
@@ -168,6 +180,7 @@ interface ResolvedLaunch {
 	localAgentDir: string | null;
 	sourceCwd: string;
 	artifactDir: string;
+	lineage?: LineageRegistration;
 	sessionMode: SubagentSessionMode;
 	taskDelivery: "direct" | "artifact";
 }
@@ -236,6 +249,18 @@ async function launchFreshPiSubagent(
 	operations: PiLaunchOperations,
 ): Promise<PiRunningChild> {
 	const resolved = resolveLaunchRequest(request);
+	// Registration is the ownership boundary: publish lineage before Herdr creates resources.
+	const inherited = lineageFromEnvironment();
+	resolved.lineage = request.lineage ?? registerLineage({
+		artifactDir: resolved.artifactDir,
+		nodeId: resolved.id,
+		parentNodeId: inherited?.parentNodeId,
+		parentSessionId: request.parent.sessionId,
+		parentSessionFile: request.parent.sessionFile,
+		launchKind: request.worktree ? "worktree" : request.fork ? "fork" : "fresh",
+		inheritedRootDir: inherited?.rootDir,
+		inheritedRootId: inherited?.rootId,
+	});
 	const surface = prepareLaunchSurface(resolved, operations);
 
 	try {
@@ -250,6 +275,18 @@ async function launchFreshPiSubagent(
 		// closes the fast-child race where the first response is written before
 		// launchPiSubagent returns to its caller.
 		const sessionBaseline = captureSessionBaseline(artifacts.sessionFile);
+		if (resolved.lineage) {
+			appendLineageEvent(resolved.lineage.rootDir, `metadata:${resolved.id}:${resolved.startTime}`, "launch_metadata", resolved.id, {
+				name: request.name,
+				task: request.task,
+				agent: request.agent,
+				surface: artifacts.surface,
+				sessionFile: artifacts.sessionFile,
+				activityFile: artifacts.activityFile,
+				settledEventsFile: artifacts.settledEventsFile,
+				startTime: resolved.startTime,
+			});
+		}
 		const command = buildPiCommand(resolved, artifacts);
 		const launchScriptFile = startPiProcess(
 			resolved,
@@ -439,6 +476,9 @@ function prepareChildSession(
     resolved.artifactDir,
     resolved.id,
   );
+	if (resolved.lineage) {
+		writeFileSync(`${sessionFile}.lineage.json`, JSON.stringify(resolved.lineage), "utf8");
+	}
   return { ...surface, sessionFile, activityFile, settledEventsFile };
 }
 
@@ -580,6 +620,11 @@ function buildPiCommand(
 	}
 
 	const env: string[] = [];
+	if (resolved.lineage && !request.handoff) {
+		for (const [key, value] of Object.entries(lineageEnvironment(resolved.lineage))) {
+			env.push(`${key}=${shellQuote(value)}`);
+		}
+	}
 	if (artifacts.localAgentDir) {
 		env.push(`PI_CODING_AGENT_DIR=${shellQuote(artifacts.localAgentDir)}`);
 	} else if (process.env.PI_CODING_AGENT_DIR) {
@@ -649,6 +694,7 @@ function createRunningChild(
 	sessionBaseline: SessionBaselineCursor,
 ): PiRunningChild {
 	return {
+		lineage: resolved.lineage,
 		id: resolved.id,
 		name: resolved.request.name,
 		task: resolved.request.task,
@@ -673,19 +719,44 @@ async function launchResumedPiSubagent(
 ): Promise<PiRunningChild> {
 	const id = request.id ?? Math.random().toString(16).slice(2, 10);
 	const autoExit = request.behavior?.autoExit ?? true;
+	const artifactDir = join(request.parent.sessionDir, "artifacts", request.parent.sessionId);
+	const inherited = lineageFromEnvironment();
+	let prior: LineageRegistration | undefined;
+	try {
+		prior = JSON.parse(readFileSync(`${request.sessionFile}.lineage.json`, "utf8")) as LineageRegistration;
+		if (!prior.rootDir || !prior.rootId || !prior.nodeId) prior = undefined;
+	} catch {}
+	const reusable = prior && !isLineageNodeDrained(reduceLineage(prior.rootDir), prior.nodeId);
+	const lineage: LineageRegistration = (reusable ? prior : registerLineage({
+		artifactDir,
+		nodeId: id,
+		parentNodeId: inherited?.parentNodeId,
+		parentSessionId: request.parent.sessionId,
+		parentSessionFile: request.parent.sessionFile,
+		launchKind: "resume",
+		inheritedRootDir: inherited?.rootDir,
+		inheritedRootId: inherited?.rootId,
+	}))!;
 	const interactive = request.behavior?.interactive ?? !autoExit;
 	const startTime = Date.now();
-	const artifactDir = join(
-		request.parent.sessionDir,
-		"artifacts",
-		request.parent.sessionId,
-	);
 	const surface = operations.createPane(request.name);
 	await operations.waitForShellReady(surface);
 	const activityFile = getSubagentActivityFile(artifactDir, id);
+	writeFileSync(`${request.sessionFile}.lineage.json`, JSON.stringify(lineage), "utf8");
   const settledEventsFile = getSubagentSettledEventsFile(artifactDir, id);
 	mkdirSync(dirname(activityFile), { recursive: true });
 
+	if (lineage) {
+		appendLineageEvent(lineage.rootDir, `metadata:${lineage.nodeId}:${startTime}`, "launch_metadata", lineage.nodeId, {
+			name: request.name,
+			task: request.message ?? "resumed session",
+			surface,
+			sessionFile: request.sessionFile,
+			activityFile,
+			settledEventsFile,
+			startTime,
+		});
+	}
 	let messageFile: string | undefined;
 	if (request.message) {
 		messageFile = join(
@@ -704,12 +775,15 @@ async function launchResumedPiSubagent(
 		...(process.env.PI_CODING_AGENT_DIR
 			? [`PI_CODING_AGENT_DIR=${shellQuote(process.env.PI_CODING_AGENT_DIR)}`]
 			: []),
+		...Object.entries(lineageEnvironment(lineage)).map(([key, value]) => `${key}=${shellQuote(value)}`),
 		`PI_SUBAGENT_NAME=${shellQuote(request.name)}`,
 		`PI_SUBAGENT_SESSION=${shellQuote(request.sessionFile)}`,
 		`PI_SUBAGENT_ID=${shellQuote(id)}`,
 		`PI_SUBAGENT_ACTIVITY_FILE=${shellQuote(activityFile)}`,
     `PI_SUBAGENT_SETTLED_EVENTS_FILE=${shellQuote(settledEventsFile)}`,
 		`PI_SUBAGENT_AUTO_EXIT=${autoExit ? "1" : "0"}`,
+		`PI_SUBAGENT_RESUME_BASELINE_ASSISTANTS=${shellQuote(JSON.stringify(sessionBaseline.assistantEntryIds))}`,
+		"PI_SUBAGENT_RESUME=1",
 	];
 	const command = [
 		...env,
@@ -739,6 +813,7 @@ async function launchResumedPiSubagent(
 		},
 	);
 	return {
+		lineage,
 		id,
 		name: request.name,
 		task: request.message ?? "resumed session",

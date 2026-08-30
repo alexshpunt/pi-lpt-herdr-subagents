@@ -2469,6 +2469,30 @@ describe("subagent-done.ts", () => {
 		}
 	});
 
+	it("describes descendant-gated help and completion tools", () => {
+		const previousAutoExit = process.env.PI_SUBAGENT_AUTO_EXIT;
+		delete process.env.PI_SUBAGENT_AUTO_EXIT;
+		try {
+			const { api, registeredTools } = createMockExtensionApi();
+			subagentDoneExtension(api);
+			const callerPing = registeredTools.find((tool) => tool.name === "caller_ping");
+			const subagentDone = registeredTools.find((tool) => tool.name === "subagent_done");
+			assert.equal(
+				callerPing.description,
+				"Record a help request for the parent agent. " +
+					"The parent will be notified with your message, and delivery and session exit wait until recursively owned descendants drain. " +
+					"Use when you're stuck, need clarification, or need the parent to take action.",
+			);
+			assert.equal(
+				subagentDone.description,
+				"Record interactive completion intent. " +
+					"Return results and close this session after recursively owned descendants drain. " +
+					"Your LAST assistant message before calling this becomes the summary returned to the caller.",
+			);
+		} finally {
+			restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", previousAutoExit);
+		}
+	});
 	describe("shouldMarkUserTookOver", () => {
 		it("ignores the initial injected task before the first agent run", () => {
 			assert.equal(shouldMarkUserTookOver(false), false);
@@ -3039,6 +3063,7 @@ describe("completion.ts", () => {
 	});
 
 	it("retries transient terminal read failures and reports ticks", async () => {
+
 		let reads = 0;
 		let ticks = 0;
 		const result = await waitForCompletion(new AbortController().signal, {
@@ -3055,6 +3080,26 @@ describe("completion.ts", () => {
 		assert.deepEqual(result, { reason: "sentinel", exitCode: 0 });
 		assert.equal(reads, 2);
 		assert.equal(ticks, 1);
+	});
+
+
+	it("lets a delayed sidecar win a terminal sentinel race", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "completion-sentinel-race-"));
+		const sessionFile = join(dir, "child.jsonl");
+		const timer = setTimeout(() => {
+			writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done", summary: "OWNER_FINAL" }));
+		}, 30);
+		try {
+			const result = await waitForCompletion(new AbortController().signal, {
+				intervalMs: 1,
+				sessionFile,
+				readTerminalTail: async () => "__SUBAGENT_DONE_0__",
+			});
+			assert.deepEqual(result, { reason: "done", exitCode: 0, summary: "OWNER_FINAL" });
+		} finally {
+			clearTimeout(timer);
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("returns a failure when the pane explicitly disappears", async () => {
@@ -3526,7 +3571,12 @@ describe("tool registration", () => {
 
 		const autoExitSchema = resumeTool.parameters.properties.autoExit;
 		assert.equal(autoExitSchema.type, "boolean");
-		assert.match(autoExitSchema.description, /Defaults to true/);
+		assert.equal(
+			autoExitSchema.description,
+			"Whether a clean or empty response records auto-exit intent. " +
+				"Delivery and closure for the resumed session occur only after recursively owned descendants drain. " +
+				"Defaults to true for autonomous follow-up work; set false for interactive resumed sessions.",
+		);
 	});
 });
 
@@ -3553,7 +3603,7 @@ describe("subagent parent lifecycle", () => {
 		}
 	});
 
-	it("aborts and clears active subagents during final shutdown", () => {
+	it("retains active subagents during deliberate or unknown shutdown", () => {
 		for (const reason of ["quit", undefined]) {
 			const abortController = new AbortController();
 			const running = { abortController, lifecycle: createLifecycle(1_000) };
@@ -3561,13 +3611,11 @@ describe("subagent parent lifecycle", () => {
 
 			cleanupSubagentsForShutdown(reason, agents);
 
-			assert.equal(shouldPreserveSubagentsOnShutdown(reason), false);
-			assert.equal(abortController.signal.aborted, true);
-			// Delivery is suppressed before the map is cleared so a racing watcher
-			// that still holds a reference cannot deliver after shutdown.
-			assert.equal(running.lifecycle.delivery, "suppressed");
-			assert.equal(shouldDeliverSubagentCompletion(running), false);
-			assert.equal(agents.size, 0);
+			assert.equal(shouldPreserveSubagentsOnShutdown(reason), true);
+			assert.equal(abortController.signal.aborted, false);
+			assert.equal(running.lifecycle.delivery, "pending");
+			assert.equal(shouldDeliverSubagentCompletion(running), true);
+			assert.equal(agents.size, 1);
 		}
 	});
 

@@ -260,11 +260,11 @@ Add one internal awaitable wrapper around the existing launch/watch seams plus a
 - run in the shared exact-base checkout;
 - set auto-exit and preserve the child session;
 - await `watchSubagent()`;
-- store ownership only inside the process-global workflow run, never in public `runningSubagents` tracking;
+- register durable workflow lineage and keep live handles inside the process-global workflow run, never in public `runningSubagents` tracking;
 - close its ordinary pane after evidence capture;
 - map the result to `AgentResult` without calling `sendSubagentResult()`.
 
-Public listing, widgets, interrupt, resume, and shutdown paths cannot see or target workflow-owned children. The workflow controller alone cancels and finalizes them.
+Public listing, widgets, interrupt, resume, and shutdown paths cannot see or target workflow-owned children. While the controller is live, it cancels and finalizes them. After a full process restart, durable workflow lineage restores ownership, drains node results into the workflow inbox, and finalizes one interrupted envelope without replaying the script.
 
 A small private FIFO inside the bridge enforces metadata concurrency. Every `agent()` call, including retries, consumes the total-agent cap. This limiter is not exposed as a workflow API.
 
@@ -325,7 +325,7 @@ agent_completed
 agent_result
 pane_close_failed
 workflow_log
-completed | failed | cancelled | interrupted
+completed | failed | cancelled | interrupted_pending | interrupted
 delivery
 ```
 
@@ -333,7 +333,7 @@ delivery
 
 `delivery` follows the terminal event and contains only its terminal-event ID/state, target parent session, attempt time, and `sent | failed` delivery status. It never duplicates the task result. Evidence readers obtain the result from the referenced terminal event. Do not add mutable snapshots, locks, leases, backups, call caching, or replay.
 
-One process-global owner records the run ID, canonical project identity, lifecycle gate, Worker, and private child handles. `/new`, `/resume`, and `/fork` cannot start a second workflow while this owner exists; cancellation names the run ID and must match the current canonical project identity. On same-process `/reload`, the owner and Worker continue, and completion selects the latest extension API once. On full startup, scan only direct child directories under the current project's `.pi/plans/` and inspect only each journal's last valid event. A `delivery` event carries its referenced terminal state, a terminal event is already settled, and a non-terminal running event with no live process-global owner receives one `interrupted` terminal event. Do not recurse, restart, clean, or expose history UI.
+One process-global owner records the run ID, canonical project identity, lifecycle gate, Worker, and private child handles. `/new`, `/resume`, and `/fork` cannot start a second workflow while this owner exists; cancellation names the run ID and must match the current canonical project identity. On same-process `/reload`, the owner and Worker continue, and completion selects the latest extension API once. On full startup, scan only direct child directories under the current project's `.pi/plans/` and inspect each journal's last valid event plus its workflow-run lineage inbox. A `delivery` event carries its referenced terminal state, a terminal event is already settled, and a non-terminal running event receives one `interrupted_pending` marker. If recorded child nodes remain active, recovery waits for their terminal inbox entries; once they drain, recovery appends and delivers exactly one `interrupted` terminal envelope. Never replay the workflow script, rerun a child, or expose intermediate node results in the parent session.
 
 ## Implementation slices
 
@@ -384,8 +384,8 @@ All slices are sequential because they touch the same runtime and lifecycle seam
 
 - Cancel stops queued, active, and future work and delivers once.
 - `/reload` does not duplicate or lose final delivery; unit coverage proves the existing same-process API-selection helper remains valid for `/new`, `/resume`, and `/fork` without four duplicate real-LLM scenarios.
-- Full restart records interruption and performs no replay, restart, cleanup, or history.
-- Every terminal path closes read-only panes and retains session/journal evidence.
+- Full restart records `interrupted_pending` while descendants remain, drains their results into the workflow inbox, then records and delivers one interrupted envelope. It performs no script replay, child restart, automatic evidence cleanup, or history action.
+- Live terminal paths close read-only panes and retain session/journal evidence. Restart recovery retains existing evidence and does not replay cleanup.
 
 ### Slice 4 — bundled skill and documentation (shipped)
 
@@ -465,7 +465,7 @@ Scenarios:
 8. Prove synthesis receives every reviewer success or failure envelope and returns an incomplete task result when coverage is missing.
 9. Cancel with queued and active reviewers; capture their Herdr process IDs, prove they exit after pane closure and before checkout cleanup, and prove no synthesis or late success starts. A synthetic surviving-process case must retain the checkout and end `failed` with `cancel_termination_failed`.
 10. Reload during review and during synthesis; prove exactly one final delivery through the fresh API.
-11. Simulate full restart; prove the journal becomes interrupted without replay or cleanup.
+11. Simulate full restart; prove the journal records `interrupted_pending`, drains descendants into the workflow inbox, then emits one interrupted envelope without script replay, child restart, or automatic cleanup.
 12. Verify all ordinary panes close, `git worktree list` no longer contains a clean shared checkout, dirty or failed-removal checkouts are retained, and sessions/journal remain.
 
 ### Repository gate

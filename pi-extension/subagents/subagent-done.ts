@@ -19,10 +19,24 @@ import {
   type NewestAssistantEntry,
   type SettledOutcomeKind,
 } from "./settled-contract.ts";
+import {
+  hasUndrainedDescendants,
+  lineageFromEnvironment,
+  reduceLineage,
+} from "./lineage.ts";
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
   return agentStarted;
 }
 
+
+/** Wait until this session's owned descendants have terminal delivery. */
+async function waitForDescendantDrain(): Promise<void> {
+  const lineage = lineageFromEnvironment();
+  if (!lineage) return;
+  while (hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.parentNodeId)) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  }
+}
 function textFromContent(content: unknown): string {
   if (!Array.isArray(content)) return "";
   return content
@@ -258,7 +272,20 @@ export default function (pi: ExtensionAPI) {
 
   let latestAgentEndMessages: any[] | undefined;
   let latestTurnIndex: number | undefined;
-  let skillInitializationComplete = false;
+	let skillInitializationComplete = false;
+  // Resumed sessions replay the previous turn during startup. Do not publish
+  // that historical settlement as the new resume completion.
+  let resumeTurnStarted = process.env.PI_SUBAGENT_RESUME !== "1";
+  let resumeInputSeen = process.env.PI_SUBAGENT_RESUME !== "1";
+  const resumeBaselineAssistantIds = new Set<string>(
+    (() => {
+      if (process.env.PI_SUBAGENT_RESUME !== "1") return [];
+      try {
+        const value: unknown = JSON.parse(process.env.PI_SUBAGENT_RESUME_BASELINE_ASSISTANTS ?? "[]");
+        return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [];
+      } catch { return []; }
+    })(),
+  );
   // Parent-side interrupt bookkeeping is intentionally separate. Until the
   // parent wires an explicit interrupt request, an abort remains open and is
   // classified as an unexpected abort for delivery purposes.
@@ -274,6 +301,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("input", () => {
+    resumeInputSeen = true;
     recorder.input();
   });
 
@@ -281,6 +309,7 @@ export default function (pi: ExtensionAPI) {
     // Each run needs fresh agent_end evidence; never reuse a prior clean turn.
     latestAgentEndMessages = undefined;
     latestTurnIndex = undefined;
+    resumeTurnStarted = true;
     recorder.beforeAgentStart();
 
     if (skillInitializationComplete) return;
@@ -303,6 +332,31 @@ export default function (pi: ExtensionAPI) {
     recorder.agentEndWaiting();
   });
 
+  let exitRequested = false;
+  const finishAfterDrain = async (
+    ctx: { shutdown: () => void },
+    payload: Record<string, unknown>,
+  ): Promise<void> => {
+    if (exitRequested) return;
+    exitRequested = true;
+    const lineage = lineageFromEnvironment();
+    const shouldWaitForDescendants = lineage
+      ? hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.parentNodeId)
+      : false;
+    if (shouldWaitForDescendants) await waitForDescendantDrain();
+    const sessionFile = process.env.PI_SUBAGENT_SESSION;
+    if (sessionFile) {
+      try {
+        // Publish completion only after descendants drain so the parent can
+        // observe this owner's settled turns before its terminal result.
+        writeFileSync(`${sessionFile}.exit`, JSON.stringify(payload));
+      } catch {
+        // Best effort — the wrapper sentinel remains available after shutdown.
+      }
+    }
+    ctx.shutdown();
+  };
+
   pi.on("agent_settled", (_event, ctx) => {
     const outcome = classifyAutoExitOutcome(
       latestAgentEndMessages,
@@ -310,6 +364,12 @@ export default function (pi: ExtensionAPI) {
     );
     const assistant = newestAssistantEntry(latestAgentEndMessages);
     if (!outcome || !assistant) return;
+    if (resumeBaselineAssistantIds.has(assistant.id)) {
+      // Pi replays the previous assistant turn while opening a resumed session.
+      // Its settlement is not the follow-up requested by the parent.
+      return;
+    }
+    if (!resumeTurnStarted || (process.env.PI_SUBAGENT_RESUME === "1" && !resumeInputSeen)) return;
 
     recorder.agentSettled({
       outcome,
@@ -322,16 +382,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     if (!autoExit || (outcome !== "clean" && outcome !== "empty")) return;
-
-    const sessionFile = process.env.PI_SUBAGENT_SESSION;
-    if (sessionFile) {
-      try {
-        writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done" }));
-      } catch {
-        // Best effort — the wrapper sentinel remains available after shutdown.
-      }
-    }
-    ctx.shutdown();
+    void finishAfterDrain(ctx, { type: "done" });
   });
 
   pi.on("turn_start", (event) => {
@@ -401,8 +452,8 @@ export default function (pi: ExtensionAPI) {
     name: "caller_ping",
     label: "Caller Ping",
     description:
-      "Send a help request to the parent agent and exit this session. " +
-      "The parent will be notified with your message and can resume this session with a response. " +
+      "Record a help request for the parent agent. " +
+      "The parent will be notified with your message, and delivery and session exit wait until recursively owned descendants drain. " +
       "Use when you're stuck, need clarification, or need the parent to take action.",
     parameters: Type.Object({
       message: Type.String({ description: "What you need help with" }),
@@ -422,9 +473,7 @@ export default function (pi: ExtensionAPI) {
         name: process.env.PI_SUBAGENT_NAME ?? "subagent",
         message: params.message,
       };
-      writeFileSync(`${sessionFile}.exit`, JSON.stringify(exitData));
-
-      ctx.shutdown();
+      await finishAfterDrain(ctx, exitData);
       return {
         content: [
           {
@@ -443,17 +492,31 @@ export default function (pi: ExtensionAPI) {
     name: "subagent_done",
     label: "Subagent Done",
     description:
-      "Call this tool when you have completed your task. " +
-      "It will close this session and return your results to the main session. " +
+      "Record interactive completion intent. " +
+      "Return results and close this session after recursively owned descendants drain. " +
       "Your LAST assistant message before calling this becomes the summary returned to the caller.",
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      const sessionFile = process.env.PI_SUBAGENT_SESSION;
+    parameters: Type.Object({ summary: Type.Optional(Type.String({ description: "Optional final summary" })) }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       recorder.subagentDone();
-      if (sessionFile) {
-        writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done" }));
+      const payload = {
+        type: "done" as const,
+        ...(typeof params.summary === "string" && params.summary.trim()
+          ? { summary: params.summary }
+          : {}),
+      };
+      const lineage = lineageFromEnvironment();
+      const pendingDescendants = lineage
+        ? hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.parentNodeId)
+        : false;
+      if (!pendingDescendants) {
+        const sessionFile = process.env.PI_SUBAGENT_SESSION;
+        if (sessionFile) {
+          try { writeFileSync(`${sessionFile}.exit`, JSON.stringify(payload)); } catch {}
+        }
+        ctx.shutdown();
+      } else {
+        await finishAfterDrain(ctx, payload);
       }
-      ctx.shutdown();
       return {
         content: [{ type: "text", text: "Shutting down subagent session." }],
         details: {},

@@ -32,8 +32,7 @@ Manual deterministic Herdr integration (required before you push a release commi
 npm run test:integration
 ```
 
-Run that suite from inside Herdr. It uses real Pi and Herdr processes with the local deterministic provider, so it needs no provider credentials or network access.
-
+Run that suite from inside Herdr. The shipped command bootstraps a separate test-owned headless Herdr server with a private socket, config, state directory, and worktree directory. It clears inherited Herdr identity and fails closed if the private endpoint cannot start, so it never falls back to the persistent user server. Normal exit and `SIGINT`, `SIGTERM`, or `SIGHUP` use one idempotent shutdown that verifies child and server process groups have exited, escalates after bounded grace, and removes only owned paths. Concurrent runs use separate endpoints and need no shared Herdr test slot. It uses real Pi and Herdr processes with the local deterministic provider, so it needs no provider credentials or network access. A focused file can be passed after `--`, for example `npm run test:integration -- test/integration/mux-surface.test.ts`.
 The optional live-provider smoke test is not a release gate:
 
 ```bash

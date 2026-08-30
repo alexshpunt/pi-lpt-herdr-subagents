@@ -174,9 +174,9 @@ Cancellation is fail-closed: active child process identities are captured,
 panes are closed, process exit is confirmed before checkout disposal, and an
 unconfirmed process retains the checkout and produces a failed terminal result.
 A same-process `/reload` preserves the active owner and one final delivery. A
-full process restart does not replay work; stale running evidence is marked
-`interrupted`, retained artifacts remain for inspection, and a new approved
-run is required.
+full process restart does not replay work; recovery waits for recorded child
+nodes to drain, publishes one interrupted envelope, retains artifacts for
+inspection, and requires a new approved run.
 
 The Worker and Node `vm` isolate workflow availability from Pi's main event
 loop, but neither is a security boundary. Treat the approved script as trusted

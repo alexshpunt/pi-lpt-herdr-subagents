@@ -3,10 +3,15 @@
  * - Shows agent identity + available tools as a styled widget above the editor (toggle with Ctrl+J)
  * - Provides a `subagent_done` tool for interactive agents to self-terminate
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  stripFrontmatter,
+  type ExtensionAPI,
+  type BeforeAgentStartEvent,
+  type BeforeAgentStartEventResult,
+} from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createSubagentActivityRecorder } from "./activity.ts";
 import {
   classifySettledOutcome,
@@ -131,6 +136,50 @@ export function parseDeniedTools(rawValue: string | undefined): string[] {
     .filter(Boolean);
 }
 
+/** Build one hidden, session-persistent initialization message for requested skills. */
+export function buildSkillInitialization(
+  event: BeforeAgentStartEvent,
+  requestedSkills: string,
+  notify: (message: string, type?: "info" | "warning" | "error") => void,
+): BeforeAgentStartEventResult | undefined {
+  const names = [...new Set(
+    requestedSkills
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean),
+  )];
+  if (names.length === 0) return undefined;
+
+  const catalog = event.systemPromptOptions.skills ?? [];
+  const blocks: string[] = [];
+  for (const name of names) {
+    const skill = catalog.find((candidate) => candidate.name === name);
+    if (!skill) {
+      notify(`Unable to load requested skill "${name}": not found in Pi's resolved skill catalog.`, "warning");
+      continue;
+    }
+    try {
+      const body = stripFrontmatter(readFileSync(skill.filePath, "utf8")).trim();
+      blocks.push(
+        `<skill name="${skill.name}" location="${skill.filePath}">\n` +
+          `References are relative to ${skill.baseDir}.\n\n${body}\n</skill>`,
+      );
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      notify(`Unable to load requested skill "${name}": ${reason}`, "warning");
+    }
+  }
+
+  if (blocks.length === 0) return undefined;
+  return {
+    message: {
+      customType: "subagent_skill_initialization",
+      content: [{ type: "text", text: blocks.join("\n\n") }],
+      display: false,
+    },
+  };
+}
+
 export default function (pi: ExtensionAPI) {
   let toolNames: string[] = [];
   let denied: string[] = [];
@@ -209,6 +258,7 @@ export default function (pi: ExtensionAPI) {
 
   let latestAgentEndMessages: any[] | undefined;
   let latestTurnIndex: number | undefined;
+  let skillInitializationComplete = false;
   // Parent-side interrupt bookkeeping is intentionally separate. Until the
   // parent wires an explicit interrupt request, an abort remains open and is
   // classified as an unexpected abort for delivery purposes.
@@ -227,11 +277,19 @@ export default function (pi: ExtensionAPI) {
     recorder.input();
   });
 
-  pi.on("before_agent_start", () => {
+  pi.on("before_agent_start", (event, ctx) => {
     // Each run needs fresh agent_end evidence; never reuse a prior clean turn.
     latestAgentEndMessages = undefined;
     latestTurnIndex = undefined;
     recorder.beforeAgentStart();
+
+    if (skillInitializationComplete) return;
+    skillInitializationComplete = true;
+    const requestedSkills = process.env.PI_SUBAGENT_SKILLS;
+    if (requestedSkills === undefined) return;
+    return buildSkillInitialization(event, requestedSkills, (message, type) =>
+      ctx.ui.notify(message, type),
+    );
   });
 
   pi.on("agent_start", () => {

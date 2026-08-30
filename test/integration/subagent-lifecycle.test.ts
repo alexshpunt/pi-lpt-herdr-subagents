@@ -92,6 +92,57 @@ function readSettledResult(sessionFile: string): IntegrationResultDetails {
 	);
 }
 
+function readSessionEntries(sessionFile: string): any[] {
+	return readFileSync(sessionFile, "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line));
+}
+
+function writeIntegrationSkill(root: string, name: string, bodyMarker: string): void {
+	const directory = join(root, ".pi", "skills", name);
+	mkdirSync(directory, { recursive: true });
+	writeFileSync(
+		join(directory, "SKILL.md"),
+		`---\nname: ${name}\ndescription: ALE-54 integration fixture\n---\n\nSkill body marker: ${bodyMarker}\n`,
+		"utf8",
+	);
+}
+
+function writeSkillRole(root: string, name: string, skills: string, autoExit = true): void {
+	writeFileSync(
+		join(root, ".pi", "agents", `${name}.md`),
+		`---\nname: ${name}\ndescription: ALE-54 skill-loading fixture\ntools: read\nskills: ${skills}\nauto-exit: ${autoExit}\n---\nReturn the requested result exactly.\n`,
+		"utf8",
+	);
+}
+
+function countText(source: string, value: string): number {
+	return source.split(value).length - 1;
+}
+
+async function waitForParentEvidence(
+	path: string,
+	pattern: RegExp,
+	surface: string,
+	timeout: number,
+): Promise<void> {
+	try {
+		await waitForFile(path, timeout, pattern);
+	} catch (error) {
+		const requests = getProviderRequests().map((request) => ({
+			status: request.status,
+			tools: request.tools,
+			text: request.text.slice(-800),
+		}));
+		throw new Error(
+			`${error instanceof Error ? error.message : String(error)}\n` +
+			`Parent screen:\n${readPane(surface, 300)}\n` +
+			`Provider requests:\n${JSON.stringify(requests, null, 2)}`,
+		);
+	}
+}
+
 function listWorkspacePanes(workspaceId: string): Array<{ pane_id?: string; label?: string; agent_session?: { value?: string } }> {
 	return JSON.parse(execFileSync("herdr", ["pane", "list", "--workspace", workspaceId], { encoding: "utf8" }))
 		.result.panes as Array<{ pane_id?: string; label?: string; agent_session?: { value?: string } }>;
@@ -400,6 +451,153 @@ for (const backend of backends) {
 					),
 				false,
 			);
+		});
+
+		it("injects role-derived skills into the first child request without extra turns", async () => {
+			const id = uniqueId();
+			const firstBody = `ROLE_SKILL_FIRST_BODY_${id}`;
+			const secondBody = `ROLE_SKILL_SECOND_BODY_${id}`;
+			const report = `ROLE_SKILL_REPORT_${id}`;
+			const role = `ale54-role-${id}`;
+			const parentSession = join(env.dir, `role-skills-parent-${id}.jsonl`);
+			writeIntegrationSkill(env.dir, "ale54-first", firstBody);
+			writeIntegrationSkill(env.dir, "ale54-second", secondBody);
+			writeSkillRole(env.dir, role, "ale54-first,ale54-second");
+
+			const surface = createTrackedSurface(env, `role-skills-${id}`);
+			await waitForPaneReady(surface);
+			startPi(surface, env.dir, [
+				"Call the subagent tool with these EXACT parameters:",
+				`  name: "RoleSkills-${id}"`,
+				`  agent: "${role}"`,
+				`  task: "Return exactly ${report}"`,
+				"Do not do anything else. Just call the subagent tool once.",
+			].join("\n"), { extraArgs: `--session ${shellQuote(parentSession)}` });
+
+			await waitForParentEvidence(parentSession, /"customType":"subagent_result"/, surface, PI_TIMEOUT);
+			const parentEntries = readSessionEntries(parentSession);
+			const results = parentEntries.filter((entry) =>
+				entry.type === "custom_message" && entry.customType === "subagent_result");
+			const childSession = results[0]?.details?.sessionFile;
+			assert.equal(typeof childSession, "string", "parent result must identify the child session");
+			const childEntries = readSessionEntries(childSession);
+			const childRequests = getProviderRequests().filter((request) =>
+				!request.tools.includes("subagent") &&
+				(request.text.includes(firstBody) || request.text.includes(secondBody)));
+			const violations = [
+				...(childRequests.length !== 1 ? [`expected one skill-bearing provider request, got ${childRequests.length}`] : []),
+				...(!childRequests[0]?.text.includes(firstBody) ? ["first role skill was absent from the first child request"] : []),
+				...(!childRequests[0]?.text.includes(secondBody) ? ["second role skill was absent from the first child request"] : []),
+				...(!childRequests[0]?.text.includes(report) ? ["assigned task was absent from the skill-bearing first child request"] : []),
+				...(JSON.stringify(childEntries).includes("/skill:") ? ["child session contains a /skill: user command"] : []),
+				...(results.length !== 1 ? [`expected one parent result, got ${results.length}`] : []),
+				...(!String(results[0]?.details?.resultContent).includes(report) ? ["parent received a skill response instead of the finished report"] : []),
+			];
+			assert.deepEqual(violations, []);
+		});
+
+		it("uses a direct skill override once and keeps missing skill warnings out of model and parent content", async () => {
+			const id = uniqueId();
+			const roleBody = `OVERRIDDEN_ROLE_SKILL_BODY_${id}`;
+			const directBody = `DIRECT_SKILL_BODY_${id}`;
+			const report = `DIRECT_SKILL_REPORT_${id}`;
+			const role = `ale54-direct-${id}`;
+			const parentSession = join(env.dir, `direct-skills-parent-${id}.jsonl`);
+			writeIntegrationSkill(env.dir, "ale54-role-default", roleBody);
+			writeIntegrationSkill(env.dir, "ale54-direct", directBody);
+			writeSkillRole(env.dir, role, "ale54-role-default", false);
+
+			const childName = `DirectSkills-${id}`;
+			const surface = createTrackedSurface(env, `direct-skills-${id}`);
+			await waitForPaneReady(surface);
+			startPi(surface, env.dir, [
+				"Call the subagent tool with these EXACT parameters:",
+				`  name: "${childName}"`,
+				`  agent: "${role}"`,
+				'  skills: "ale54-direct, ale54-missing, ale54-direct, ale54-missing"',
+				`  task: "Return exactly ${report}"`,
+				"Do not do anything else. Just call the subagent tool once.",
+			].join("\n"), { extraArgs: `--session ${shellQuote(parentSession)}` });
+
+			await waitForParentEvidence(
+				parentSession,
+				new RegExp(`"customType":"subagent_result"[^\\n]*${report}`),
+				surface,
+				PI_TIMEOUT,
+			);
+			const childPane = await waitForAgentPane(childName, env.workspaceId);
+			const childScreen = await waitForScreen(
+				childPane,
+				/ale54-missing/i,
+				PI_TIMEOUT,
+				300,
+			);
+			const parentEntries = readSessionEntries(parentSession);
+			const results = parentEntries.filter((entry) =>
+				entry.type === "custom_message" && entry.customType === "subagent_result");
+			const childSession = results[0]?.details?.sessionFile;
+			assert.equal(typeof childSession, "string", "parent result must identify the child session");
+			const childEntries = readSessionEntries(childSession);
+			const childRequests = getProviderRequests().filter((request) =>
+				!request.tools.includes("subagent") &&
+				(request.text.includes(directBody) || request.text.includes(report)));
+			const modelText = childRequests.map((request) => request.text).join("\n");
+			const childReportText = childEntries
+				.filter((entry) => entry.type === "message" && entry.message?.role === "assistant")
+				.map((entry) => JSON.stringify(entry.message.content))
+				.join("\n");
+			const parentResultText = results.map((result) => JSON.stringify(result)).join("\n");
+			const violations = [
+				...(childRequests.length !== 1 ? [`expected one direct-skill/task provider request, got ${childRequests.length}`] : []),
+				...(countText(childRequests[0]?.text ?? "", directBody) !== 1 ? ["duplicate direct skill was not injected exactly once"] : []),
+				...(modelText.includes(roleBody) ? ["direct skills did not replace the role default"] : []),
+				...(!childRequests[0]?.text.includes(report) ? ["assigned task was absent from the direct-skill first request"] : []),
+				...(JSON.stringify(childEntries).includes("/skill:") ? ["child session contains a /skill: user command"] : []),
+				...(modelText.includes("ale54-missing") ? ["skill warning leaked into child model context"] : []),
+				...(childReportText.includes("ale54-missing") ? ["skill warning leaked into the child report"] : []),
+				...(parentResultText.includes("ale54-missing") ? ["skill warning leaked into the parent result"] : []),
+				...(results.length !== 1 ? [`expected one parent result, got ${results.length}`] : []),
+				...(!String(results[0]?.details?.resultContent).includes(report) ? ["parent did not receive the finished direct-skill report"] : []),
+				...(!childScreen.includes("ale54-missing") ? ["child UI did not show the non-blocking skill warning"] : []),
+			];
+			assert.deepEqual(violations, []);
+		});
+
+		it("treats an explicit empty direct skills value as disabling role skills", async () => {
+			const id = uniqueId();
+			const roleBody = `EMPTY_OVERRIDE_ROLE_BODY_${id}`;
+			const report = `EMPTY_OVERRIDE_REPORT_${id}`;
+			const role = `ale54-empty-${id}`;
+			const parentSession = join(env.dir, `empty-skills-parent-${id}.jsonl`);
+			writeIntegrationSkill(env.dir, "ale54-empty-default", roleBody);
+			writeSkillRole(env.dir, role, "ale54-empty-default");
+
+			const surface = createTrackedSurface(env, `empty-skills-${id}`);
+			await waitForPaneReady(surface);
+			startPi(surface, env.dir, [
+				"Call the subagent tool with these EXACT parameters:",
+				`  name: "EmptySkills-${id}"`,
+				`  agent: "${role}"`,
+				'  skills: ""',
+				`  task: "Return exactly ${report}"`,
+				"Do not do anything else. Just call the subagent tool once.",
+			].join("\n"), { extraArgs: `--session ${shellQuote(parentSession)}` });
+
+			await waitForParentEvidence(
+				parentSession,
+				new RegExp(`"customType":"subagent_result"[^\\n]*${report}`),
+				surface,
+				PI_TIMEOUT,
+			);
+			const results = readSessionEntries(parentSession).filter((entry) =>
+				entry.type === "custom_message" && entry.customType === "subagent_result");
+			assert.equal(
+				getProviderRequests().some((request) => request.text.includes(roleBody)),
+				false,
+				"an explicit empty direct value must disable the role skill",
+			);
+			assert.equal(results.length, 1);
+			assert.match(String(results[0].details?.resultContent), new RegExp(report));
 		});
 
 		it("runs a writing subagent in a retained Herdr worktree", async () => {
@@ -802,6 +1000,137 @@ for (const backend of backends) {
 		});
 
 		// ── Agent discovery ──
+
+
+		it("resumes a non-auto-exit skilled child without reinitializing its session", async () => {
+			const id = uniqueId();
+			const skillBody = `RESUME_SKILL_BODY_${id}`;
+			const initialReport = `RESUME_INITIAL_REPORT_${id}`;
+			const resumedReport = `RESUME_RESULT_${id}`;
+			const followup = `RESUME_FOLLOWUP_INPUT: ${id}`;
+			const role = `ale54-resume-role-${id}`;
+			const firstParentSession = join(env.dir, `resume-skilled-parent-${id}.jsonl`);
+			writeIntegrationSkill(env.dir, "ale54-resume-skill", skillBody);
+			writeSkillRole(env.dir, role, "ale54-resume-skill", false);
+
+			const firstParent = createTrackedSurface(env, `resume-skilled-parent-${id}`);
+			await waitForPaneReady(firstParent);
+			startPi(
+				firstParent,
+				env.dir,
+				[
+					"Call the subagent tool with these EXACT parameters:",
+					`  name: "ResumeSkilled-${id}"`,
+					`  agent: "${role}"`,
+					"  autoExit: false",
+					`  task: "Return exactly ${initialReport}"`,
+					"Call the tool once and wait for its asynchronous result.",
+				].join("\n"),
+				{ extraArgs: `--session ${shellQuote(firstParentSession)}` },
+			);
+
+			await waitForParentEvidence(
+				firstParentSession,
+				/"customType":"subagent_result"/,
+				firstParent,
+				PI_TIMEOUT,
+			);
+			const firstParentEntries = readSessionEntries(firstParentSession);
+			const firstResults = firstParentEntries.filter(
+				(entry) =>
+					entry.type === "custom_message" &&
+					entry.customType === "subagent_result",
+			);
+			assert.equal(firstResults.length, 1, "initial parent must receive one result");
+			assert.match(String(firstResults[0]?.details?.resultContent), new RegExp(initialReport));
+			const childSession = firstResults[0]?.details?.sessionFile;
+			assert.equal(typeof childSession, "string", "initial result must identify child session");
+			if (typeof childSession !== "string") return;
+
+			const initialChildRequests = getProviderRequests().filter(
+				(request) =>
+					request.text.includes(skillBody) &&
+					request.text.includes(initialReport),
+			);
+			assert.equal(initialChildRequests.length, 1, "skill and task must share the initial child request");
+			assert.equal(
+				countText(readFileSync(childSession, "utf8"), "subagent_skill_initialization"),
+				1,
+				"initial child session must persist one skill initialization message",
+			);
+
+			const secondParent = createTrackedSurface(env, `resume-skilled-followup-${id}`);
+			await waitForPaneReady(secondParent);
+			const secondParentSession = join(env.dir, `resume-skilled-followup-${id}.jsonl`);
+			startPi(
+				secondParent,
+				env.dir,
+				[
+					"Call the subagent_resume tool with these EXACT parameters:",
+					`  sessionPath: "${childSession}"`,
+					`  name: "ResumeSkilledFollowup-${id}"`,
+					`  message: "${followup}"`,
+					"  autoExit: true",
+					"Call the tool once and wait for its asynchronous result.",
+				].join("\n"),
+				{ extraArgs: `--session ${shellQuote(secondParentSession)}` },
+			);
+			await waitForParentEvidence(
+				secondParentSession,
+				/"customType":"subagent_result"/,
+				secondParent,
+				PI_TIMEOUT,
+			);
+
+			const secondParentEntries = readSessionEntries(secondParentSession);
+			const secondResults = secondParentEntries.filter(
+				(entry) =>
+					entry.type === "custom_message" &&
+					entry.customType === "subagent_result",
+			);
+			assert.equal(secondResults.length, 1, "resume parent must receive one result");
+			assert.match(String(secondResults[0]?.details?.resultContent), new RegExp(resumedReport));
+
+			await waitForFile(childSession, PI_TIMEOUT, new RegExp(resumedReport));
+			assert.equal(
+				readSessionEntries(firstParentSession).filter(
+					(entry) =>
+						entry.type === "custom_message" &&
+						entry.customType === "subagent_result",
+				).length,
+				1,
+				"resuming must not duplicate the initial result in its original parent",
+			);
+			const childEntries = readSessionEntries(childSession);
+			const resumedRequests = getProviderRequests().filter(
+				(request) =>
+					request.text.includes(skillBody) && request.text.includes(followup),
+			);
+			assert.equal(resumedRequests.length, 1, "resume request must retain the original skill body");
+			assert.equal(
+				countText(JSON.stringify(childEntries), "subagent_skill_initialization"),
+				1,
+				"resuming must not add a second skill initialization message",
+			);
+			assert.equal(
+				childEntries.filter((entry) =>
+					entry.type === "message" &&
+					entry.message?.role === "user" &&
+					/\/skill:/.test(JSON.stringify(entry)),
+				).length,
+				0,
+				"child session must not contain skill command turns",
+			);
+			assert.doesNotMatch(JSON.stringify(childEntries), /Unable to load requested skill/);
+			assert.doesNotMatch(
+				getProviderRequests()
+					.filter((request) => request.text.includes(skillBody))
+					.map((request) => request.text)
+					.join("\n"),
+				/Unable to load requested skill/,
+			);
+			assert.doesNotMatch(String(secondResults[0]?.details?.resultContent), /Unable to load requested skill/);
+		});
 
 		it("subagent discovers project-local test agents", async () => {
 			const id = uniqueId();

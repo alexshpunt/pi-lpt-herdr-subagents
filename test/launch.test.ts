@@ -121,7 +121,9 @@ describe("Pi launch", () => {
 			assert.doesNotMatch(command, /subagent_done/);
 			assert.match(command, /PI_DENY_TOOLS='subagent,subagent_resume'/);
 			assert.match(command, /PI_SUBAGENT_AUTO_EXIT=1/);
-			assert.match(command, /'' '\/skill:tdd' '@[^']+\.md'/);
+			assert.match(command, /PI_SUBAGENT_SKILLS='tdd'/);
+			assert.doesNotMatch(command, /\/skill:/);
+			assert.match(command, /'@[^']+\.md'; echo '__SUBAGENT_DONE_'/);
 
 			const taskPath = command.match(/'@([^']+\.md)'/)?.[1];
 			assert.ok(taskPath, "expected artifact-backed task delivery");

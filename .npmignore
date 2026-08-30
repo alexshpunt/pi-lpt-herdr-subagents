@@ -1,5 +1,9 @@
 .pi/
 test/
+.agents/
+.lpt/
+.mesh/
+.linear-project
 docs/assets/
 .github/
 .gitignore

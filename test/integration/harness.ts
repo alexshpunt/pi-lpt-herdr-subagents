@@ -155,6 +155,11 @@ export interface TestEnv {
 }
 
 function writeTestProviderConfig(agentDir: string): void {
+  writeFileSync(
+    join(agentDir, "settings.json"),
+    JSON.stringify({ defaultProjectTrust: "always" }, null, 2),
+    "utf8",
+  );
   writeFileSync(join(agentDir, "models.json"), JSON.stringify({
     providers: {
       "pi-integration": {

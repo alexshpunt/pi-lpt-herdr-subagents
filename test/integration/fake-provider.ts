@@ -34,6 +34,9 @@ export const TEST_MODEL = "pi-integration/test";
 export interface ProviderRequest {
 	model?: string;
 	status: number;
+	messages: ChatMessage[];
+	tools: string[];
+	text: string;
 }
 
 const providerRequests: ProviderRequest[] = [];
@@ -86,6 +89,16 @@ function toolNames(request: ChatRequest): Set<string> {
 	);
 }
 
+function providerRequest(request: ChatRequest, status: number): ProviderRequest {
+	return {
+		model: request.model,
+		status,
+		messages: request.messages ?? [],
+		tools: [...toolNames(request)],
+		text: requestText(request),
+	};
+}
+
 function quotedValue(source: string, key: string): string | undefined {
 	const match = source.match(
 		new RegExp(`\\b${key}:\\s*"((?:\\\\.|[^"\\\\])*)"`),
@@ -110,6 +123,8 @@ function subagentCalls(source: string): ToolCall[] {
 		const model = quotedValue(section, "model");
 		const cwd = quotedValue(section, "cwd");
 		const systemPrompt = quotedValue(section, "systemPrompt");
+		const skills = quotedValue(section, "skills");
+		const hasSkills = /\bskills:\s*"/.test(section);
 		const branch = section.match(
 			/\bworktree:\s*\{\s*branch:\s*"((?:\\.|[^"\\])*)"/,
 		)?.[1];
@@ -122,6 +137,8 @@ function subagentCalls(source: string): ToolCall[] {
 					...(model ? { model } : {}),
 					...(cwd ? { cwd } : {}),
 					...(systemPrompt ? { systemPrompt } : {}),
+					...(hasSkills ? { skills: skills ?? "" } : {}),
+					...(section.includes("autoExit: false") ? { autoExit: false } : {}),
 					...(section.includes("fork: true") ? { fork: true } : {}),
 					...(branch ? { worktree: { branch } } : {}),
 					task,
@@ -419,15 +436,15 @@ const server = createServer(async (request, response) => {
 	try {
 		const chatRequest = await readJson(request);
 		if (chatRequest.model === "fallback-primary" || chatRequest.model === "fallback-fail") {
-			providerRequests.push({ model: chatRequest.model, status: 503 });
+			providerRequests.push(providerRequest(chatRequest, 503));
 			response.writeHead(503, { "content-type": "application/json" });
 			response.end(JSON.stringify({ error: { message: "deterministic fallback provider failure" } }));
 			return;
 		}
-		providerRequests.push({ model: chatRequest.model, status: 200 });
+		providerRequests.push(providerRequest(chatRequest, 200));
 		writeResponse(response, chatRequest, await planResponse(chatRequest));
 	} catch (error) {
-		providerRequests.push({ status: 500 });
+		providerRequests.push({ status: 500, messages: [], tools: [], text: "" });
 		response.writeHead(500, { "content-type": "application/json" });
 		response.end(
 			JSON.stringify({

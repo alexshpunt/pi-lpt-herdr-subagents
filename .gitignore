@@ -7,3 +7,6 @@ config.json
 
 # Local agent coordination state
 .mesh/
+
+# Local project task artifacts (journal, prep files)
+.lpt/

@@ -844,6 +844,20 @@ spawning: false
 ---
 ```
 
+
+### `allow-self-spawn: true`
+
+Exact-role self-spawn is denied by default. Set this only on an orchestrator that must hand a distinct task to a fresh instance of its own role:
+
+```yaml
+---
+name: project-manager
+allow-self-spawn: true
+---
+```
+
+The child still uses ordinary subagent lifecycle rules. The role prompt must define a bounded handoff and prevent same-task recursion. Other roles remain blocked when the field is absent or false.
+
 ### `deny-tools`
 
 Fine-grained control over tools registered by `pi-lpt-herdr-subagents`:

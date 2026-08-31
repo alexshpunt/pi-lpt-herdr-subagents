@@ -305,6 +305,7 @@ interface AgentDefaults {
 	thinking?: ThinkingLevel;
 	denyTools?: string;
 	spawning?: boolean;
+	allowSelfSpawn?: boolean;
 	autoExit?: boolean;
 	interactive?: boolean;
 	systemPromptMode?: "append" | "replace";
@@ -443,6 +444,9 @@ function parseAgentDefinition(
 		denyTools: getFrontmatterValue(frontmatter, "deny-tools"),
     spawning: parseOptionalBoolean(
       getFrontmatterValue(frontmatter, "spawning"),
+    ),
+    allowSelfSpawn: parseOptionalBoolean(
+      getFrontmatterValue(frontmatter, "allow-self-spawn"),
     ),
     autoExit: parseOptionalBoolean(
       getFrontmatterValue(frontmatter, "auto-exit"),
@@ -827,6 +831,21 @@ function loadAgentDefaults(
 	return (
 		discoverAgentCatalog(pi).agents.find((agent) => agent.name === agentName) ??
 		null
+	);
+}
+
+
+/** Return whether an agent must be prevented from launching its own role. */
+function isSelfSpawnBlocked(
+	targetAgent: string | undefined,
+	currentAgent: string | undefined,
+	currentAgentDefaults: AgentDefaults | null,
+): boolean {
+	return Boolean(
+		targetAgent &&
+			currentAgent &&
+			targetAgent === currentAgent &&
+			currentAgentDefaults?.allowSelfSpawn !== true,
 	);
 }
 
@@ -2759,6 +2778,7 @@ export const __test__ = {
 	observeRunningSubagent,
 	waitForDescendantDrain,
 	resolveDenyTools,
+	isSelfSpawnBlocked,
 	resolveInterruptTarget,
   handleSubagentCancel,
 	requestSubagentInterrupt,
@@ -4135,9 +4155,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			parameters: SubagentParams,
 
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-				// Prevent self-spawning (e.g. planner spawning another planner)
+				// Self-spawn stays denied unless the current role opts in explicitly.
 				const currentAgent = process.env.PI_SUBAGENT_AGENT;
-				if (params.agent && currentAgent && params.agent === currentAgent) {
+				const currentAgentDefaults = currentAgent
+					? loadAgentDefaults(currentAgent, runtime.pi)
+					: null;
+				if (isSelfSpawnBlocked(params.agent, currentAgent, currentAgentDefaults)) {
 					return {
 						content: [
 							{

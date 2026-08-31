@@ -1698,6 +1698,45 @@ describe("subagent discovery", () => {
 		});
 	});
 
+
+	it("keeps self-spawn denied unless the current role opts in", async () => {
+		await withIsolatedAgentEnv(async ({ globalAgentsDir }) => {
+			writeAgentFile(
+				globalAgentsDir,
+				"ordinary-agent",
+				"name: ordinary-agent",
+			);
+			writeAgentFile(
+				globalAgentsDir,
+				"project-manager",
+				["name: project-manager", "allow-self-spawn: true"].join("\n"),
+			);
+
+			const ordinary = testApi.loadAgentDefaults("ordinary-agent");
+			const projectManager = testApi.loadAgentDefaults("project-manager");
+			assert.ok(ordinary);
+			assert.ok(projectManager);
+			assert.equal(ordinary.allowSelfSpawn, undefined);
+			assert.equal(projectManager.allowSelfSpawn, true);
+			assert.equal(
+				testApi.isSelfSpawnBlocked("ordinary-agent", "ordinary-agent", ordinary),
+				true,
+			);
+			assert.equal(
+				testApi.isSelfSpawnBlocked(
+					"project-manager",
+					"project-manager",
+					projectManager,
+				),
+				false,
+			);
+			assert.equal(
+				testApi.isSelfSpawnBlocked("coder", "project-manager", projectManager),
+				false,
+			);
+		});
+	});
+
 	it("gives bundled orchestrators the subagent tool they require", () => {
 		const poteto = testApi.loadAgentDefaults("poteto");
 		assert.ok(poteto, "expected bundled poteto agent to be discoverable");

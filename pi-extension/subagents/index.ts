@@ -305,19 +305,6 @@ const SubagentParams = Type.Object({
 });
 
 
-function isSelfSpawnBlocked(
-	targetAgent: string | undefined,
-	currentAgent: string | undefined,
-	currentAgentDefaults: AgentDefaults | null,
-): boolean {
-	return Boolean(
-		targetAgent &&
-			currentAgent &&
-			targetAgent === currentAgent &&
-			currentAgentDefaults?.allowSelfSpawn !== true,
-	);
-}
-
 
 function discoverAgentDefinitions(
 	pi?: Pick<ExtensionAPI, "events">,

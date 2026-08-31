@@ -89,7 +89,40 @@ function claimTerminalIntent(s:State,kind:"completed"|"cancelled"):boolean{retur
 function currentTerminalIntent(s:State):"completed"|"cancelled"|undefined{return readJson<{kind?:unknown}>(terminalIntentPath(s))?.kind as "completed"|"cancelled"|undefined;}
 function branchNodes(s:State):NodeRecord[]{const d=join(s.meta.treeDir,"nodes");if(!existsSync(d))return [];return readdirSync(d).filter(x=>x.endsWith(".json")).flatMap(f=>{const n=readJson<NodeRecord>(join(d,f));return n?.ownerId===s.ownerId?[n]:[];});}
 async function waitBranchTransactions(s:State):Promise<boolean>{const deadline=Date.now()+CANCEL_TIMEOUT_MS;while(s.launchTransactions.size&&Date.now()<deadline)await new Promise(r=>setTimeout(r,25));return s.launchTransactions.size===0;}
-async function cancelBranch(s:State):Promise<void>{if(s.branchCancellation)return s.branchCancellation;s.cancellationRequested=true;s.branchCancellation=(async()=>{const mux=await import("./pi-extension/subagents/terminal.ts");for(const controller of s.launchControllers)controller.abort();const transactionsSettled=await waitBranchTransactions(s);const pids=new Set<number>();for(const n of branchNodes(s)){if(n.open===false)continue;if(!n.surface){if(n.status!=="settled"){const result=writeResult(s,n,failedResult("tree_cancelled","queued child cancelled",n.metadata));s.pending.get(n.nodeId)?.resolve(result);}continue;}if(n.status!=="settled")try{const info=mux.getPaneProcessInfo(n.surface);for(const pid of info.pids)pids.add(pid);}catch{}try{mux.closePane(n.surface);}catch{}try{n.open=!(await mux.waitForPaneAbsence(n.surface,{timeoutMs:5000}));}catch(e){n.open=!/pane_not_found|pane not found/i.test(message(e));}if(n.status!=="settled"){const result=writeResult(s,n,failedResult("tree_cancelled","running child cancelled",n.metadata));s.pending.get(n.nodeId)?.resolve(result);}else writeNode(s,n);}let remaining:number[]=[];try{remaining=await mux.waitForProcessesExit([...pids],{timeoutMs:5000});}catch{}const inflight=inflightRecords(s).filter(r=>r.ownerId===s.ownerId);const ack={ownerId:s.ownerId,process:processIdentity(),pid:process.pid,at:Date.now(),transactionsSettled,inflight:inflight.length,remainingPids:remaining,nodes:branchNodes(s).map(n=>({nodeId:n.nodeId,open:n.open??false}))};if(!existsSync(join(s.meta.treeDir,"branches",`${s.ownerId}.cancelled.json`)))atomic(join(s.meta.treeDir,"branches",`${s.ownerId}.cancelled.json`),ack);})();return s.branchCancellation;}
+async function cancelBranch(s:State):Promise<void>{
+  if(s.branchCancellation)return s.branchCancellation;
+  s.cancellationRequested=true;
+  s.branchCancellation=(async()=>{
+    const mux=await import("./pi-extension/subagents/terminal.ts");
+    for(const controller of s.launchControllers)controller.abort();
+    const transactionsSettled=await waitBranchTransactions(s),pids=new Set<number>(),nodePids=new Map<string,number[]>();
+    for(const n of branchNodes(s)){
+      if(n.open===false)continue;
+      if(!n.surface){
+        if(n.status!=="settled"){const result=writeResult(s,n,failedResult("tree_cancelled","queued child cancelled",n.metadata));s.pending.get(n.nodeId)?.resolve(result);}
+        continue;
+      }
+      if(n.status!=="settled")try{const info=mux.getPaneProcessInfo(n.surface),captured=info.pids.filter(pid=>Number.isInteger(pid)&&pid>0);for(const pid of captured)pids.add(pid);if(captured.length)nodePids.set(n.nodeId,captured);}catch{}
+      try{mux.closePane(n.surface);}catch{}
+      try{n.open=!(await mux.waitForPaneAbsence(n.surface,{timeoutMs:5000}));}catch(e){n.open=!/pane_not_found|pane not found/i.test(message(e));}
+      if(n.status!=="settled"){const result=writeResult(s,n,failedResult("tree_cancelled","running child cancelled",n.metadata));s.pending.get(n.nodeId)?.resolve(result);}else writeNode(s,n);
+    }
+    let remaining:number[]=[];
+    let processCheckConfirmed=true;
+    try{remaining=await mux.waitForProcessesExit([...pids],{timeoutMs:5000});}catch{processCheckConfirmed=false;}
+    const inflight=inflightRecords(s).filter(r=>r.ownerId===s.ownerId),ack={ownerId:s.ownerId,process:processIdentity(),pid:process.pid,at:Date.now(),transactionsSettled,inflight:inflight.length,remainingPids:remaining,nodes:branchNodes(s).map(n=>({nodeId:n.nodeId,open:n.open??false}))};
+    if(!existsSync(join(s.meta.treeDir,"branches",`${s.ownerId}.cancelled.json`)))atomic(join(s.meta.treeDir,"branches",`${s.ownerId}.cancelled.json`),ack);
+    if(s.ownerId===s.meta.callerId&&processCheckConfirmed&&!remaining.length)for(const n of branchNodes(s)){
+    // The root may close a child branch before it can publish its own acknowledgement.
+    // Captured process exit plus pane absence is equivalent termination evidence.
+      const captured=nodePids.get(n.nodeId);
+      if(!captured?.length||n.open!==false||captured.some(pid=>remaining.includes(pid)))continue;
+      const childAckPath=join(s.meta.treeDir,"branches",`${n.nodeId}.cancelled.json`);
+      if(!existsSync(childAckPath))atomic(childAckPath,{ownerId:n.nodeId,process:processIdentity(),pid:process.pid,at:Date.now(),transactionsSettled:true,inflight:0,remainingPids:[],nodes:[{nodeId:n.nodeId,open:false}]});
+    }
+  })();
+  return s.branchCancellation;
+}
 function writeResult(s:State,node:NodeRecord,result:SubagentChildResult){const frozen=deepFreeze(result);if(!exclusiveAtomic(node.resultPath,frozen)){const winner=readJson<SubagentChildResult>(node.resultPath);if(winner){atomic(nodePath(s,node.nodeId),{...node,status:"settled"});return deepFreeze(winner);}return frozen;}atomic(nodePath(s,node.nodeId),{...node,status:"settled"});return frozen;}
 function isCancelled(s:State){return s.cancellationRequested||existsSync(join(s.meta.treeDir,"cancel.request"));}
 function failedResult(code:string,msg:string,meta?:SubagentTreeMetadata):SubagentChildResult{return {resultId:randomUUID(),assistantEntryId:randomUUID(),answer:null,outcome:"unexpected-abort",error:{code,message:bounded(msg,MAX_ERROR)},...(meta?{metadata:meta}:{})};}

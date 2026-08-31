@@ -285,12 +285,11 @@ async function waitBranchTransactions(s) {
 async function cancelBranch(s) {
     if (s.branchCancellation) return s.branchCancellation;
     s.cancellationRequested = true;
-    s.branchCancellation = (async ()=>{
+    s.branchCancellation = (async () => {
         const mux = await import("./pi-extension/subagents/terminal.js");
-        for (const controller of s.launchControllers)controller.abort();
-        const transactionsSettled = await waitBranchTransactions(s);
-        const pids = new Set();
-        for (const n of branchNodes(s)){
+        for (const controller of s.launchControllers) controller.abort();
+        const transactionsSettled = await waitBranchTransactions(s), pids = new Set(), nodePids = new Map();
+        for (const n of branchNodes(s)) {
             if (n.open === false) continue;
             if (!n.surface) {
                 if (n.status !== "settled") {
@@ -300,47 +299,30 @@ async function cancelBranch(s) {
                 continue;
             }
             if (n.status !== "settled") try {
-                const info = mux.getPaneProcessInfo(n.surface);
-                for (const pid of info.pids)pids.add(pid);
-            } catch  {}
-            try {
-                mux.closePane(n.surface);
-            } catch  {}
-            try {
-                n.open = !await mux.waitForPaneAbsence(n.surface, {
-                    timeoutMs: 5000
-                });
-            } catch (e) {
-                n.open = !/pane_not_found|pane not found/i.test(message(e));
-            }
+                const info = mux.getPaneProcessInfo(n.surface), captured = info.pids.filter((pid) => Number.isInteger(pid) && pid > 0);
+                for (const pid of captured) pids.add(pid);
+                if (captured.length) nodePids.set(n.nodeId, captured);
+            } catch { }
+            try { mux.closePane(n.surface); } catch { }
+            try { n.open = !(await mux.waitForPaneAbsence(n.surface, { timeoutMs: 5000 })); } catch (e) { n.open = !/pane_not_found|pane not found/i.test(message(e)); }
             if (n.status !== "settled") {
                 const result = writeResult(s, n, failedResult("tree_cancelled", "running child cancelled", n.metadata));
                 s.pending.get(n.nodeId)?.resolve(result);
             } else writeNode(s, n);
         }
         let remaining = [];
-        try {
-            remaining = await mux.waitForProcessesExit([
-                ...pids
-            ], {
-                timeoutMs: 5000
-            });
-        } catch  {}
-        const inflight = inflightRecords(s).filter((r)=>r.ownerId === s.ownerId);
-        const ack = {
-            ownerId: s.ownerId,
-            process: processIdentity(),
-            pid: process.pid,
-            at: Date.now(),
-            transactionsSettled,
-            inflight: inflight.length,
-            remainingPids: remaining,
-            nodes: branchNodes(s).map((n)=>({
-                    nodeId: n.nodeId,
-                    open: n.open ?? false
-                }))
-        };
+        let processCheckConfirmed = true;
+        try { remaining = await mux.waitForProcessesExit([...pids], { timeoutMs: 5000 }); } catch { processCheckConfirmed = false; }
+        const inflight = inflightRecords(s).filter((r) => r.ownerId === s.ownerId), ack = { ownerId: s.ownerId, process: processIdentity(), pid: process.pid, at: Date.now(), transactionsSettled, inflight: inflight.length, remainingPids: remaining, nodes: branchNodes(s).map((n) => ({ nodeId: n.nodeId, open: n.open ?? false })) };
         if (!existsSync(join(s.meta.treeDir, "branches", `${s.ownerId}.cancelled.json`))) atomic(join(s.meta.treeDir, "branches", `${s.ownerId}.cancelled.json`), ack);
+        if (s.ownerId === s.meta.callerId && processCheckConfirmed && !remaining.length) for (const n of branchNodes(s)) {
+            // The root may close a child branch before it can publish its own acknowledgement.
+            // Captured process exit plus pane absence is equivalent termination evidence.
+            const captured = nodePids.get(n.nodeId);
+            if (!captured?.length || n.open !== false || captured.some((pid) => remaining.includes(pid))) continue;
+            const childAckPath = join(s.meta.treeDir, "branches", `${n.nodeId}.cancelled.json`);
+            if (!existsSync(childAckPath)) atomic(childAckPath, { ownerId: n.nodeId, process: processIdentity(), pid: process.pid, at: Date.now(), transactionsSettled: true, inflight: 0, remainingPids: [], nodes: [{ nodeId: n.nodeId, open: false }] });
+        }
     })();
     return s.branchCancellation;
 }

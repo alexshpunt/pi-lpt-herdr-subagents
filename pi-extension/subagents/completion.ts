@@ -9,6 +9,8 @@ export interface CompletionResult {
   ping?: { name: string; message: string };
   summary?: string;
   errorMessage?: string;
+  /** Confirmed Herdr pane absence without a completion artifact. */
+  paneDisappeared?: true;
 }
 
 export interface CompletionOptions {
@@ -171,6 +173,7 @@ export async function waitForCompletion(
           reason: "error",
           exitCode: 1,
           errorMessage: "Subagent pane disappeared before completion evidence was recorded.",
+          paneDisappeared: true,
         };
       }
     }

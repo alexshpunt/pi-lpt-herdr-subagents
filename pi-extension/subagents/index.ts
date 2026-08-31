@@ -147,6 +147,7 @@ import {
   reduceLineage,
   registerLineage,
   type LineageRegistration,
+  type LineageNodeState,
 } from "./lineage.ts";
 import {
 	captureWorktreeHandoff,
@@ -1106,6 +1107,8 @@ interface SubagentResult {
 	fallbackAttempts?: string[];
 	ping?: { name: string; message: string };
 	worktree?: WorktreeHandoff;
+	/** Confirmed manual or external Herdr pane closure. */
+	paneDisappeared?: true;
 }
 
 interface PendingTerminalDelivery {
@@ -1159,6 +1162,8 @@ interface RunningSubagent {
   pendingTerminalDelivery?: PendingTerminalDelivery;
   cleanupPending?: boolean;
   cancellationAttempt?: Promise<boolean>;
+  /** Shared reconciliation for a confirmed-missing owner with stale descendants. */
+  danglingCleanupAttempt?: Promise<void>;
 	worktree?: WorktreeLaunch;
 }
 
@@ -2223,6 +2228,17 @@ function observeRunningSubagent(
 	);
 	observeSettledRunningSubagent(running);
   if (running.lineage && reduceLineage(running.lineage.rootDir).nodes.get(running.id)?.cancellation?.intent) void attemptPendingCancellation(running);
+
+  if (
+    running.lineage &&
+    running.lifecycle.pane.kind === "missing" &&
+    hasUndrainedDescendants(reduceLineage(running.lineage.rootDir), running.id) &&
+    !running.danglingCleanupAttempt
+  ) {
+    running.danglingCleanupAttempt = destroyOwnedLineageSubtree(running).finally(() => {
+      running.danglingCleanupAttempt = undefined;
+    });
+  }
 	attemptPendingTerminalDelivery(running);
 	if (running.cleanupPending && tryCleanupSubagentSurface(running)) {
 		runningSubagents.delete(running.id);
@@ -2355,6 +2371,136 @@ async function attemptPendingCancellation(running: RunningSubagent): Promise<boo
   })().finally(() => { running.cancellationAttempt = undefined; });
   running.cancellationAttempt = attempt;
   return attempt;
+}
+
+/** Build enough runtime state to finish a descendant whose owning Pi process is gone. */
+function recoveredLineageRunning(
+  rootDir: string,
+  rootId: string,
+  node: LineageNodeState,
+): RunningSubagent | undefined {
+  if (!node.surface || !node.sessionFile) return undefined;
+  let baseline: SessionBaselineCursor;
+  try {
+    baseline = captureSessionBaseline(node.sessionFile);
+  } catch {
+    baseline = { sessionFile: node.sessionFile, entryCount: 0, leafId: null, assistantEntryIds: [] };
+  }
+  return {
+    lineage: {
+      rootDir,
+      rootId,
+      nodeId: node.nodeId,
+      ...(node.parentNodeId ? { parentNodeId: node.parentNodeId } : {}),
+      ...(node.parentSessionId ? { parentSessionId: node.parentSessionId } : {}),
+      ...(node.parentSessionFile ? { parentSessionFile: node.parentSessionFile } : {}),
+      ...(node.parentWorkflowRunId ? { parentWorkflowRunId: node.parentWorkflowRunId } : {}),
+      launchKind: (node.launchKind as LineageRegistration["launchKind"]) ?? "fresh",
+    },
+    id: node.nodeId,
+    name: node.name ?? node.nodeId,
+    task: node.task ?? "destroyed descendant",
+    agent: node.agent,
+    surface: node.surface,
+    startTime: node.startTime ?? Date.now(),
+    sessionFile: node.sessionFile,
+    activityFile: node.activityFile,
+    settledEventsFile: node.settledEventsFile,
+    sessionBaseline: baseline,
+    interactive: false,
+    runtimePlan: undefined,
+    lifecycle: createLifecycle(node.startTime ?? Date.now()),
+  };
+}
+
+/** Adopt and terminate descendants after their owning pane is destroyed. */
+async function destroyOwnedLineageSubtree(owner: RunningSubagent): Promise<void> {
+  if (!owner.lineage) return;
+  const { rootDir, rootId } = owner.lineage;
+  for (;;) {
+    const state = reduceLineage(rootDir);
+    const descendants = [...state.nodes.values()].filter((candidate) => {
+      let parent = candidate.parentNodeId;
+      const seen = new Set<string>();
+      while (parent && !seen.has(parent)) {
+        if (parent === owner.id) return true;
+        seen.add(parent);
+        parent = state.nodes.get(parent)?.parentNodeId;
+      }
+      return false;
+    });
+    for (const node of descendants.filter((candidate) => candidate.terminal && !candidate.terminalDelivered)) {
+      const deliveryId = `terminal:${node.nodeId}`;
+      appendLineageInbox(rootDir, node.nodeId, deliveryId, {
+        sessionId: node.parentSessionId,
+        sessionFile: node.parentSessionFile,
+        workflowRunId: node.parentWorkflowRunId,
+      }, {
+        kind: "terminal",
+        ...(node.terminal?.resultContent ? { resultContent: node.terminal.resultContent } : {}),
+      });
+      appendLineageEvent(rootDir, `terminal-delivered:${node.nodeId}`, "terminal_delivered", node.nodeId, { deliveryId });
+    }
+    const refreshed = reduceLineage(rootDir);
+    const open = [...refreshed.nodes.values()].filter((candidate) => {
+      if (candidate.terminal) return false;
+      let parent = candidate.parentNodeId;
+      const seen = new Set<string>();
+      while (parent && !seen.has(parent)) {
+        if (parent === owner.id) return true;
+        seen.add(parent);
+        parent = refreshed.nodes.get(parent)?.parentNodeId;
+      }
+      return false;
+    });
+    if (open.length === 0) return;
+
+    let progressed = false;
+    for (const node of open) {
+      const running = recoveredLineageRunning(rootDir, rootId, node);
+      if (!running) {
+        const resultContent = "Subagent ownership was destroyed before launch metadata was complete.";
+        const deliveryId = `terminal:${node.nodeId}`;
+        if (!appendLineageEvent(rootDir, deliveryId, "terminal", node.nodeId, {
+          outcome: "pane_closed",
+          resultContent,
+        }) && !reduceLineage(rootDir).nodes.get(node.nodeId)?.terminal) continue;
+        if (!appendLineageInbox(rootDir, node.nodeId, deliveryId, {
+          sessionId: node.parentSessionId,
+          sessionFile: node.parentSessionFile,
+          workflowRunId: node.parentWorkflowRunId,
+        }, { kind: "terminal", resultContent })) continue;
+        appendLineageEvent(rootDir, `terminal-delivered:${node.nodeId}`, "terminal_delivered", node.nodeId, { deliveryId });
+        progressed = true;
+        continue;
+      }
+      let inspection: PaneInspection;
+      try {
+        inspection = await inspectPane(running.surface);
+      } catch {
+        continue;
+      }
+      if (inspection.kind === "unavailable") continue;
+      if (inspection.kind === "missing") {
+        const resultContent = "Subagent pane was destroyed with its owning subtree.";
+        if (!appendLineageEvent(rootDir, `terminal:${running.id}`, "terminal", running.id, {
+          outcome: "pane_closed",
+          resultContent,
+        }) && !reduceLineage(rootDir).nodes.get(running.id)?.terminal) continue;
+        queueTerminalDelivery(running, undefined, () => {}, resultContent);
+        progressed = true;
+        continue;
+      }
+      const current = reduceLineage(rootDir).nodes.get(running.id);
+      if (!current?.cancellation?.intent) {
+        appendLineageEvent(rootDir, `owner-closed:${owner.id}:${running.id}`, "cancel_intent", running.id, {
+          surface: running.surface,
+        });
+      }
+      if (await attemptPendingCancellation(running)) progressed = true;
+    }
+    if (!progressed) await new Promise<void>((resolve) => setTimeout(resolve, 250));
+  }
 }
 
 async function handleSubagentCancel(params: { id?: string; name?: string }): Promise<AgentToolResult<SubagentCancelDetails>> {
@@ -2842,6 +2988,8 @@ async function watchSubagent(
 			},
 		});
 
+		if (result.paneDisappeared) await destroyOwnedLineageSubtree(running);
+
 		// Flush any settled delivery observed just before terminal evidence.
 		observeRunningSubagent(running);
 		await runtime.settledDeliveryQueue.enqueue(running.id, () => undefined);
@@ -2930,6 +3078,7 @@ async function watchSubagent(
 			elapsed,
 			ping: result.ping,
 			...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+			...(result.paneDisappeared ? { paneDisappeared: true as const } : {}),
 			...(worktreeHandoff ? { worktree: worktreeHandoff } : {}),
 		};
 	} catch (err: any) {
@@ -2983,7 +3132,7 @@ async function watchSubagentWithFallbacks(
 
 	for (;;) {
 		const result = await watchSubagent(running, signal);
-		const shouldRetry = !!result.errorMessage && nextPlan < plans.length;
+		const shouldRetry = !!result.errorMessage && !result.paneDisappeared && nextPlan < plans.length;
 		if (!shouldRetry) {
 			return { running, result: { ...result, fallbackAttempts: attempts } };
 		}
@@ -4138,7 +4287,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                 const settledFinal = finalIdentity
                   ? settledAssistants(completedRunning).find((assistant) => assistant.id === finalIdentity.assistantEntryId)
                   : undefined;
-                if (suppressTerminalContent || (contentAlreadyDelivered && (!result.summary || result.summary === settledFinal?.text))) return;
+                if (!result.paneDisappeared && (suppressTerminalContent || (contentAlreadyDelivered && (!result.summary || result.summary === settledFinal?.text)))) return;
                 const completionApi = selectCompletionApi(pi, runtime.pi);
 						sendSubagentResult(completionApi, presentation, {
 							name: completedRunning.name,
@@ -4621,7 +4770,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                 const settledFinal = finalIdentity
                   ? settledAssistants(running).find((assistant) => assistant.id === finalIdentity.assistantEntryId)
                   : undefined;
-                if (suppressTerminalContent || (contentAlreadyDelivered && (!result.summary || result.summary === settledFinal?.text))) return;
+                if (!result.paneDisappeared && (suppressTerminalContent || (contentAlreadyDelivered && (!result.summary || result.summary === settledFinal?.text)))) return;
                 const completionApi = selectCompletionApi(pi, runtime.pi);
 						sendSubagentResult(completionApi, presentation, {
 							name,

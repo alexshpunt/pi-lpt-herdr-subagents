@@ -3116,6 +3116,7 @@ describe("completion.ts", () => {
 			exitCode: 1,
 			errorMessage:
 				"Subagent pane disappeared before completion evidence was recorded.",
+			paneDisappeared: true,
 		});
 	});
 

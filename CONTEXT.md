@@ -180,4 +180,4 @@ is the exact session or workflow run that owns its result. A node is **drained**
 only when its terminal outcome is delivered to that sink and all descendants are
 drained recursively. A closed parent session keeps an offline inbox; results are
 materialized only when that exact session is restored. Workflow node results stay in a run inbox; after a coordinator restart, nodes drain first and exactly one interrupted envelope is published without replaying the script. **Cleanup** is separate from
-delivery, so a missing pane can be cleaned idempotently without replaying a result.
+delivery, so a missing pane can be cleaned idempotently without replaying a result. Confirmed manual pane closure is destructive ownership evidence: a surviving ancestor adopts every open descendant, terminates or terminalizes the branch from the leaves upward, and delivers one failure for the destroyed owner. Unknown Herdr inspection remains pending.

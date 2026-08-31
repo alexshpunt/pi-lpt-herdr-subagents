@@ -33,6 +33,7 @@ import {
 	createTestEnv,
 	cleanupTestEnv,
 	createTrackedSurface,
+	closePane,
 	focusSurface,
 	startPi,
 	waitForScreen,
@@ -80,6 +81,7 @@ interface IntegrationResultDetails {
 	sessionFile?: unknown;
 	deliveryId?: unknown;
 	resultContent?: unknown;
+	errorMessage?: unknown;
 }
 
 interface IntegrationSessionEntry {
@@ -1496,6 +1498,61 @@ for (const backend of backends) {
 				ownerContents(results),
 				["OWNER_ONE", "OWNER_TWO", "OWNER_THREE", "OWNER_FOUR", "OWNER_FINAL"],
 				"held owner results and terminal completion must arrive once in original order after descendant delivery",
+			);
+		});
+
+		it("destroys a nested branch when its owner pane is manually closed", async () => {
+			const id = uniqueId();
+			const ownerName = `ClosedOwner-${id}`;
+			const gateFile = `/tmp/pi-integ-closed-owner-${id}`;
+			const parentSession = join(env.dir, `closed-owner-parent-${id}.jsonl`);
+			trackTempFile(env, gateFile);
+
+			const surface = createTrackedSurface(env, `closed-owner-parent-${id}`);
+			await waitForPaneReady(surface);
+			startPi(
+				surface,
+				env.dir,
+				[
+					"Call subagent with these EXACT parameters:",
+					`  name: "${ownerName}"`,
+					'  agent: "test-descendant-owner"',
+					`  task: "INTEGRATION_DESCENDANT_GATE: ${gateFile} Launch the descendant and stay open."`,
+					"Call the tool once and wait for its asynchronous result.",
+				].join("\n"),
+				{ extraArgs: `--session ${shellQuote(parentSession)}` },
+			);
+
+			const ownerPane = await waitForAgentPane(ownerName, env.workspaceId);
+			await waitForScreen(ownerPane, /Nested-[^\s]+[\s\S]*active/i, PI_TIMEOUT, 300);
+			const nestedPane = listWorkspacePanes(env.workspaceId).find(
+				(pane) => pane.label?.startsWith("Nested-") && typeof pane.pane_id === "string",
+			)?.pane_id;
+			assert.equal(typeof nestedPane, "string", "nested child pane must be live before owner destruction");
+
+			closePane(ownerPane);
+			await waitForAgentGone(ownerPane, env.workspaceId);
+			await waitForAgentGone(nestedPane as string, env.workspaceId);
+
+			const deadline = Date.now() + PI_TIMEOUT;
+			let results: IntegrationSessionEntry[] = [];
+			while (Date.now() < deadline) {
+				results = existsSync(parentSession)
+					? customResultEntries(readSessionEntries(parentSession))
+					: [];
+				if (results.some((entry) => String(entry.details?.errorMessage).includes("pane disappeared"))) break;
+				await sleep(50);
+			}
+			const terminal = results.filter((entry) =>
+				String(entry.details?.errorMessage).includes("pane disappeared"),
+			);
+			assert.equal(terminal.length, 1, "manual owner closure must deliver one terminal result");
+			assert.equal(
+				listWorkspacePanes(env.workspaceId).some((pane) =>
+					pane.label === ownerName || pane.label?.startsWith("Nested-"),
+				),
+				false,
+				"the destroyed branch must leave no owner or descendant pane",
 			);
 		});
 

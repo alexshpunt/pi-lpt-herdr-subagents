@@ -277,6 +277,20 @@ function branchNodes(s) {
         ] : [];
     });
 }
+function allNodes(s) {
+    const d = join(s.meta.treeDir, "nodes");
+    if (!existsSync(d)) return [];
+    return readdirSync(d).filter((x)=>x.endsWith(".json")).flatMap((f)=>{
+        const n = readJson(join(d, f));
+        return n ? [
+            n
+        ] : [];
+    });
+}
+function pendingBranchEvidence(s, ownerId) {
+    const inflight = inflightRecords(s).filter((r)=>r.ownerId === ownerId).length, queued = allNodes(s).filter((n)=>n.ownerId === ownerId && n.status === "queued" && !existsSync(n.resultPath)).length;
+    return { inflight, queued };
+}
 async function waitBranchTransactions(s) {
     const deadline = Date.now() + CANCEL_TIMEOUT_MS;
     while(s.launchTransactions.size && Date.now() < deadline)await new Promise((r)=>setTimeout(r, 25));
@@ -320,8 +334,8 @@ async function cancelBranch(s) {
             // Captured process exit plus pane absence is equivalent termination evidence.
             const captured = nodePids.get(n.nodeId);
             if (!captured?.length || n.open !== false || captured.some((pid) => remaining.includes(pid))) continue;
-            const childAckPath = join(s.meta.treeDir, "branches", `${n.nodeId}.cancelled.json`);
-            if (!existsSync(childAckPath)) atomic(childAckPath, { ownerId: n.nodeId, process: processIdentity(), pid: process.pid, at: Date.now(), transactionsSettled: true, inflight: 0, remainingPids: [], nodes: [{ nodeId: n.nodeId, open: false }] });
+            const childAckPath = join(s.meta.treeDir, "branches", `${n.nodeId}.cancelled.json`), pending = pendingBranchEvidence(s, n.nodeId);
+            if (!existsSync(childAckPath)) atomic(childAckPath, { ownerId: n.nodeId, process: processIdentity(), pid: process.pid, at: Date.now(), synthesized: true, transactionsSettled: pending.inflight === 0 && pending.queued === 0, inflight: pending.inflight, unresolvedQueued: pending.queued, remainingPids: [], nodes: [{ nodeId: n.nodeId, open: false }] });
         }
     })();
     return s.branchCancellation;
@@ -727,23 +741,31 @@ async function waitBranchAcks(s, failures, includeRoot = true) {
         if (n) owners.add(n.ownerId);
     }
     if (!includeRoot) owners.delete(s.meta.callerId);
-    const deadline = Date.now() + CANCEL_TIMEOUT_MS;
-    while(Date.now() < deadline){
-        const missing = [
-            ...owners
-        ].filter((owner)=>!existsSync(join(s.meta.treeDir, "branches", `${owner}.cancelled.json`)));
-        if (!missing.length) return;
-        await new Promise((r)=>setTimeout(r, 25));
-    }
-    for (const owner of owners){
-        const ack = readJson(join(s.meta.treeDir, "branches", `${owner}.cancelled.json`));
-        if (!ack) failures.push(`branch cancellation acknowledgement missing: ${owner}`);
-        else {
+    const inspect = ()=>{
+        for (const owner of owners){
+            const ack = readJson(join(s.meta.treeDir, "branches", `${owner}.cancelled.json`));
+            if (!ack) {
+                failures.push(`branch cancellation acknowledgement missing: ${owner}`);
+                continue;
+            }
+            const pending = pendingBranchEvidence(s, owner);
             if (ack.transactionsSettled === false) failures.push(`branch cancellation transaction did not settle: ${owner}`);
-            if ((ack.inflight ?? 0) > 0) failures.push(`branch cancellation reservation remains: ${owner}`);
+            if ((ack.inflight ?? 0) > 0 || pending.inflight > 0) failures.push(`branch cancellation reservation remains: ${owner}`);
+            if ((ack.unresolvedQueued ?? 0) > 0 || pending.queued > 0) failures.push(`branch cancellation queued launch remains: ${owner}`);
+            if (ack.synthesized && (pending.inflight > 0 || pending.queued > 0)) failures.push(`synthesized branch cancellation evidence is incomplete: ${owner}`);
             if ((ack.remainingPids ?? []).length) failures.push(`branch processes remain: ${(ack.remainingPids ?? []).join(",")}`);
         }
+    };
+    const deadline = Date.now() + CANCEL_TIMEOUT_MS;
+    while(Date.now() < deadline){
+        const missing = [...owners].some((owner)=>!existsSync(join(s.meta.treeDir, "branches", `${owner}.cancelled.json`)));
+        if (!missing) {
+            inspect();
+            return;
+        }
+        await new Promise((r)=>setTimeout(r, 25));
     }
+    inspect();
 }
 async function cancelWork(s) {
     const mux = await import("./pi-extension/subagents/terminal.js");
@@ -755,13 +777,6 @@ async function cancelWork(s) {
     await cancelBranch(s);
     await waitBranchAcks(s, failures);
     const deadline = Date.now() + CANCEL_TIMEOUT_MS;
-    for (const inFlight of inflightRecords(s)){
-        if (typeof inFlight.pid !== "number" || !processAlive(inFlight.pid)) {
-            try {
-                unlinkSync(inFlight.path);
-            } catch  {}
-        }
-    }
     for (const row of rows(s)){
         const n = readJson(join(s.meta.treeDir, "nodes", `${row.nodeId}.json`));
         if (!n || n.open === false) continue;
@@ -821,6 +836,13 @@ async function cancelWork(s) {
         code: "cancel_termination_failed",
         message: bounded(failures.join("; "), MAX_ERROR)
     } : undefined;
+    if (!error) for (const inFlight of inflightRecords(s)) {
+        if (typeof inFlight.pid !== "number" || !processAlive(inFlight.pid)) {
+            try {
+                unlinkSync(inFlight.path);
+            } catch {}
+        }
+    }
     const terminal = {
         terminalId: randomUUID(),
         state: error ? "failed" : "cancelled",

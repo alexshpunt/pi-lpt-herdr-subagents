@@ -288,7 +288,7 @@ describe("public subagent tree package boundary", () => {
 			`  "exit 0",`,
 			`].join("\\n") + "\\n", { mode: 0o755 });`,
 			`chmodSync(herdr, 0o755);`,
-			`process.env.PATH = probeRoot + ":" + process.env.PATH;`,
+			`process.env.HERDR_ENV = "1"; process.env.PATH = probeRoot + ":" + process.env.PATH;`,
 			`const sessionFile = join(probeRoot, "caller.jsonl");`,
 			`writeFileSync(sessionFile, JSON.stringify({ type: "session", id: "caller", version: 3, cwd: probeRoot }) + "\\n");`,
 			`const ctx = { cwd: probeRoot, sessionManager: { getSessionFile: () => sessionFile, getSessionId: () => "caller", getSessionDir: () => probeRoot } };`,
@@ -314,6 +314,50 @@ describe("public subagent tree package boundary", () => {
 			unresolvedQueued: 1,
 			inflight: 1,
 			inflightRetained: true,
+		});
+	});
+
+	it("ignores a stale reservation once its node has a durable pane surface", () => {
+		const probeRoot = join(consumerDirectory, "surfaced-stale-inflight-probe");
+		mkdirSync(probeRoot, { recursive: true });
+		const probed = runInstalledProbe("surfaced-stale-inflight-probe", [
+			`import { createSubagentTree } from ${JSON.stringify(scopedPackageName)};`,
+			`import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";`,
+			`import { join } from "node:path";`,
+			`const probeRoot = ${JSON.stringify(probeRoot)};`,
+			`const herdr = join(probeRoot, "herdr");`,
+			`writeFileSync(herdr, [`,
+			`  "#!/bin/sh",`,
+			`  'if [ "$1" = "pane" ] && [ "$2" = "process-info" ]; then printf \\'{"result":{"process_info":{"foreground_processes":[{"pid":999999}]}}}\\'; exit 0; fi',`,
+			`  'if [ "$1" = "pane" ] && [ "$2" = "get" ]; then printf \\'{"error":{"code":"pane_not_found","message":"pane not found"}}\\'; exit 1; fi',`,
+			`  "exit 0",`,
+			`].join("\\n") + "\\n", { mode: 0o755 });`,
+			`chmodSync(herdr, 0o755);`,
+			`process.env.HERDR_ENV = "1"; process.env.PATH = probeRoot + ":" + process.env.PATH;`,
+			`const sessionFile = join(probeRoot, "caller.jsonl");`,
+			`writeFileSync(sessionFile, JSON.stringify({ type: "session", id: "caller", version: 3, cwd: probeRoot }) + "\\n");`,
+			`const ctx = { cwd: probeRoot, sessionManager: { getSessionFile: () => sessionFile, getSessionId: () => "caller", getSessionDir: () => probeRoot } };`,
+			`const tree = createSubagentTree({ pi: { getThinkingLevel: () => "low" }, ctx });`,
+			`const treeDir = join(probeRoot, "artifacts", "caller", "subagent-trees", tree.treeId);`,
+			`const branches = join(treeDir, "branches"); const nodes = join(treeDir, "nodes"); const results = join(treeDir, "results");`,
+			`mkdirSync(branches, { recursive: true }); mkdirSync(nodes, { recursive: true }); mkdirSync(results, { recursive: true });`,
+			`const branchOwner = "branch-owner"; const leaf = "surfaced-leaf"; const rootResult = join(results, branchOwner + ".json"); const leafResult = join(results, leaf + ".json");`,
+			`writeFileSync(join(nodes, branchOwner + ".json"), JSON.stringify({ nodeId: branchOwner, parentId: tree.callerId, ownerId: tree.callerId, name: "orphan", surface: "branch-pane", status: "running", open: true, resultPath: rootResult }) + "\\n");`,
+			`writeFileSync(join(nodes, leaf + ".json"), JSON.stringify({ nodeId: leaf, parentId: branchOwner, ownerId: branchOwner, name: "surfaced", surface: "leaf-pane", status: "running", open: true, resultPath: leafResult }) + "\\n");`,
+			`const inflight = join(branches, branchOwner + "." + leaf + ".inflight.json");`,
+			`writeFileSync(inflight, JSON.stringify({ ownerId: branchOwner, pid: 999999, process: "dead-owner", nodeId: leaf, token: "launch-token" }) + "\\n");`,
+			`const result = await tree.cancel();`,
+			`const ack = JSON.parse(readFileSync(join(branches, branchOwner + ".cancelled.json"), "utf8"));`,
+			`process.stdout.write(JSON.stringify({ state: result.state, errorCode: result.error?.code, synthesized: ack.synthesized, transactionsSettled: ack.transactionsSettled, unresolvedQueued: ack.unresolvedQueued, inflight: ack.inflight, inflightRetained: existsSync(inflight) }));`,
+		].join("\n"));
+		assert.equal(probed.status, 0, `surfaced stale-inflight probe failed:\n${probed.stderr || probed.stdout}`);
+		assert.deepEqual(JSON.parse(probed.stdout), {
+			state: "cancelled",
+			synthesized: true,
+			transactionsSettled: true,
+			unresolvedQueued: 0,
+			inflight: 0,
+			inflightRetained: false,
 		});
 	});
 

@@ -287,8 +287,16 @@ function allNodes(s) {
         ] : [];
     });
 }
+function pendingInflightRecords(s, ownerId) {
+    const nodes = allNodes(s);
+    return inflightRecords(s).filter((r)=>{
+        if (ownerId !== undefined && r.ownerId !== ownerId) return false;
+        const node = r.nodeId ? nodes.find((n)=>n.nodeId === r.nodeId) : undefined;
+        return !node || node.ownerId !== r.ownerId || !node.surface;
+    });
+}
 function pendingBranchEvidence(s, ownerId) {
-    const inflight = inflightRecords(s).filter((r)=>r.ownerId === ownerId).length, queued = allNodes(s).filter((n)=>n.ownerId === ownerId && n.status === "queued" && !existsSync(n.resultPath)).length;
+    const nodes = allNodes(s), inflight = pendingInflightRecords(s, ownerId).length, queued = nodes.filter((n)=>n.ownerId === ownerId && n.status === "queued" && !existsSync(n.resultPath)).length;
     return { inflight, queued };
 }
 async function waitBranchTransactions(s) {
@@ -327,7 +335,7 @@ async function cancelBranch(s) {
         let remaining = [];
         let processCheckConfirmed = true;
         try { remaining = await mux.waitForProcessesExit([...pids], { timeoutMs: 5000 }); } catch { processCheckConfirmed = false; }
-        const inflight = inflightRecords(s).filter((r) => r.ownerId === s.ownerId), ack = { ownerId: s.ownerId, process: processIdentity(), pid: process.pid, at: Date.now(), transactionsSettled, inflight: inflight.length, remainingPids: remaining, nodes: branchNodes(s).map((n) => ({ nodeId: n.nodeId, open: n.open ?? false })) };
+        const inflight = pendingInflightRecords(s, s.ownerId), ack = { ownerId: s.ownerId, process: processIdentity(), pid: process.pid, at: Date.now(), transactionsSettled, inflight: inflight.length, remainingPids: remaining, nodes: branchNodes(s).map((n) => ({ nodeId: n.nodeId, open: n.open ?? false })) };
         if (!existsSync(join(s.meta.treeDir, "branches", `${s.ownerId}.cancelled.json`))) atomic(join(s.meta.treeDir, "branches", `${s.ownerId}.cancelled.json`), ack);
         if (s.ownerId === s.meta.callerId && processCheckConfirmed && !remaining.length) for (const n of branchNodes(s)) {
             // The root may close a child branch before it can publish its own acknowledgement.

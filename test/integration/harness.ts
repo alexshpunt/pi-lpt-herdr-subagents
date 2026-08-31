@@ -35,7 +35,9 @@ import {
   closePane,
   interruptPane,
   shellQuote,
+  getPaneProcessInfo,
   waitForPaneAbsence,
+  waitForProcessesExit,
 } from "../../pi-extension/subagents/terminal.ts";
 
 type MuxBackend = "herdr";
@@ -51,6 +53,9 @@ export {
   closePane,
   interruptPane,
   shellQuote,
+  getPaneProcessInfo,
+  waitForPaneAbsence,
+  waitForProcessesExit,
 };
 export type { MuxBackend };
 
@@ -490,26 +495,25 @@ export function startPi(
   opts?: {
     model?: string;
     extraArgs?: string;
+    extensionSource?: string;
     environment?: Record<string, string>;
   },
 ): void {
   const model = opts?.model ?? TEST_MODEL;
   const extra = opts?.extraArgs ?? "";
   const agentDir = USE_TEST_PROVIDER ? join(testDir, ".pi", "agent") : "";
-  const extensionSource = USE_TEST_PROVIDER
+  const extensionSource = opts?.extensionSource ?? (USE_TEST_PROVIDER
     ? join(agentDir, "extensions", "subagents-under-test.ts")
-    : EXTENSION_SOURCE;
+    : EXTENSION_SOURCE);
 
-  // Force pi to load the working-tree extension (not an installed pi-package
-  // snapshot). `-ne` disables extension auto-discovery, `-e <path>` loads the
-  // current branch's source directly. Without this, the tests silently run
-  // against whatever version is checked out under `~/.pi/agent/git/...`.
+  // Default to the working-tree extension. Installed-consumer tests may pass
+  // their isolated extension path while keeping all automatic extensions off.
   const cmd = [
     `cd ${shellQuote(testDir)} &&`,
-    agentDir ? `PI_CODING_AGENT_DIR=${shellQuote(agentDir)}` : "",
     ...Object.entries(opts?.environment ?? {}).map(
-      ([key, value]) => `${key}=${shellQuote(value)}`,
+      ([name, value]) => `${name}=${shellQuote(value)}`,
     ),
+    agentDir ? `PI_CODING_AGENT_DIR=${shellQuote(agentDir)}` : "",
     `pi`,
     `-ne`,
     `-e ${shellQuote(extensionSource)}`,

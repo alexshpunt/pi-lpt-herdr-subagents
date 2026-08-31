@@ -4,6 +4,14 @@ This context defines language for the shipped first-flow workflow runtime and de
 
 ## Language
 
+**Public subagent tree API**:
+A registration-free package-root API for an installed Pi extension in Herdr. A tree handle owns one caller, process-local branch, explicit parent links, child result promises, a final tree result, and fail-closed cancellation while reusing the single Pi subagent runtime.
+_Avoid_: Headless runtime, second child engine, workflow engine
+
+**Owned subagent tree**:
+The caller and its nested Pi children as one logical tree. Each process-owned branch has one writer and settles its reserved descendants before publishing upward. `/reload`, `/new`, and `/resume` rebind fresh context in the same process; `/fork` requires old-to-new session lineage and the new session header's `parentSession`.
+_Avoid_: Process restart recovery, shared multi-writer journal
+
 **Feature-delivery workflow**:
 A bounded, user-approved plan that coordinates work needed to deliver one feature and ends in reviewable evidence.
 _Avoid_: General task graph, orchestrator agent

@@ -1,4 +1,17 @@
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { createRequire } from "node:module";
+const requirePackage = createRequire(import.meta.url);
+
+function loadCodingAgent(): any {
+  let directory = dirname(new URL(import.meta.url).pathname);
+  for (;;) {
+    const candidate = join(directory, "node_modules/@earendil-works/pi-coding-agent/dist/index.js");
+    if (existsSync(candidate)) return requirePackage(candidate);
+    const parent = dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  throw new Error("Unable to locate @earendil-works/pi-coding-agent runtime");
+}
 import {
 	appendFileSync,
 	copyFileSync,
@@ -33,6 +46,18 @@ export interface MessageEntry extends SessionEntry {
 
 export type SeededSubagentSessionMode = "lineage-only" | "fork";
 
+
+export function seedStandaloneSessionFile(params: { childSessionFile: string; childCwd: string }): void {
+	const header = {
+		type: "session",
+		version: 3,
+		id: randomUUID(),
+		timestamp: new Date().toISOString(),
+		cwd: params.childCwd,
+	};
+	mkdirSync(dirname(params.childSessionFile), { recursive: true });
+	writeFileSync(params.childSessionFile, `${JSON.stringify(header)}\n`, "utf8");
+}
 export interface WorktreeSessionFork {
 	sessionFile: string;
 	sourceSessionFile: string;
@@ -69,7 +94,7 @@ export function createBtwSessionSnapshot(
 	parentSessionFile: string,
 	leafId: string,
 ): string {
-	const detached = SessionManager.open(parentSessionFile);
+	const detached = loadCodingAgent().SessionManager.open(parentSessionFile);
 	const childSessionFile = detached.createBranchedSession(leafId);
 	if (!childSessionFile || !existsSync(childSessionFile)) {
 		throw new Error("Pi did not persist the BTW child session");
@@ -111,7 +136,7 @@ export function createWorktreeSessionFork(params: {
 	childCwd: string;
 	handoffMessage: string;
 }): WorktreeSessionFork {
-	const source = SessionManager.open(params.parentSessionFile);
+	const source = loadCodingAgent().SessionManager.open(params.parentSessionFile);
 	const temporaryFile = source.createBranchedSession(params.leafId);
 	if (!temporaryFile || !existsSync(temporaryFile)) {
 		throw new Error("Pi did not persist the worktree session fork");
@@ -134,7 +159,7 @@ export function createWorktreeSessionFork(params: {
 		rmSync(temporaryFile, { force: true });
 	}
 
-	SessionManager.open(params.childSessionFile).appendCustomMessageEntry(
+	loadCodingAgent().SessionManager.open(params.childSessionFile).appendCustomMessageEntry(
 		"pi-herdr-worktree-handoff",
 		params.handoffMessage,
 		true,

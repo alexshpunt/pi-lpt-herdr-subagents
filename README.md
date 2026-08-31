@@ -83,6 +83,31 @@ subagent({ name: "DB scout", agent: "scout", task: "Map the session schema" });
 
 Use ordinary panes for read-only agents. Give each independent writing agent a unique managed worktree; see [Worktree subagents](docs/worktree-subagents.md).
 
+### Public subagent tree API
+
+Installed Pi extensions can use the side-effect-free package root without loading the model-facing subagent tools:
+
+```ts
+import { createSubagentTree } from "@alexshp/pi-lpt-herdr-subagents";
+
+const tree = createSubagentTree({ pi, ctx, metadata: { requestId: "search-1" } });
+const child = await tree.launchChild({
+  parentId: tree.callerId,
+  name: "search-router",
+  task: "Find the requested records and return a concise answer.",
+  agent: "scout",
+  tools: ["read"],
+});
+const answer = await child.result;
+const final = await tree.result;
+```
+
+The package root exports `createSubagentTree`, `attachSubagentTree`, the handle and result types, `ForkLineage`, and the three tree error classes. Importing it does not register `subagent` or any other package tool.
+
+A child process claims its one-time context with `attachSubagentTree({ pi, ctx })`. A caller reattaches with its caller ID, tree ID, and ownership token on every fresh `session_start`. `/reload`, `/new`, and `/resume` use the fresh context directly. `/fork` also passes `forkLineage: { previousSessionFile }`; the package checks the new session header's `parentSession` before replacing the stored binding.
+
+The attached handle reconstructs pending direct children. Callback bindings are versioned, and a successful final callback is delivered once. The tree result settles only after every reserved descendant settles. Cancellation is fail-closed and retains recovery evidence when Herdr cannot confirm process and pane termination.
+
 ## How it works
 
 ![Pi LPT Herdr Subagents lifecycle: spawn a child, run it in Herdr, supervise live state, and deliver one bounded result to the parent.](https://raw.githubusercontent.com/alexshpunt/pi-lpt-herdr-subagents/main/docs/assets/async-subagent-lifecycle.png)

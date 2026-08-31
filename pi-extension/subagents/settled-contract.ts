@@ -140,7 +140,7 @@ export interface SessionBaselineCursor {
 /** The independent exactly-once state for settled turns. */
 export interface SettledDeliveryGate {
   lastActivitySequence: number | null;
-  delivered: ReadonlySet<SettledDeliveryKey>;
+  delivered: Set<SettledDeliveryKey>;
 }
 
 /** The independent exactly-once state for terminal completion. */

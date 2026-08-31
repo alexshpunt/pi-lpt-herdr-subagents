@@ -7,6 +7,7 @@ Use this page to find the authoritative document for a task. Current shipped beh
 - [`../README.md`](../README.md) — installation, public API, configuration, lifecycle, and role authoring.
 - [`worktree-subagents.md`](worktree-subagents.md) — canonical worktree operation, review, recovery, and cleanup.
 - [`settled-lifecycle-contract.md`](settled-lifecycle-contract.md) — shipped per-turn settled outcomes, identity, cursor, and delivery gates.
+- [`public-subagent-tree-api.md`](public-subagent-tree-api.md) — supported package-root tree handle, nested settlement, reattachment, fork lineage, callback delivery, and fail-closed cancellation.
 - [`../RELEASING.md`](../RELEASING.md) — release checks and publication procedure.
 
 ## Domain language and active design
@@ -33,6 +34,7 @@ Workflow preparation, exact approval, Worker execution, isolated read-only child
 | [`0004`](adr/0004-require-active-user-approval-for-workflow-execution.md) | Accepted | Require active approval for exact workflow-script execution. |
 | [`0005`](adr/0005-parent-owns-workflow-script-authority.md) | Accepted | Keep workflow-script authority with the parent. |
 | [`0006`](adr/0006-limit-v1-execution-effects-to-isolated-worktrees.md) | Accepted | Limit the first workflow to read-only effects. |
+| [`0009`](adr/0009-public-subagent-tree-registry.md) | Accepted | Use a lazy process-local registry and single-writer tree branches for the public subagent tree API. |
 | [`0007`](adr/0007-require-fresh-review-for-workflow-scripts.md) | Accepted | Require fresh review in skill-authored review workflows. |
 | [`0008`](adr/0008-adopt-pi-only-subagent-execution.md) | Accepted; implemented | Remove the external CLI adapter and make subagent execution Pi-only. |
 | [`0009`](adr/0009-durable-recursive-subagent-ownership.md) | Accepted | Durable recursive descendant ownership and exact-parent delivery. |

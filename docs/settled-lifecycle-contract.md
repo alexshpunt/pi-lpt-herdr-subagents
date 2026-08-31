@@ -1,5 +1,7 @@
 # Settled lifecycle contract
 
+The public subagent tree API builds its child and terminal promises on this settled identity and delivery model. See [Public subagent tree API](public-subagent-tree-api.md).
+
 This document freezes the shared shapes for the settled lifecycle streams. It is
 an implementation boundary, not a new public tool API.
 

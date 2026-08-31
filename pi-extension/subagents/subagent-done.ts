@@ -11,7 +11,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createSubagentActivityRecorder } from "./activity.ts";
 import {
   classifySettledOutcome,
@@ -28,7 +29,6 @@ export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
   return agentStarted;
 }
 
-
 /** Wait until this session's owned descendants have terminal delivery. */
 async function waitForDescendantDrain(): Promise<void> {
   const lineage = lineageFromEnvironment();
@@ -37,6 +37,27 @@ async function waitForDescendantDrain(): Promise<void> {
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
   }
 }
+
+async function waitForOwnedChildren(): Promise<void> {
+  const contextPath = process.env.PI_SUBAGENT_TREE_CONTEXT;
+  if (!contextPath) return;
+  let context: { treeDir?: string; ownerId?: string };
+  try { context = JSON.parse(readFileSync(contextPath, "utf8")); } catch { return; }
+  if (!context.treeDir || !context.ownerId) return;
+  for (;;) {
+    const nodesDir = join(context.treeDir, "nodes");
+    const pending = existsSync(nodesDir) && readdirSync(nodesDir).some((file) => {
+      if (!file.endsWith(".json")) return false;
+      try {
+        const node = JSON.parse(readFileSync(join(nodesDir, file), "utf8"));
+        return node.ownerId === context.ownerId && node.status !== "settled";
+      } catch { return true; }
+    });
+    if (!pending) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 function textFromContent(content: unknown): string {
   if (!Array.isArray(content)) return "";
   return content
@@ -204,6 +225,7 @@ export default function (pi: ExtensionAPI) {
   const subagentAgent = process.env.PI_SUBAGENT_AGENT ?? "";
   const deniedToolsValue = process.env.PI_DENY_TOOLS;
   const autoExit = process.env.PI_SUBAGENT_AUTO_EXIT === "1";
+  const treeOwner = process.env.PI_SUBAGENT_TREE_OWNER === "1";
   const recorder = createSubagentActivityRecorder({
     runningChildId: process.env.PI_SUBAGENT_ID,
     activityFile: process.env.PI_SUBAGENT_ACTIVITY_FILE,
@@ -324,14 +346,6 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_start", () => {
     recorder.agentStart();
   });
-
-  pi.on("agent_end", (event) => {
-    latestAgentEndMessages = (event as any).messages as any[] | undefined;
-    const eventTurnIndex = (event as any).turnIndex;
-    if (typeof eventTurnIndex === "number") latestTurnIndex = eventTurnIndex;
-    recorder.agentEndWaiting();
-  });
-
   let exitRequested = false;
   const finishAfterDrain = async (
     ctx: { shutdown: () => void },
@@ -344,6 +358,7 @@ export default function (pi: ExtensionAPI) {
       ? hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.parentNodeId)
       : false;
     if (shouldWaitForDescendants) await waitForDescendantDrain();
+    if (treeOwner) await waitForOwnedChildren();
     const sessionFile = process.env.PI_SUBAGENT_SESSION;
     if (sessionFile) {
       try {
@@ -356,6 +371,14 @@ export default function (pi: ExtensionAPI) {
     }
     ctx.shutdown();
   };
+
+  pi.on("agent_end", (event) => {
+    latestAgentEndMessages = (event as any).messages as any[] | undefined;
+    const eventTurnIndex = (event as any).turnIndex;
+    if (typeof eventTurnIndex === "number") latestTurnIndex = eventTurnIndex;
+    recorder.agentEndWaiting();
+  });
+
 
   pi.on("agent_settled", (_event, ctx) => {
     const outcome = classifyAutoExitOutcome(

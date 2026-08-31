@@ -383,7 +383,7 @@ function validateActivity(
   ].find((error) => error != null);
   if (validationError) return invalidActivity(validationError);
 
-  return { ok: true, activity: object as SubagentActivityState };
+  return { ok: true, activity: object as unknown as SubagentActivityState };
 }
 
 export function readSubagentActivityFile(
@@ -510,6 +510,7 @@ export function createSubagentActivityRecorder(params: {
   const activityFile = params.activityFile?.trim();
   const settledEventsFile = params.settledEventsFile?.trim();
   if (!runningChildId || !activityFile) return createNoopRecorder();
+  const activityPath = activityFile;
 
   const now = params.now ?? (() => Date.now());
   const createdAt = now();
@@ -546,7 +547,7 @@ export function createSubagentActivityRecorder(params: {
   function flushNow(): void {
     if (disabled) return;
     try {
-      writeSubagentActivityFile(activityFile, activity);
+      writeSubagentActivityFile(activityPath, activity);
       lastFlushAt = now();
       failureCount = 0;
     } catch {

@@ -37,6 +37,7 @@ export interface ProviderRequest {
 	messages: ChatMessage[];
 	tools: string[];
 	text: string;
+	userText: string;
 }
 
 const providerRequests: ProviderRequest[] = [];
@@ -94,8 +95,9 @@ function providerRequest(request: ChatRequest, status: number): ProviderRequest 
 		model: request.model,
 		status,
 		messages: request.messages ?? [],
-		tools: [...toolNames(request)],
+		tools: [...toolNames(request)].sort(),
 		text: requestText(request),
+		userText: lastUserText(request),
 	};
 }
 
@@ -181,7 +183,7 @@ function bashCommand(source: string): string | undefined {
 }
 
 function markerText(source: string): string | undefined {
-	const matches = [...source.matchAll(/(?:Return|return) exactly ([A-Za-z0-9_]+)/g)];
+	const matches = [...source.matchAll(/(?:Return|return) exactly ([A-Za-z0-9_-]+)/g)];
 	return matches.at(-1)?.[1];
 }
 
@@ -243,6 +245,28 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 			toolCalls: [
 				{ name: "caller_ping", arguments: { message: "PING: integration" } },
 			],
+		};
+	}
+
+	if (names.has("consumer_tree_nested_launch") && lastRole !== "tool") {
+		return { toolCalls: [{ name: "consumer_tree_nested_launch", arguments: {} }] };
+	}
+
+	const consumerProbe = [
+		"consumer_tree_nested_probe",
+		"consumer_tree_open_probe",
+		"consumer_tree_transition_probe",
+		"consumer_tree_metadata_probe",
+		"consumer_tree_pending_callback_probe",
+		"consumer_tree_root_failure_probe",
+		"consumer_tree_interrupt_probe",
+		"consumer_tree_worktree_probe",
+		"consumer_tree_cancel_probe",
+		"consumer_tree_cancel_unconfirmed_probe",
+	].find((name) => names.has(name));
+	if (consumerProbe && lastRole !== "tool") {
+		return {
+			toolCalls: [{ name: consumerProbe, arguments: {} }],
 		};
 	}
 
@@ -311,7 +335,7 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 							: "Prepared workflow",
 			};
 		}
-		return { text: "completed" };
+		return { text: markerText(source) ?? "completed" };
 	}
 
 	if (workflowPrompt) {
@@ -476,7 +500,7 @@ const server = createServer(async (request, response) => {
 		providerRequests.push(providerRequest(chatRequest, 200));
 		writeResponse(response, chatRequest, await planResponse(chatRequest));
 	} catch (error) {
-		providerRequests.push({ status: 500, messages: [], tools: [], text: "" });
+		providerRequests.push({ status: 500, messages: [], tools: [], text: "", userText: "" });
 		response.writeHead(500, { "content-type": "application/json" });
 		response.end(
 			JSON.stringify({

@@ -16,6 +16,8 @@ The extension is fire-and-forget: `subagent` returns an acknowledgement, and com
 - [`docs/adr/0003-installable-role-packs.md`](docs/adr/0003-installable-role-packs.md) — installable role-pack discovery, precedence, and collision contract
 - [`docs/worktree-subagents.md`](docs/worktree-subagents.md) — canonical worktree operating, review, recovery, and cleanup guide
 - [`RELEASING.md`](RELEASING.md) — release checks and publishing procedure
+- [`docs/public-subagent-tree-api.md`](docs/public-subagent-tree-api.md) — public tree handle and settled-lifecycle contract
+- [`docs/adr/0009-public-subagent-tree-registry.md`](docs/adr/0009-public-subagent-tree-registry.md) — process-local registry and branch ownership decision
 
 Bundled role prompts live in [`agents/`](agents/). The native `/skill:orchestrate` workflow authoring skill lives at [`skills/orchestrate/SKILL.md`](skills/orchestrate/SKILL.md). The `/plan` orchestration prompt lives at [`pi-extension/subagents/plan-skill.md`](pi-extension/subagents/plan-skill.md).
 

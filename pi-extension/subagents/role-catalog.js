@@ -1,0 +1,281 @@
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+const EVENT = "pi-herdr-subagents:roles:discover:v1";
+const SPAWNING = new Set([
+    "subagent",
+    "subagent_interrupt",
+    "subagents_list",
+    "subagent_resume",
+    "subagent_cancel"
+]);
+const LEVELS = new Set([
+    "off",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+]);
+const bundled = join(dirname(new URL(import.meta.url).pathname), "../../agents/built-in");
+const config = ()=>process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+const fm = (s, k)=>s.split("\n").find((x)=>x.startsWith(`${k}:`))?.slice(k.length + 1).trim() || undefined;
+function parse(s, fallback) {
+    const m = s.match(/^---\n([\s\S]*?)\n---/);
+    if (!m) return null;
+    const f = m[1], mode = fm(f, "session-mode"), prompt = fm(f, "system-prompt"), thinking = fm(f, "thinking");
+    const b = (k)=>{
+        const x = fm(f, k);
+        return x == null ? undefined : x === "true";
+    };
+    return {
+        name: fm(f, "name") ?? fallback,
+        description: fm(f, "description"),
+        model: fm(f, "model"),
+        tools: fm(f, "tools"),
+        skills: fm(f, "skills") ?? fm(f, "skill"),
+        denyTools: fm(f, "deny-tools"),
+        spawning: b("spawning"),
+        allowSelfSpawn: b("allow-self-spawn"),
+        autoExit: b("auto-exit"),
+        interactive: b("interactive"),
+        sessionMode: mode === "standalone" || mode === "lineage-only" || mode === "fork" ? mode : undefined,
+        cwd: fm(f, "cwd"),
+        body: s.replace(/^---\n[\s\S]*?\n---\n*/, "").trim() || undefined,
+        systemPromptMode: prompt === "append" || prompt === "replace" ? prompt : undefined,
+        thinking: LEVELS.has(thinking ?? "") ? thinking : undefined,
+        disableModelInvocation: fm(f, "disable-model-invocation")?.toLowerCase() === "true"
+    };
+}
+function markdown(path) {
+    const s = statSync(path);
+    if (s.isFile()) return path.endsWith(".md") ? [
+        path
+    ] : [];
+    return s.isDirectory() ? readdirSync(path).filter((x)=>x.endsWith(".md")).sort().map((x)=>join(path, x)) : [];
+}
+function packageMeta(path) {
+    let d = statSync(path).isDirectory() ? path : dirname(path);
+    for(;;){
+        const p = join(d, "package.json");
+        if (existsSync(p)) try {
+            const x = JSON.parse(readFileSync(p, "utf8"));
+            return {
+                provider: typeof x.name === "string" ? x.name : undefined,
+                providerVersion: typeof x.version === "string" ? x.version : undefined
+            };
+        } catch  {
+            return {};
+        }
+        const parent = dirname(d);
+        if (parent === d) return {};
+        d = parent;
+    }
+}
+function legacy(content, name, path) {
+    const m = content.match(/^---\n([\s\S]*?)\n---/), cli = m ? fm(m[1], "cli") : undefined;
+    if (!cli) return null;
+    const n = fm(m[1], "name") ?? name;
+    return {
+        code: "external-cli-unsupported",
+        message: `Role "${n}" requests external CLI "${cli}" in ${path}. pi-lpt-herdr-subagents is Pi-only; remove the cli and cli-model fields and select Claude through an authenticated Pi provider/model ID.`,
+        path,
+        agentName: n
+    };
+}
+export function resolveDenyTools(agent) {
+    const out = new Set();
+    if (!agent) return out;
+    if (agent.spawning === false) for (const x of SPAWNING)out.add(x);
+    for (const x of (agent.denyTools ?? "").split(",").map((x)=>x.trim()).filter(Boolean))out.add(x);
+    return out;
+}
+export function effectiveRoleTools(requested, agent) {
+    const allow = agent?.tools ? new Set(agent.tools.split(",").map((x)=>x.trim()).filter(Boolean)) : undefined;
+    const deny = resolveDenyTools(agent);
+    const out = [
+        ...new Set(requested)
+    ].filter((x)=>(!allow || allow.has(x)) && !deny.has(x));
+    if (!out.length) throw new Error("effective child tool list is empty");
+    return out;
+}
+export function discoverAgentCatalog(pi) {
+    const agents = new Map(), diagnostics = [];
+    const add = (path, source)=>{
+        if (!existsSync(path)) return;
+        for (const p of markdown(path)){
+            const n = basename(p, ".md");
+            let c;
+            try {
+                c = readFileSync(p, "utf8");
+            } catch (e) {
+                diagnostics.push({
+                    code: "unreadable-role-definition",
+                    message: `Cannot read role definition ${p}: ${e instanceof Error ? e.message : String(e)}`,
+                    path: p,
+                    agentName: n
+                });
+                continue;
+            }
+            const old = legacy(c, n, p);
+            if (old) {
+                diagnostics.push(old);
+                agents.delete(old.agentName ?? n);
+                continue;
+            }
+            const a = parse(c, n);
+            if (a) agents.set(a.name, {
+                ...a,
+                source,
+                path: p
+            });
+        }
+    };
+    add(bundled, "package");
+    const paths = [];
+    try {
+        pi?.events?.emit?.(EVENT, {
+            apiVersion: 1,
+            register (path) {
+                if (typeof path !== "string" || !isAbsolute(path)) diagnostics.push({
+                    code: "invalid-role-pack-path",
+                    message: "Role packs must register an absolute file or directory path."
+                });
+                else paths.push(resolve(path));
+            }
+        });
+    } catch (e) {
+        diagnostics.push({
+            code: "role-pack-discovery-failed",
+            message: `Role-pack discovery failed: ${e instanceof Error ? e.message : String(e)}`
+        });
+    }
+    const packs = new Map();
+    for (const p of new Set(paths)){
+        if (!existsSync(p)) {
+            diagnostics.push({
+                code: "missing-role-pack-path",
+                message: `Registered role-pack path does not exist: ${p}`,
+                path: p
+            });
+            continue;
+        }
+        let files, meta;
+        try {
+            if (statSync(p).isFile() && !p.endsWith(".md")) {
+                diagnostics.push({
+                    code: "invalid-role-pack-file",
+                    message: `Registered role-pack file must use the .md extension: ${p}`,
+                    path: p
+                });
+                continue;
+            }
+        } catch  {}
+        try {
+            files = markdown(p);
+            meta = packageMeta(p);
+        } catch (e) {
+            diagnostics.push({
+                code: "unreadable-role-pack-path",
+                message: `Cannot read registered role-pack path ${p}: ${e instanceof Error ? e.message : String(e)}`,
+                path: p
+            });
+            continue;
+        }
+        for (const f of files){
+            const n = basename(f, ".md");
+            let c;
+            try {
+                c = readFileSync(f, "utf8");
+            } catch (e) {
+                diagnostics.push({
+                    code: "unreadable-role-definition",
+                    message: `Cannot read role definition ${f}: ${e instanceof Error ? e.message : String(e)}`,
+                    path: f,
+                    agentName: n,
+                    provider: meta.provider
+                });
+                continue;
+            }
+            const old = legacy(c, n, f);
+            if (old) {
+                diagnostics.push({
+                    ...old,
+                    provider: meta.provider
+                });
+                continue;
+            }
+            const a = parse(c, n);
+            if (!a) {
+                diagnostics.push({
+                    code: "invalid-role-definition",
+                    message: `Role definition must start with frontmatter: ${f}`,
+                    path: f,
+                    agentName: n,
+                    provider: meta.provider
+                });
+                continue;
+            }
+            if (a.name !== n) {
+                diagnostics.push({
+                    code: "role-name-mismatch",
+                    message: `Role name "${a.name}" must match filename "${n}" in ${f}`,
+                    path: f,
+                    agentName: n,
+                    provider: meta.provider
+                });
+                continue;
+            }
+            if (!a.description) {
+                diagnostics.push({
+                    code: "missing-role-description",
+                    message: `Role "${a.name}" must declare a description in ${f}`,
+                    path: f,
+                    agentName: a.name,
+                    provider: meta.provider
+                });
+                continue;
+            }
+            packs.set(a.name, [
+                ...packs.get(a.name) ?? [],
+                {
+                    ...a,
+                    source: "package",
+                    path: f,
+                    ...meta
+                }
+            ]);
+        }
+    }
+    for (const [n, defs] of packs){
+        if (agents.has(n)) {
+            diagnostics.push({
+                code: "bundled-role-collision",
+                message: `Role pack cannot replace bundled role "${n}"; use a global or project override instead.`,
+                agentName: n
+            });
+            continue;
+        }
+        if (defs.length > 1) {
+            diagnostics.push({
+                code: "duplicate-package-role",
+                message: `Role "${n}" is contributed by multiple role packs: ${defs.map((x)=>x.provider ?? x.path).sort().join(", ")}`,
+                agentName: n
+            });
+            continue;
+        }
+        agents.set(n, defs[0]);
+    }
+    add(join(config(), "agents"), "global");
+    add(join(process.cwd(), ".pi", "agents"), "project");
+    return {
+        agents: [
+            ...agents.values()
+        ],
+        diagnostics
+    };
+}
+export function resolveAgent(name, pi) {
+    return discoverAgentCatalog(pi).agents.find((x)=>x.name === name);
+}

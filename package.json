@@ -38,7 +38,7 @@
   "scripts": {
     "changelog": "auto-changelog",
     "lint": "oxlint pi-extension test",
-    "test": "node --experimental-strip-types --test test/test.ts test/launch.test.ts test/lineage.test.ts test/runtime-routing.test.ts test/release-workflow.test.ts test/workflow.test.ts test/settled-contract.test.ts test/settled-observer.test.ts test/public-subagent-tree-api.test.ts test/package-skill.test.js",
+    "test": "node --experimental-strip-types --test test/test.ts test/launch.test.ts test/lineage.test.ts test/runtime-routing.test.ts test/release-workflow.test.ts test/workflow.test.ts test/settled-contract.test.ts test/settled-observer.test.ts test/public-subagent-tree-api.test.ts test/package-skill.test.js test/result-file.test.ts test/delivery-payload.test.ts test/status-framing.test.ts test/delivery-log.test.ts test/delivery-truth.test.ts test/sidecar-ack.test.ts test/delivery-uniformity.test.ts test/delivery-recovery.test.ts",
     "test:integration": "node --experimental-strip-types test/integration/run-isolated.ts",
     "test:integration:live": "PI_TEST_LIVE=1 node --experimental-strip-types test/integration/run-isolated.ts",
     "version": "auto-changelog --package && git add CHANGELOG.md"

@@ -4398,65 +4398,71 @@ describe("subagent interruption", () => {
 		});
 	});
 
-	it("abbreviates large completion presentations while preserving their head, tail, and session path", () => {
+	it("TS-03 delivers the complete answer with its result path and session reference", () => {
 		const testApi = (subagentsModule as any).__test__;
+		const summary = `HEAD-${"h".repeat(9_000)}-MIDDLE-${"t".repeat(9_000)}-TAIL`;
 		const presentation = testApi.resolveResultPresentation(
 			{
 				exitCode: 0,
 				elapsed: 5,
-				summary: `HEAD-${"h".repeat(9_000)}-MIDDLE-${"t".repeat(9_000)}-TAIL`,
+				summary,
 				sessionFile: "/tmp/subagent.jsonl",
+				resultPath: "/tmp/sessions/9b5db0d9/01-completed.md",
 			},
 			"Reviewer",
 		);
 
-		assert.ok(presentation.length <= 16_000);
-		assert.match(presentation, /HEAD-/);
-		assert.doesNotMatch(presentation, /-MIDDLE-/);
-		assert.match(presentation, /-TAIL/);
-		assert.match(presentation, /result abbreviated/i);
+		assert.ok(presentation.includes(summary), "the complete answer survives framing");
+		assert.doesNotMatch(presentation, /result abbreviated/i);
+		assert.match(presentation, /Result file: \/tmp\/sessions\/9b5db0d9\/01-completed\.md/);
 		assert.match(presentation, /Session: \/tmp\/subagent\.jsonl/);
 		assert.match(presentation, /Resume: pi --session \/tmp\/subagent\.jsonl/);
 	});
 
-	it("abbreviates oversized provider errors without losing recovery guidance", () => {
+	it("TS-03 delivers oversized provider errors complete with recovery guidance", () => {
 		const testApi = (subagentsModule as any).__test__;
+		const errorMessage = `ERROR-HEAD-${"x".repeat(18_000)}-ERROR-TAIL`;
 		const presentation = testApi.resolveResultPresentation(
 			{
 				exitCode: 1,
 				elapsed: 5,
 				summary: "ignored",
 				sessionFile: "/tmp/subagent.jsonl",
-				errorMessage: `ERROR-HEAD-${"x".repeat(18_000)}-ERROR-TAIL`,
+				errorMessage,
 			},
 			"Reviewer",
 		);
 
-		assert.ok(presentation.length <= 16_000);
-		assert.match(presentation, /ERROR-HEAD/);
-		assert.match(presentation, /ERROR-TAIL/);
-		assert.match(presentation, /result abbreviated/i);
+		assert.ok(
+			presentation.includes(errorMessage),
+			"the complete provider error survives framing",
+		);
+		assert.doesNotMatch(presentation, /result abbreviated/i);
 		assert.match(presentation, /subagent_resume/);
 		assert.match(presentation, /Resume: pi --session \/tmp\/subagent\.jsonl/);
 	});
 
-	it("keeps presentations bounded even when a session reference exceeds filesystem limits", () => {
+	it("TS-03 keeps long session references complete in the delivered payload", () => {
 		const testApi = (subagentsModule as any).__test__;
+		const sessionFile = `/tmp/${"x".repeat(20_000)}/subagent.jsonl`;
 		const presentation = testApi.resolveResultPresentation(
 			{
 				exitCode: 0,
 				elapsed: 5,
 				summary: "Useful result",
-				sessionFile: `/tmp/${"x".repeat(20_000)}/subagent.jsonl`,
+				sessionFile,
 			},
 			"Reviewer",
 		);
 
-		assert.ok(presentation.length <= 16_000);
-		assert.match(presentation, /session reference abbreviated/i);
+		assert.ok(
+			presentation.includes(sessionFile),
+			"the complete session reference survives framing",
+		);
+		assert.doesNotMatch(presentation, /abbreviated/i);
 	});
 
-	it("bounds unexpected errors from both fresh and resumed delivery paths", () => {
+	it("TS-03 delivers unexpected errors complete from both fresh and resumed delivery paths", () => {
 		const testApi = (subagentsModule as any).__test__;
 		const error = new Error(`ERROR-HEAD-${"x".repeat(18_000)}-ERROR-TAIL`);
 
@@ -4467,14 +4473,16 @@ describe("subagent interruption", () => {
 				"/tmp/subagent.jsonl",
 			);
 
-			assert.ok(presentation.length <= 16_000);
-			assert.match(presentation, /ERROR-HEAD/);
-			assert.match(presentation, /ERROR-TAIL/);
+			assert.ok(
+				presentation.includes(error.message),
+				`the complete error survives framing for ${prefix}`,
+			);
+			assert.doesNotMatch(presentation, /result abbreviated/i);
 			assert.match(presentation, /Session: \/tmp\/subagent\.jsonl/);
 		}
 	});
 
-	it("preserves the existing session-before-runtime-warning order for small results", () => {
+	it("TS-03 keeps the result path and session reference before the runtime warning", () => {
 		const testApi = (subagentsModule as any).__test__;
 		const presentation = testApi.resolveResultPresentation(
 			{
@@ -4482,53 +4490,62 @@ describe("subagent interruption", () => {
 				elapsed: 5,
 				summary: "Useful result",
 				sessionFile: "/tmp/subagent.jsonl",
+				resultPath: "/tmp/sessions/9b5db0d9/01-completed.md",
 			},
 			"Reviewer",
 			"requested model unavailable",
 		);
 
-		assert.equal(
+		assert.match(presentation, /^Sub-agent "Reviewer" completed \(5s\)\.\n\nUseful result/);
+		assert.match(presentation, /Result file: \/tmp\/sessions\/9b5db0d9\/01-completed\.md/);
+		assert.match(
 			presentation,
-			'Sub-agent "Reviewer" completed (5s).\n\nUseful result\n\n' +
-				"Session: /tmp/subagent.jsonl\nResume: pi --session /tmp/subagent.jsonl\n\n" +
-				"Runtime warning: requested model unavailable",
+			/Session: \/tmp\/subagent\.jsonl\nResume: pi --session \/tmp\/subagent\.jsonl/,
+		);
+		assert.match(presentation, /Runtime warning: requested model unavailable/);
+		assert.ok(
+			presentation.indexOf("Resume: pi --session") <
+				presentation.indexOf("Runtime warning:"),
+			"the runtime warning stays last",
 		);
 	});
 
-	it("delivers bounded fresh and resumed results through one custom message", () => {
+	it("TS-03 delivers complete fresh and resumed results through one custom message", () => {
 		const testApi = (subagentsModule as any).__test__;
 
 		for (const name of ["fresh", "resumed"]) {
 			const { api, sentMessages, sentUserMessages } = createMockExtensionApi();
 			const sessionFile = `/tmp/${name}.jsonl`;
+			const resultPath = `/tmp/sessions/${name}/01-completed.md`;
+			const answer = `HEAD-${"x".repeat(18_000)}-TAIL`;
 			const details = {
 				name,
 				sessionFile,
+				deliveryId: `terminal:${name}`,
 				fallbackAttempts: ["fake/primary", "fake/secondary"],
 				errorMessage: "provider failed",
 				runtimePlan: { model: "fake/secondary" },
 				worktree: { path: "/tmp/worktree" },
 			};
-			testApi.sendSubagentResult(
-				api,
-				`HEAD-${"x".repeat(18_000)}-TAIL\n\nSession: ${sessionFile}\nResume: pi --session ${sessionFile}`,
-				details,
-			);
+			const payload = `${answer}\n\nResult file: ${resultPath}\n\nSession: ${sessionFile}\nResume: pi --session ${sessionFile}`;
+			testApi.sendSubagentResult(api, payload, details);
 
 			assert.equal(sentMessages.length, 1);
 			const delivered = sentMessages[0];
 			assert.equal(delivered.message.customType, "subagent_result");
-			assert.ok(delivered.message.content.length <= 16_000);
-			assert.match(delivered.message.content, /HEAD-/);
-			assert.match(delivered.message.content, /-TAIL/);
+			assert.ok(
+				delivered.message.content.includes(answer),
+				`the complete answer is delivered for ${name}`,
+			);
+			assert.match(delivered.message.content, /Result file: \/tmp\/sessions\//);
+			assert.doesNotMatch(delivered.message.content, /abbreviated/i);
 			assert.match(
 				delivered.message.content,
 				/Parent action: Continue the parent task using this result/,
 			);
 			const resultContent = delivered.message.details.resultContent;
-			assert.ok(resultContent.length <= 16_000);
-			assert.match(resultContent, /HEAD-/);
-			assert.match(resultContent, /-TAIL/);
+			assert.ok(resultContent.includes(answer), "the complete answer is recorded");
+			assert.match(resultContent, /Result file: \/tmp\/sessions\//);
 			assert.match(
 				resultContent,
 				new RegExp(`Session: ${sessionFile.replace(".", "\\.")}`),

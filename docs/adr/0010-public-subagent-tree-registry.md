@@ -1,4 +1,4 @@
-# ADR 0009: Public subagent tree registry
+# ADR 0010: Public subagent tree registry
 
 - Status: Accepted
 - Date: 2026-08-30

@@ -17,7 +17,7 @@ The extension is fire-and-forget: `subagent` returns an acknowledgement, and com
 - [`docs/worktree-subagents.md`](docs/worktree-subagents.md) — canonical worktree operating, review, recovery, and cleanup guide
 - [`RELEASING.md`](RELEASING.md) — release checks and publishing procedure
 - [`docs/public-subagent-tree-api.md`](docs/public-subagent-tree-api.md) — public tree handle and settled-lifecycle contract
-- [`docs/adr/0009-public-subagent-tree-registry.md`](docs/adr/0009-public-subagent-tree-registry.md) — process-local registry and branch ownership decision
+- [`docs/adr/0010-public-subagent-tree-registry.md`](docs/adr/0010-public-subagent-tree-registry.md) — process-local registry and branch ownership decision
 
 Bundled role prompts live in [`agents/`](agents/). The native `/skill:orchestrate` workflow authoring skill lives at [`skills/orchestrate/SKILL.md`](skills/orchestrate/SKILL.md). The `/plan` orchestration prompt lives at [`pi-extension/subagents/plan-skill.md`](pi-extension/subagents/plan-skill.md).
 
@@ -29,6 +29,8 @@ Bundled role prompts live in [`agents/`](agents/). The native `/skill:orchestrat
 - `pi-extension/subagents/lifecycle.ts`, `status.ts`, `activity.ts` — process/turn state and widget projection
 - `pi-extension/subagents/completion.ts`, `session.ts`, `subagent-done.ts` — child completion, transcript handling, `caller_ping`, and `subagent_done`
 - `pi-extension/subagents/workflow.ts`, `workflow-worker.js` — workflow preparation, ownership, journal, lifecycle, and Worker execution
+- `index.ts` — public package-root subagent tree API source (TypeScript)
+- `index.js`, `index.d.ts` — shipped runtime and type mirror of `index.ts`; there is no build step, so all three must be edited together
 - `CONTEXT.md` — domain glossary and validated prototype evidence for active design
 - `docs/adr/` — hard-to-reverse architectural decisions
 - `docs/research/` — evidence and alternatives, never the shipped contract
@@ -92,6 +94,15 @@ git diff --check
 ```
 
 Run LSP diagnostics on every changed TypeScript file; lint and tests do not catch every TypeScript error.
+
+`npm run lint` covers only `pi-extension` and `test`, so it never checks the root public API files. When `index.ts`, `index.js`, or `index.d.ts` change, also run:
+
+```bash
+npx tsc --noEmit index.ts
+node --check index.js
+```
+
+and keep the packed runtime-import and TypeScript/JavaScript parity regression in `test/public-subagent-tree-api.test.ts` green.
 
 For Herdr or lifecycle changes, run the deterministic suite from inside Herdr. Every integration test run must use a separate test-owned headless Herdr server so it cannot inspect, mutate, close, or clean the user's persistent server. The shipped `npm run test:integration` and `npm run test:integration:live` settings enforce this through `test/integration/run-isolated.ts`, with private socket, config, state, home, workspace, and worktree paths. The runner clears inherited Herdr and subagent identity, fails closed if its private endpoint cannot be bootstrapped safely, and removes only resources owned by that run. Never invoke integration test files directly with `node --test`, point tests at the persistent Herdr socket, or add fallback to the user server. Concurrent runs have separate endpoints; no shared Herdr test slot needs manual coordination.
 When a test reports that a `pi-integ-*` worktree path already exists, first check whether the same test already created that worktree and the deterministic provider dispatched the tool twice after asynchronous completion. Deterministic providers must make each requested tool call one-shot after its started result appears. Remove only verified test-owned residue after confirming that no workspace or process owns it.

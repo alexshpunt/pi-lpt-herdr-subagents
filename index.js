@@ -838,8 +838,8 @@ async function cancelWork(s) {
     } catch (e) {
         failures.push(message(e));
     }
-    while(Date.now() < deadline && inflightRecords(s).some((x)=>typeof x.pid !== "number" || processAlive(x.pid)))await new Promise((r)=>setTimeout(r, 25));
-    if (inflightRecords(s).some((x)=>typeof x.pid !== "number" || processAlive(x.pid))) failures.push("in-flight launch reservation remains");
+    while(Date.now() < deadline && pendingInflightRecords(s).some((x)=>typeof x.pid !== "number" || processAlive(x.pid)))await new Promise((r)=>setTimeout(r, 25));
+    if (pendingInflightRecords(s).some((x)=>typeof x.pid !== "number" || processAlive(x.pid))) failures.push("in-flight launch reservation remains");
     const error = failures.length ? {
         code: "cancel_termination_failed",
         message: bounded(failures.join("; "), MAX_ERROR)

@@ -82,14 +82,15 @@ function deferred<T>():Deferred<T>{let resolve!:(value:T)=>void;const promise=ne
 function nodePath(s:State,id:string){return join(s.meta.treeDir,"nodes",`${id}.json`);}
 function inflightPath(s:State,id:string){return join(s.meta.treeDir,"branches",`${s.ownerId}.${id}.inflight.json`);}
 function clearInflight(s:State,id:string,token:string){const p=inflightPath(s,id),record=readJson<{token?:string}>(p);if(record?.token===token)try{unlinkSync(p);}catch{}}
-function inflightRecords(s:State):Array<{path:string;pid?:number;ownerId?:string}> {const dir=join(s.meta.treeDir,"branches");if(!existsSync(dir))return [];return readdirSync(dir).filter(x=>x.endsWith(".inflight.json")).flatMap(x=>{const path=join(dir,x),r=readJson<{pid?:number;ownerId?:string}>(path);return r?[{path,...r}]:[{path}];});}
+type InflightRecord = {path:string;pid?:number;ownerId?:string;nodeId?:string};
+function inflightRecords(s:State):InflightRecord[] {const dir=join(s.meta.treeDir,"branches");if(!existsSync(dir))return [];return readdirSync(dir).filter(x=>x.endsWith(".inflight.json")).flatMap(x=>{const path=join(dir,x),r=readJson<Omit<InflightRecord,"path">>(path);return r?[{path,...r}]:[{path}];});}
 function writeNode(s:State,node:NodeRecord){atomic(nodePath(s,node.nodeId),node);}
 function terminalIntentPath(s:State){return join(s.meta.treeDir,"terminal-intent.json");}
 function claimTerminalIntent(s:State,kind:"completed"|"cancelled"):boolean{return exclusiveAtomic(terminalIntentPath(s),{kind,ownerId:s.ownerId,process:processIdentity(),terminalId:randomUUID(),at:Date.now()});}
 function currentTerminalIntent(s:State):"completed"|"cancelled"|undefined{return readJson<{kind?:unknown}>(terminalIntentPath(s))?.kind as "completed"|"cancelled"|undefined;}
 function branchNodes(s:State):NodeRecord[]{const d=join(s.meta.treeDir,"nodes");if(!existsSync(d))return [];return readdirSync(d).filter(x=>x.endsWith(".json")).flatMap(f=>{const n=readJson<NodeRecord>(join(d,f));return n?.ownerId===s.ownerId?[n]:[];});}
 function allNodes(s:State):NodeRecord[]{const d=join(s.meta.treeDir,"nodes");if(!existsSync(d))return [];return readdirSync(d).filter(x=>x.endsWith(".json")).flatMap(f=>{const n=readJson<NodeRecord>(join(d,f));return n?[n]:[];});}
-function pendingInflightRecords(s:State,ownerId?:string){const nodes=allNodes(s);return inflightRecords(s).filter(r=>{if(ownerId!==undefined&&r.ownerId!==ownerId)return false;const node=r.nodeId?nodes.find(n=>n.nodeId===r.nodeId):undefined;return !node||node.ownerId!==r.ownerId||!node.surface;});}
+function pendingInflightRecords(s:State,ownerId?:string):InflightRecord[]{const nodes=allNodes(s);return inflightRecords(s).filter(r=>{if(ownerId!==undefined&&r.ownerId!==ownerId)return false;const node=r.nodeId?nodes.find(n=>n.nodeId===r.nodeId):undefined;return !node||node.ownerId!==r.ownerId||!node.surface;});}
 function pendingBranchEvidence(s:State,ownerId:string){const nodes=allNodes(s),inflight=pendingInflightRecords(s,ownerId).length,queued=nodes.filter(n=>n.ownerId===ownerId&&n.status==="queued"&&!existsSync(n.resultPath)).length;return {inflight,queued};}
 async function waitBranchTransactions(s:State):Promise<boolean>{const deadline=Date.now()+CANCEL_TIMEOUT_MS;while(s.launchTransactions.size&&Date.now()<deadline)await new Promise(r=>setTimeout(r,25));return s.launchTransactions.size===0;}
 async function cancelBranch(s:State):Promise<void>{

@@ -71,7 +71,7 @@ async function loadMaterialize(): Promise<Materialize> {
 	return requireExport<Materialize>(seam, "materializeResultFile", SEAM);
 }
 
-/** Run one materializer in a separate process and inject one deterministic EEXIST at installation. */
+/** Run one materializer in a separate process and occupy one candidate before injecting EEXIST. */
 function runConcurrentMaterializer(input: {
 	input: Record<string, unknown>;
 	seamUrl: string;
@@ -94,10 +94,15 @@ function runConcurrentMaterializer(input: {
 		`let injected = false;`,
 		`const forceCollision = (operation, path) => {`,
 		`  if (!armed || injected || !String(path).endsWith(".md")) return false;`,
+		`  const collisionReadyPath = process.env.LPT57_COLLISION_CLAIM + ".ready";`,
+		`  const waitBuffer = new Int32Array(new SharedArrayBuffer(4));`,
 		`  let claimFd;`,
-		`  try { claimFd = originalOpenSync(process.env.LPT57_COLLISION_CLAIM, "wx"); originalCloseSync(claimFd); } catch (error) { if (error?.code === "EEXIST") return false; throw error; }`,
+		`  try { claimFd = originalOpenSync(process.env.LPT57_COLLISION_CLAIM, "wx"); originalCloseSync(claimFd); } catch (error) { if (error?.code === "EEXIST") { while (!fs.existsSync(collisionReadyPath)) Atomics.wait(waitBuffer, 0, 0, 5); return false; } throw error; }`,
 		`  injected = true;`,
-		`  append(process.env.LPT57_COLLISION_LOG, operation + "\\n");`,
+		`  const occupiedBytes = "occupied by deterministic collision\\n";`,
+		`  originalWriteFileSync(path, occupiedBytes, { flag: "wx" });`,
+		`  append(process.env.LPT57_COLLISION_LOG, operation + "\\t" + path + "\\t" + input.deliveryId + "\\n");`,
+		`  originalWriteFileSync(collisionReadyPath, "ready");`,
 		`  const error = new Error("forced no-replace collision");`,
 		`  error.code = "EEXIST";`,
 		`  throw error;`,
@@ -295,24 +300,40 @@ describe("TS-01 result file materialization", () => {
 		}));
 		const collisions = readFileSync(collisionLogPath, "utf8").trim().split(/\r?\n/).filter(Boolean);
 		assert.equal(collisions.length, 1, "the test must observe one injected no-replace collision");
-		assert.ok(collisions.every((operation) => operation === "writeFileSync" || operation === "openSync"));
+		const [collisionOperation, collisionPath, collisionDeliveryId] = collisions[0]?.split("\t") ?? [];
+		assert.ok(collisionOperation === "writeFileSync" || collisionOperation === "openSync");
+		assert.ok(collisionPath, "the injected collision records its exact candidate path");
+		assert.ok(collisionDeliveryId, "the injected collision records its colliding delivery id");
+		assert.equal(
+			readFileSync(collisionPath, "utf8"),
+			"occupied by deterministic collision\n",
+			"the rejected candidate remains occupied by the competing file",
+		);
+		const collisionSequence = Number(/^([0-9]+)-/.exec(collisionPath.split(/[\\/]/).pop() ?? "")?.[1]);
+		assert.ok(Number.isInteger(collisionSequence), "the collision path carries a numeric sequence");
+		const collidingResult = results.find((result) => {
+			const contents = readFileSync(result.path, "utf8");
+			return /^delivery[\s_-]+id\s*[:=]\s*(.+)$/im.exec(headerOf(contents))?.[1]?.trim() === collisionDeliveryId;
+		});
+		assert.ok(collidingResult, "the colliding delivery is materialized after the occupied candidate");
+		assert.ok(collidingResult.sequence > collisionSequence, "the colliding delivery uses a later free sequence");
 
 		const files = filesIn(resultDir(sessionsDir, childSessionId));
-		assert.deepEqual(
-			files,
-			inputs.map((_, index) => `0${index + 1}-completed.md`),
-			"collision recovery allocates one distinct sequence per delivery",
-		);
+		const expectedFiles = Array.from({ length: workers + 1 }, (_, index) => `${String(index + 1).padStart(2, "0")}-completed.md`);
+		assert.deepEqual(files, expectedFiles, "collision recovery leaves the occupied candidate and allocates later sequences");
+		assert.ok(files.includes(collisionPath.split(/[\\/]/).pop() ?? ""), "the occupied collision candidate remains in the result directory");
 		assert.equal(new Set(results.map((result) => result.path)).size, workers);
 		assert.deepEqual(
 			new Set(results.map((result) => result.sequence)),
-			new Set(inputs.map((_, index) => index + 1)),
+			new Set(expectedFiles.map((file) => Number(/^(\d+)-/.exec(file)?.[1])).filter((sequence) => sequence !== collisionSequence)),
 			"racing calls return distinct sequences after rescan",
 		);
 		const contents = files.map((file) => readFileSync(join(resultDir(sessionsDir, childSessionId), file), "utf8"));
 		const deliveryIds = contents.map((contents) => /^delivery[\s_-]+id\s*[:=]\s*(.+)$/im.exec(headerOf(contents))?.[1]?.trim());
-		assert.deepEqual(new Set(deliveryIds), new Set(inputs.map((input) => input.deliveryId)));
-		assert.equal(deliveryIds.length, new Set(deliveryIds).size, "one file carries each stable delivery id");
+		const materializedDeliveryIds = deliveryIds.filter((deliveryId): deliveryId is string => Boolean(deliveryId));
+		assert.deepEqual(new Set(materializedDeliveryIds), new Set(inputs.map((input) => input.deliveryId)));
+		assert.equal(materializedDeliveryIds.length, new Set(materializedDeliveryIds).size, "one file carries each stable delivery id");
+		assert.equal(deliveryIds.filter((deliveryId) => deliveryId === undefined).length, 1, "only the occupied candidate lacks a delivery id");
 
 		const firstPath = results[0]?.path;
 		assert.ok(firstPath);
@@ -320,7 +341,7 @@ describe("TS-01 result file materialization", () => {
 		const retry = materialize({ ...inputs[0], now: inputs[0].now + 60_000 });
 		assert.equal(retry.path, firstPath, "retry recovers the immutable delivery file");
 		assert.equal(readFileSync(firstPath, "utf8"), beforeRetry, "retry never replaces result bytes");
-		assert.equal(filesIn(resultDir(sessionsDir, childSessionId)).length, workers);
+		assert.equal(filesIn(resultDir(sessionsDir, childSessionId)).length, workers + 1);
 	});
 
 	it("TS-01 names each result file after its delivery status", async () => {

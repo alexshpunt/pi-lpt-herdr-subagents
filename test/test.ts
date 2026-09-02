@@ -3068,7 +3068,7 @@ describe("completion.ts", () => {
 		}
 	});
 
-	it("consumes a sidecar and removes it", async () => {
+	it("TS-08 keeps the exit sidecar until the durable delivery acknowledges it", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "completion-sidecar-"));
 		const sessionFile = join(dir, "session.jsonl");
 		const exitFile = `${sessionFile}.exit`;
@@ -3087,7 +3087,14 @@ describe("completion.ts", () => {
 				exitCode: 0,
 				ping: { name: "Scout", message: "ready" },
 			});
-			assert.equal(existsSync(exitFile), false);
+			// R57-9: detection only reads the evidence. Deleting it here loses a
+			// ping or a done payload forever when the process dies before the
+			// result file and the lineage inbox are durable.
+			assert.equal(
+				existsSync(exitFile),
+				true,
+				"the exit sidecar must survive detection until the durable delivery acknowledges it",
+			);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

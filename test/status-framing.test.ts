@@ -11,7 +11,8 @@
  * Frozen contract for the Coder — see `test/delivery-payload.test.ts` for the
  * `frameDeliveryPayload` signature. Additional requirements frozen here:
  * - `closed` + captured answer → `closed` label, no exit-code framing, no
- *   "pane disappeared" text
+ *   "pane disappeared" text, even when the caller supplies a stale `exitCode`
+ * - an absent `answer` is framed honestly: no throw, no fabricated answer text
  * - no payload may be framed with a status outside `DELIVERY_STATUSES`
  */
 import assert from "node:assert/strict";
@@ -24,6 +25,9 @@ import {
 } from "./delivery-seam-support.ts";
 
 const SEAM = "../pi-extension/subagents/delivery-payload.ts";
+
+/** Every spelling a framer could use to report a stale exit code as a failure. */
+const EXIT_CODE_FAILURE = /exit(?:ed)?(?: with)?\s*code\s*:?\s*1\b/i;
 
 const FIXED_STATUSES: readonly DeliveryStatus[] = [
 	"completed",
@@ -57,19 +61,44 @@ async function loadFrame(): Promise<Frame> {
 describe("TS-04 honest status framing", () => {
 	it("TS-04 frames a closed delivery with a captured answer as closed", async () => {
 		const frame = await loadFrame();
+		const childSessionFile = "/tmp/sessions/9b5db0d9.jsonl";
+		const resultPath = "/tmp/sessions/9b5db0d9/01-closed.md";
+		const answer = "Final answer captured before the pane closed.";
 
+		// A production-shaped closed payload carries the exit code of the pane
+		// that closed after the answer was captured. That stale code is not a
+		// delivery failure and must never be presented as one (R57-11).
 		const payload = frame({
 			status: "closed",
 			agentName: "reviewer",
 			childSessionId: "9b5db0d9",
-			childSessionFile: "/tmp/sessions/9b5db0d9.jsonl",
-			answer: "Final answer captured before the pane closed.",
-			resultPath: "/tmp/sessions/9b5db0d9/01-closed.md",
+			childSessionFile,
+			answer,
+			resultPath,
+			exitCode: 1,
 		});
 
-		assert.match(payload, /closed/i, "a closed delivery is labelled closed");
+		// The result path and the session reference both contain "closed", so
+		// they are removed before the label is asserted: only a real status
+		// label may satisfy this.
+		const labelled = payload
+			.split(resultPath)
+			.join("")
+			.split(childSessionFile)
+			.join("")
+			.split(answer)
+			.join("");
+		assert.match(
+			labelled,
+			/\bclosed\b/i,
+			"a closed delivery is labelled closed outside its paths and answer",
+		);
 		assert.doesNotMatch(payload, /pane disappeared/i);
-		assert.doesNotMatch(payload, /exit ?code 1/i);
+		assert.doesNotMatch(
+			payload,
+			EXIT_CODE_FAILURE,
+			"a captured answer suppresses the stale exit code",
+		);
 		assert.doesNotMatch(payload, /"?reason"?: ?"?error"?/i);
 		assert.match(payload, /Final answer captured before the pane closed\./);
 	});
@@ -94,7 +123,7 @@ describe("TS-04 honest status framing", () => {
 			if (status !== "error" && status !== "crashed" && status !== "recovery-failed") {
 				assert.doesNotMatch(
 					payload,
-					/exit ?code 1/i,
+					EXIT_CODE_FAILURE,
 					`status ${status} must not be framed with exit code 1`,
 				);
 			}
@@ -115,5 +144,31 @@ describe("TS-04 honest status framing", () => {
 
 		assert.match(payload, /Result file: \/tmp\/sessions\/9b5db0d9\/01-closed\.md/);
 		assert.match(payload, /Session: \/tmp\/sessions\/9b5db0d9\.jsonl/);
+	});
+
+	it("TS-04 frames an answer-less outcome without fabricating an answer", async () => {
+		const frame = await loadFrame();
+
+		// Approved setup shape (b): the pane is gone and nothing was captured,
+		// so `answer` is absent while the caller still reports the exit code.
+		const payload = frame({
+			status: "closed",
+			agentName: "reviewer",
+			childSessionId: "9b5db0d9",
+			exitCode: 1,
+		});
+
+		assert.equal(
+			typeof payload,
+			"string",
+			"an absent answer is framed, not dereferenced into a crash",
+		);
+		assert.match(payload, /\bclosed\b/i, "the fixed vocabulary is used honestly");
+		assert.doesNotMatch(
+			payload,
+			/undefined|null|NaN|\[object Object\]/i,
+			"no placeholder leaks into model-visible text",
+		);
+		assert.match(payload, /\S/, "the payload still says something readable");
 	});
 });

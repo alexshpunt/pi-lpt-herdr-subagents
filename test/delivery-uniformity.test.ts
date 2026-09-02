@@ -17,7 +17,7 @@
  * never appear in the grandparent payload.
  */
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 import {
 	loadSeam,
@@ -29,6 +29,25 @@ import {
 const SEAM = "../pi-extension/subagents/delivery-payload.ts";
 
 const FORBIDDEN = /deliver|delivery|result-?file|resultFile|resultPath|watchdog|materiali[sz]/i;
+
+// The schema lock-in reads the registered `subagent` tool, and tool registration
+// is denied for a child agent whose parent set PI_DENY_TOOLS (index.ts builds
+// its deny list from PI_DENY_TOOLS only when PI_SUBAGENT_ID is present). A
+// reviewer or verifier run therefore has to scrub both variables before
+// registration and restore them afterwards, or the lock-in reports an ambient
+// environment problem instead of a delivery switch.
+const inheritedSubagentId = process.env.PI_SUBAGENT_ID;
+const inheritedDenyTools = process.env.PI_DENY_TOOLS;
+before(() => {
+	delete process.env.PI_SUBAGENT_ID;
+	delete process.env.PI_DENY_TOOLS;
+});
+after(() => {
+	if (inheritedSubagentId == null) delete process.env.PI_SUBAGENT_ID;
+	else process.env.PI_SUBAGENT_ID = inheritedSubagentId;
+	if (inheritedDenyTools == null) delete process.env.PI_DENY_TOOLS;
+	else process.env.PI_DENY_TOOLS = inheritedDenyTools;
+});
 
 type Frame = (input: {
 	status: DeliveryStatus;

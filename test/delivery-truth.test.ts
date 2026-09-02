@@ -41,6 +41,8 @@
  *     sendSteer?: (payload: string) => void;
  *     log?: (event: string, fields?: Record<string, unknown>) => void;
  *     projectWidget?: (projection: DeliveryProjection) => void;
+ *     // Fallback sink for failures raised while logging or projecting failure.
+ *     onFailure?: (error: unknown, fields?: Record<string, unknown>) => void;
  *   };
  * }): Promise<{ projection: DeliveryProjection; resultPath?: string }>;
  *
@@ -72,9 +74,23 @@
  * ): Promise<void>;
  * ```
  *
- * `pi-extension/subagents/subagent-done.ts` owns the child-side route. It is
- * driven by environment, so it is checked structurally: it delegates to the
- * shared drain seam instead of polling on its own timer.
+ * `pi-extension/subagents/subagent-done.ts` owns the child-side route. It
+ * exports the same adapter seam for deterministic contract checks; the runtime
+ * route supplies the lineage from environment and forwards these observer hooks:
+ *
+ * ```ts
+ * export function waitForDescendantDrain(options?: {
+ *   lineage?: { rootDir: string; parentNodeId: string };
+ *   delay?: (ms: number) => Promise<void>;
+ *   now?: () => number;
+ *   onWaitOpen?: (info: { waitedSince: number }) => void;
+ *   onWaitRelease?: (info: { waitedSince: number; waitedMs: number }) => void;
+ *   projectWidget?: (projection: unknown) => void;
+ * }): Promise<void>;
+ * ```
+ *
+ * The test calls that real child adapter with an on-disk lineage fixture, not a
+ * source-text approximation, and releases it only through durable gate events.
  *
  * R57-5 / R57-6 — a failure caught by a delivery adapter is recorded, never
  * dropped:
@@ -124,9 +140,11 @@ interface LogCall {
 /** Test doubles for one transaction run; every sink is injected, never a production branch. */
 function transactionHarness(options: {
 	fail?: "result-file" | "inbox" | "claim" | "steer" | "log" | "widget";
+	failDuringFailureHandling?: "log" | "widget";
 } = {}) {
 	const calls: string[] = [];
 	const logCalls: LogCall[] = [];
+	const containmentCalls: LogCall[] = [];
 	const widgetProjections: DeliveryProjection[] = [];
 	const acknowledged: string[] = [];
 	const released: string[] = [];
@@ -134,6 +152,7 @@ function transactionHarness(options: {
 	return {
 		calls,
 		logCalls,
+		containmentCalls,
 		widgetProjections,
 		acknowledged,
 		released,
@@ -185,12 +204,22 @@ function transactionHarness(options: {
 				return payload;
 			},
 			log(event: string, fields?: Record<string, unknown>) {
-				if (options.fail === "log") throw new Error("log write failed");
+				if (options.fail === "log" || options.failDuringFailureHandling === "log") {
+					throw new Error("log write failed");
+				}
 				logCalls.push({ event, fields });
 			},
 			projectWidget(projection: DeliveryProjection) {
-				if (options.fail === "widget") throw new Error("widget refresh failed");
+				if (options.fail === "widget" || options.failDuringFailureHandling === "widget") {
+					throw new Error("widget refresh failed");
+				}
 				widgetProjections.push(projection);
+			},
+			onFailure(error: unknown, fields?: Record<string, unknown>) {
+				containmentCalls.push({
+					event: "delivery-failure-contained",
+					fields: { error: error instanceof Error ? error.message : String(error), ...fields },
+				});
 			},
 		},
 	};
@@ -328,15 +357,18 @@ describe("TS-06 loud failures at the delivery transaction seam", () => {
 		});
 	}
 
-	it("TS-06 keeps a throwing logger or widget inside the transaction", async () => {
+	it("TS-06 contains logger and widget failures during delivery-failure handling", async () => {
 		const runDeliveryTransaction = await loadTransaction();
 		const hostErrors: unknown[] = [];
 		const onUnhandled = (error: unknown) => hostErrors.push(error);
 		process.on("unhandledRejection", onUnhandled);
 		process.on("uncaughtException", onUnhandled);
 		try {
-			for (const fail of ["log", "widget"] as const) {
-				const harness = transactionHarness({ fail });
+			for (const failDuringFailureHandling of ["log", "widget"] as const) {
+				const harness = transactionHarness({
+					fail: "steer",
+					failDuringFailureHandling,
+				});
 				const result = await runDeliveryTransaction({
 					sessionsDir: "/tmp/sessions",
 					childSessionId: "9b5db0d9",
@@ -352,14 +384,19 @@ describe("TS-06 loud failures at the delivery transaction seam", () => {
 					now: () => 1_788_247_000_000,
 					sinks: harness.sinks,
 				});
+				assert.equal(result.projection.state, "delivery-failed");
 				assert.equal(
-					result.projection.state,
-					"delivered",
-					`a failing ${fail} must not break the delivery itself`,
+					harness.containmentCalls.length,
+					1,
+					`one containment record for a failing ${failDuringFailureHandling}`,
 				);
-				assert.ok(harness.calls.includes("sendSteer"));
+				assert.equal(harness.containmentCalls[0]?.event, "delivery-failure-contained");
+				assert.ok(
+					JSON.stringify(harness.containmentCalls[0]).includes(failDuringFailureHandling),
+					"the containment record names the failed handler",
+				);
 			}
-			// Bounded by the transaction above; no fixed sleep anywhere.
+			// Bounded by the transaction/event marker above; no fixed sleep anywhere.
 			await new Promise((resolve) => setImmediate(resolve));
 			assert.deepEqual(hostErrors, [], "no failure escaped into the Pi host");
 		} finally {
@@ -439,11 +476,6 @@ function tick(): Promise<void> {
 // Resolved against this file, not the process cwd: `npm test` runs from the
 // repository root, but a focused run may not.
 const INDEX_SOURCE = new URL("../pi-extension/subagents/index.ts", import.meta.url);
-const SUBAGENT_DONE_SOURCE = new URL(
-	"../pi-extension/subagents/subagent-done.ts",
-	import.meta.url,
-);
-
 after(cleanupTempDirs);
 
 /** Source of one named function, from `function <name>` to its closing brace. */
@@ -592,21 +624,71 @@ describe("TS-07 visibility on the real drain routes", () => {
 		);
 	});
 
-	it("TS-07 wires the child-side drain wait to the shared drain seam", () => {
-		const source = readFileSync(SUBAGENT_DONE_SOURCE, "utf8");
-		const body = functionSource(source, "waitForDescendantDrain");
+	it("TS-07 announces and releases the real child-side drain wait", async () => {
+		const childModule = "../pi-extension/subagents/subagent-done.ts";
+		const seam = requireSeam(await loadSeam(childModule), childModule);
+		const waitForDescendantDrain = requireExport<any>(
+			seam,
+			"waitForDescendantDrain",
+			childModule,
+		);
+		const dir = tempDir("pi-ts07-child-route-");
+		const owner = registerLineage({ artifactDir: dir, nodeId: "owner-node" });
+		const child = registerLineage({
+			artifactDir: dir,
+			nodeId: "child-node",
+			parentNodeId: owner.nodeId,
+			inheritedRootDir: owner.rootDir,
+			inheritedRootId: owner.rootId,
+		});
+		assert.ok(hasUndrainedDescendants(reduceLineage(owner.rootDir), owner.nodeId));
 
-		assert.ok(body, "the child-side drain wait still exists");
-		assert.match(
-			source,
-			/from\s+["']\.\/delivery-drain\.ts["']/,
-			"subagent-done.ts delegates to the shared drain seam",
+		const seen: string[] = [];
+		let clock = 0;
+		let polls = 0;
+		const drain = waitForDescendantDrain({
+			lineage: { rootDir: owner.rootDir, parentNodeId: owner.nodeId },
+			delay: async () => {
+				polls += 1;
+				await tick();
+			},
+			now: () => (clock += 60 * 60 * 1000),
+			onWaitOpen: () => seen.push("wait-open"),
+			onWaitRelease: () => seen.push("wait-release"),
+			projectWidget: (projection: unknown) => {
+				const text = typeof projection === "string" ? projection : JSON.stringify(projection);
+				seen.push(`widget:${text}`);
+			},
+		});
+
+		// A silent route cannot hang this check: the positive gate event is written
+		// after bounded scheduler turns, then the route must observe and release it.
+		for (let turn = 0; turn < 200 && !seen.includes("wait-open"); turn++) await tick();
+		appendLineageEvent(
+			owner.rootDir,
+			`terminal:${child.nodeId}`,
+			"terminal",
+			child.nodeId,
+			{ outcome: "success" },
 		);
-		assert.doesNotMatch(
-			body,
-			/setTimeout/,
-			"the child-side wait uses the injected delay seam, not its own timer",
+		appendLineageEvent(
+			owner.rootDir,
+			`terminal-delivered:${child.nodeId}`,
+			"terminal_delivered",
+			child.nodeId,
+			{ deliveryId: `terminal:${child.nodeId}` },
 		);
+		await drain;
+
+		assert.deepEqual(seen.filter((event) => event === "wait-open"), ["wait-open"]);
+		assert.ok(
+			seen.some((event) => event.includes("waiting-on-descendants")),
+			`the child route must project waiting-on-descendants, saw ${JSON.stringify(seen)}`,
+		);
+		assert.deepEqual(seen.filter((event) => event === "wait-release"), ["wait-release"]);
+		assert.equal(seen[seen.length - 1], "wait-release");
+		assert.ok(polls > 0, "the child route polled the durable drain state");
+		assert.ok(clock >= 60 * 60 * 1000, "no bound fired while the gate was held");
 	});
 });
 
@@ -701,6 +783,18 @@ describe("TS-06 loud failures at the real adapter catches", () => {
 				[],
 				`the ${site.label} must bind and use the error it catches instead of dropping it`,
 			);
+			for (const handler of catchHandlers(body)) {
+				assert.match(
+					handler,
+					/\berror\b/,
+					`the ${site.label} catch must preserve its error for attribution`,
+				);
+				assert.match(
+					handler,
+					/(?:log|record|delivery|widget|project|updateWidget)/i,
+					`the ${site.label} catch must report failure through durable log/UI handling`,
+				);
+			}
 		}
 	});
 });

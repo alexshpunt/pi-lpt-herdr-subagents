@@ -140,6 +140,18 @@ function parentEntriesContaining(parentSessionFile: string, needle: string): str
 		.filter((line) => line.includes(needle));
 }
 
+/** The existing ledger's stable claim path is derived from the delivery id. */
+function materializationClaimPath(rootDir: string, deliveryId: string): string {
+	const safeId = Buffer.from(deliveryId, "utf8").toString("base64url");
+	return join(rootDir, "materialization-claims", `${safeId}.claim`);
+}
+
+function readMaterializationClaim(rootDir: string, deliveryId: string): string {
+	const path = materializationClaimPath(rootDir, deliveryId);
+	assert.ok(existsSync(path), `the stable materialization claim exists at ${path}`);
+	return readFileSync(path, "utf8");
+}
+
 const cleanups: string[] = [];
 after(() => {
 	while (cleanups.length > 0) rmSync(cleanups.pop() as string, { recursive: true, force: true });
@@ -256,6 +268,32 @@ describe("TS-26 recovery projection and single materialization", () => {
 			"the existing lineage ledger records one materialization acknowledgement",
 		);
 
+		const firstClaim = readMaterializationClaim(fixture.rootDir, PROOF_DELIVERY_ID);
+		const claim = JSON.parse(firstClaim) as Record<string, unknown>;
+		assert.equal(claim.deliveryId, PROOF_DELIVERY_ID, "the claim is for the recovered delivery");
+		assert.equal(claim.nodeId, PROOF_NODE_ID, "the claim is for the recovered node");
+		assert.equal(
+			isLineageInboxMaterialized(fixture.rootDir, PROOF_DELIVERY_ID),
+			true,
+			"the claim is paired with the durable materialized state",
+		);
+		assert.deepEqual(
+			pendingLineageInboxes(
+				fixture.rootDir,
+				PARENT_SESSION_ID,
+				fixture.parentSessionFile,
+			),
+			[],
+			"the exact parent inbox is no longer pending after materialization",
+		);
+		assert.equal(
+			readdirSync(join(fixture.rootDir, "materialization-claims")).filter((file) =>
+				file.endsWith(".claim"),
+			).length,
+			1,
+			"the existing claims ledger contains exactly one stable delivery claim",
+		);
+
 		const second = await recover({
 			sessionDir: fixture.root,
 			parentSessionId: PARENT_SESSION_ID,
@@ -272,6 +310,18 @@ describe("TS-26 recovery projection and single materialization", () => {
 		assert.equal(
 			parentEntriesContaining(fixture.parentSessionFile, PROOF_DELIVERY_ID).length,
 			1,
+		);
+		assert.equal(
+			readMaterializationClaim(fixture.rootDir, PROOF_DELIVERY_ID),
+			firstClaim,
+			"the second resume leaves the one exact delivery claim unchanged",
+		);
+		assert.equal(
+			readdirSync(join(fixture.rootDir, "materialization-claims")).filter((file) =>
+				file.endsWith(".claim"),
+			).length,
+			1,
+			"the second resume does not create a second materialization claim",
 		);
 	});
 });

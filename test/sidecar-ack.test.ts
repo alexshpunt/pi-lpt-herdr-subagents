@@ -19,7 +19,7 @@
  */
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { waitForCompletion } from "../pi-extension/subagents/completion.ts";
 import {
@@ -78,6 +78,7 @@ function harness(options: { fail?: "result-file" | "inbox"; alreadyMaterialized?
 			acknowledgeSidecar(path: string) {
 				calls.push("acknowledgeSidecar");
 				acknowledged.push(path);
+				rmSync(path, { force: true });
 			},
 			claimMaterialization() {
 				calls.push("claimMaterialization");
@@ -202,12 +203,19 @@ describe("TS-08 durable delivery before acknowledgement", () => {
 				existsSync(sidecarPath),
 				`an injected ${fail} failure must leave the sidecar recoverable`,
 			);
+			assert.deepEqual(
+				recorder.acknowledged,
+				[],
+				`an injected ${fail} failure must not acknowledge the retained sidecar`,
+			);
 		}
 	});
 
-	it("TS-08 does not deliver twice when the same child is detected again", async () => {
+	it("TS-08 retries a failed pass once, then stays idempotent", async () => {
 		const runDeliveryTransaction = await loadTransaction();
 		const dir = tempDir("pi-ts08-once-");
+		const sidecarPath = join(dir, "child.jsonl.exit");
+		writeFileSync(sidecarPath, JSON.stringify({ type: "done" }), "utf8");
 		const input = {
 			sessionsDir: dir,
 			childSessionId: "9b5db0d9",
@@ -215,6 +223,7 @@ describe("TS-08 durable delivery before acknowledgement", () => {
 			status: "completed" as const,
 			agentName: "reviewer",
 			answer: "captured answer",
+			sidecarPath,
 			parent: {
 				sessionId: "parent-session",
 				sessionFile: join(dir, "parent.jsonl"),
@@ -223,14 +232,28 @@ describe("TS-08 durable delivery before acknowledgement", () => {
 			now: () => 1_788_247_000_000,
 		};
 
-		const first = harness();
-		await runDeliveryTransaction({ ...input, sinks: first.sinks });
-		assert.equal(first.steers.length, 1, "the first pass delivers one steer");
+		const failed = harness({ fail: "result-file" });
+		const first = await runDeliveryTransaction({ ...input, sinks: failed.sinks });
+		assert.equal(first.projection.state, "delivery-failed");
+		assert.equal(failed.steers.length, 0, "the failed pass sends no steer");
+		assert.deepEqual(failed.acknowledged, [], "the failed pass does not acknowledge");
+		assert.ok(existsSync(sidecarPath), "the failed pass leaves the sidecar for retry");
 
-		const second = harness({ alreadyMaterialized: true });
-		const result = await runDeliveryTransaction({ ...input, sinks: second.sinks });
+		const recovered = harness();
+		const second = await runDeliveryTransaction({ ...input, sinks: recovered.sinks });
+		assert.equal(second.projection.state, "delivered");
+		assert.equal(recovered.steers.length, 1, "the next pass delivers exactly once");
+		assert.deepEqual(recovered.acknowledged, [sidecarPath]);
+		assert.equal(recovered.calls.filter((call) => call === "materializeResultFile").length, 1);
+		assert.equal(recovered.calls.filter((call) => call === "publishInbox").length, 1);
+		assert.equal(recovered.calls.filter((call) => call === "acknowledgeSidecar").length, 1);
 
-		assert.equal(second.steers.length, 0, "a second detection pass delivers nothing");
-		assert.equal(result.projection.state, "delivered");
+		const duplicate = harness({ alreadyMaterialized: true });
+		const third = await runDeliveryTransaction({ ...input, sinks: duplicate.sinks });
+		assert.equal(third.projection.state, "delivered");
+		assert.equal(duplicate.steers.length, 0, "a third detection pass delivers nothing");
+		assert.equal(duplicate.calls.filter((call) => call === "materializeResultFile").length, 0);
+		assert.equal(duplicate.calls.filter((call) => call === "publishInbox").length, 0);
+		assert.equal(duplicate.calls.filter((call) => call === "acknowledgeSidecar").length, 0);
 	});
 });

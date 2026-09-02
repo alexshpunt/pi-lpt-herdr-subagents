@@ -224,6 +224,13 @@ describe("TS-26 recovery projection and single materialization", () => {
 		);
 		const fixture = buildIncidentCopy();
 		cleanups.push(fixture.root);
+		const pending = pendingLineageInboxes(
+			fixture.rootDir,
+			PARENT_SESSION_ID,
+			fixture.parentSessionFile,
+		);
+		const recordedPayload = pending[0]?.payload?.resultContent;
+		assert.equal(typeof recordedPayload, "string", "the pending inbox carries recorded content");
 		const delivered: Array<{ deliveryId: string; content: string }> = [];
 
 		const first = await recover({
@@ -250,14 +257,24 @@ describe("TS-26 recovery projection and single materialization", () => {
 		assert.deepEqual(first.materialized, [PROOF_DELIVERY_ID]);
 		assert.equal(delivered.length, 1, "resumed supervision delivers the payload once");
 		assert.equal(delivered[0]?.deliveryId, PROOF_DELIVERY_ID);
-		assert.ok(
-			(delivered[0]?.content ?? "").length > 0,
-			"the recovered entry carries the recorded payload",
+		assert.equal(
+			delivered[0]?.content,
+			recordedPayload,
+			"the recovered entry carries the exact durable inbox payload",
 		);
 		assert.equal(
 			parentEntriesContaining(fixture.parentSessionFile, PROOF_DELIVERY_ID).length,
 			1,
 			"exactly one parent-session entry",
+		);
+
+		const parentEntry = JSON.parse(
+			parentEntriesContaining(fixture.parentSessionFile, PROOF_DELIVERY_ID)[0] as string,
+		) as { content?: string };
+		assert.equal(
+			parentEntry.content,
+			recordedPayload,
+			"the exact durable payload reaches the exact parent session",
 		);
 		assert.ok(
 			hasLineageEvent(

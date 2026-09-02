@@ -128,6 +128,9 @@ describe("TS-09 uniform delivery contract", () => {
 		const grandchildAnswer = "GRANDCHILD-SECRET-ANSWER";
 		const grandchildResultPath = "/tmp/sessions/grandchild/07-completed.md";
 
+		// Model the two-level handoff: the child facts and an attached grandchild
+		// record reach the same parent framing operation. The framer must whitelist
+		// the direct-child fields instead of serializing descendant input.
 		const payload = frame({
 			status: "completed",
 			agentName: "child-agent",
@@ -135,21 +138,18 @@ describe("TS-09 uniform delivery contract", () => {
 			childSessionFile: "/tmp/sessions/child.jsonl",
 			answer: childAnswer,
 			resultPath: childResultPath,
-		});
+			descendant: {
+				agentName: "grandchild-agent",
+				childSessionId: "grandchild",
+				answer: grandchildAnswer,
+				resultPath: grandchildResultPath,
+			},
+		} as any);
 
 		assert.match(payload, /Child's own complete answer\./);
 		assert.match(payload, /Result file: \/tmp\/sessions\/child\/01-completed\.md/);
 		assert.doesNotMatch(payload, /GRANDCHILD-SECRET-ANSWER/);
 		assert.doesNotMatch(payload, /grandchild/);
-		// A nested two-level fixture must not leak the descendant's own file path.
-		const nested = frame({
-			status: "completed",
-			agentName: "grandchild-agent",
-			childSessionId: "grandchild",
-			answer: grandchildAnswer,
-			resultPath: grandchildResultPath,
-		});
-		assert.match(nested, /GRANDCHILD-SECRET-ANSWER/);
 		assert.doesNotMatch(
 			payload,
 			new RegExp(grandchildResultPath.replace(/\//g, "\\/")),

@@ -76,9 +76,12 @@ describe("TS-06 persistent delivery log", () => {
 		assert.ok(existsSync(logPath), "the log file exists at the injected path");
 		const records = readJsonLines(logPath);
 		assert.equal(records.length, 2);
-		assert.equal(records[0].version, 1);
+		for (const [index, record] of records.entries()) {
+			assert.equal(record.version, 1, `record ${index} has the schema version`);
+			assert.equal(record.time, new Date(now).toISOString(), `record ${index} has the injected ISO time`);
+			assert.equal(typeof record.event, "string", `record ${index} has event metadata`);
+		}
 		assert.equal(records[0].event, "delivery-started");
-		assert.equal(records[0].time, new Date(now).toISOString());
 		assert.equal(records[0].childId, "9b5db0d9");
 		assert.equal(records[0].deliveryId, "terminal:9b5db0d9");
 		assert.equal(records[0].status, "completed");

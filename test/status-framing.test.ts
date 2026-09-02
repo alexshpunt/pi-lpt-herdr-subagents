@@ -171,4 +171,30 @@ describe("TS-04 honest status framing", () => {
 		);
 		assert.match(payload, /\S/, "the payload still says something readable");
 	});
+	it("TS-04 rejects or safely normalizes an unknown runtime status", async () => {
+		const frame = await loadFrame();
+		const input = {
+			status: "future-runtime-status" as DeliveryStatus,
+			agentName: "reviewer",
+			childSessionId: "9b5db0d9",
+			answer: "captured answer",
+		} as any;
+
+		let payload: string | undefined;
+		let rejected = false;
+		try {
+			payload = frame(input);
+		} catch {
+			rejected = true;
+		}
+		if (rejected) return;
+
+		assert.equal(typeof payload, "string", "runtime status handling returns readable framing");
+		assert.doesNotMatch(payload as string, /future-runtime-status/);
+		assert.match(
+			payload as string,
+			new RegExp(FIXED_STATUSES.map((status) => status.replace("-", "[ -]")).join("|"), "i"),
+			"safe normalization uses the fixed status vocabulary",
+		);
+	});
 });

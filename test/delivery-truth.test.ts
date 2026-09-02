@@ -112,7 +112,8 @@
  */
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	createLifecycle,
@@ -489,7 +490,7 @@ interface TestWidget {
 }
 
 /** Install the real extension adapter with only Pi/UI sinks replaced. */
-function installAdapterRuntime(dir: string, parentSessionFile: string) {
+function installAdapterRuntime(dir: string, parentSessionFile: string, cwd = process.cwd()) {
 	const handlers = new Map<string, (...args: any[]) => unknown>();
 	const widgets: TestWidget[] = [];
 	const sends: unknown[] = [];
@@ -510,7 +511,7 @@ function installAdapterRuntime(dir: string, parentSessionFile: string) {
 	(__test__.runningSubagents as Map<string, unknown>).clear();
 	subagentsExtension(pi);
 	const context: any = {
-		cwd: process.cwd(),
+		cwd,
 		hasUI: true,
 		sessionManager: {
 			getSessionId: () => "parent-session",
@@ -991,7 +992,97 @@ describe("TS-06 loud failures at the real adapter catches", () => {
 		}
 	});
 
+	it("TS-06 records a recovered workflow watcher send failure", async () => {
+		const startRecoveredWorkflowWatcher = requireExport<any>(
+			__test__ as any,
+			"startRecoveredWorkflowWatcher",
+			"pi-extension/subagents/index.ts",
+		);
+		const sessionsDir = tempDir("pi-ts06-recovered-workflow-");
+		const parentSessionFile = join(sessionsDir, "parent.jsonl");
+		writeFileSync(parentSessionFile, "", "utf8");
+		const sessionFile = join(sessionsDir, "recovered-workflow-child.jsonl");
+		writeSessionFile(sessionFile, { id: "workflow-child", cwd: sessionsDir });
+		writeFileSync(
+			`${sessionFile}.exit`,
+			JSON.stringify({ type: "done", summary: "recovered workflow answer" }),
+			"utf8",
+		);
+
+		const repoDir = tempDir("pi-ts06-workflow-repo-");
+		execFileSync("git", ["init", "-q", repoDir], { stdio: "ignore" });
+		const runId = "recovered-workflow-run";
+		const journalDir = join(repoDir, ".pi", "plans", runId);
+		mkdirSync(journalDir, { recursive: true });
+		writeFileSync(
+			join(journalDir, "run.jsonl"),
+			[
+				JSON.stringify({
+					type: "approved",
+					preparingSession: { id: "parent-session", file: parentSessionFile },
+				}),
+				JSON.stringify({ type: "started", coordinatorPid: 999_999_999 }),
+			].join("\n") + "\n",
+			"utf8",
+		);
+		const lineage = registerLineage({
+			artifactDir: sessionsDir,
+			nodeId: "workflow-child",
+			parentSessionId: "parent-session",
+			parentSessionFile,
+			parentWorkflowRunId: runId,
+			launchKind: "workflow",
+		});
+
+		const runtimeHarness = installAdapterRuntime(sessionsDir, parentSessionFile);
+		const running: any = {
+			id: "workflow-child",
+			name: "reviewer",
+			task: "review",
+			surface: "missing-surface",
+			startTime: 0,
+			sessionFile,
+			interactive: false,
+			runtimePlan: undefined,
+			lifecycle: createLifecycle(0),
+		};
+		(__test__.runningSubagents as Map<string, unknown>).set(running.id, running);
+
+		const hostErrors: unknown[] = [];
+		const onHostError = (error: unknown) => hostErrors.push(error);
+		process.on("unhandledRejection", onHostError);
+		process.on("uncaughtException", onHostError);
+		try {
+			startRecoveredWorkflowWatcher(running, lineage.rootDir, runId, { cwd: repoDir } as any);
+			for (let turn = 0; turn < 200 && runtimeHarness.sends.length === 0; turn += 1) {
+				await tick();
+			}
+
+			assert.equal(runtimeHarness.sends.length, 1, "the recovered workflow attempted one parent delivery");
+			const logPath = join(sessionsDir, "subagent-delivery.log");
+			const records = readFileSync(logPath, "utf8")
+				.split("\n")
+				.filter((line) => line.trim())
+				.map((line) => JSON.parse(line));
+			const failures = records.filter((record: any) =>
+				/fail|error/i.test(`${record.event} ${record.error ?? ""}`),
+			);
+			assert.equal(failures.length, 1, "one recovered workflow failure is durable");
+			assert.ok(JSON.stringify(failures[0]).includes(runId), "the failure identifies its workflow run");
+			assert.equal(
+				countOccurrences(renderedWidgetText(runtimeHarness.widgets), "delivery-failed"),
+				1,
+				"the recovered workflow projects one delivery-failed widget row",
+			);
+			assert.deepEqual(hostErrors, [], "the recovered workflow failure stays inside the Pi host");
+		} finally {
+			process.off("unhandledRejection", onHostError);
+			process.off("uncaughtException", onHostError);
+		}
+	});
+
 	it("TS-06 leaves no silent catch on the approved adapter failure points", () => {
+
 		const source = readFileSync(INDEX_SOURCE, "utf8");
 		for (const site of FORMER_SWALLOW_SITES) {
 			const body = functionSource(source, site.fn);

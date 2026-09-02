@@ -27,6 +27,7 @@
  */
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -130,6 +131,47 @@ describe("TS-01 result file materialization", () => {
 		assert.equal(retry.sequence, first.sequence);
 		assert.equal(readFileSync(first.path, "utf8"), before);
 		assert.equal(filesIn(resultDir(sessionsDir, childSessionId)).length, 1);
+	});
+
+
+	it("TS-01 recovers the same delivery id from disk after a process restart", async () => {
+		const materialize = await loadMaterialize();
+		const sessionsDir = tempDir("pi-ts01-restart-");
+		const input = {
+			sessionsDir,
+			childSessionId: "37721bc6",
+			deliveryId: "terminal:37721bc6",
+			status: "completed" as DeliveryStatus,
+			agentName: "reviewer",
+			answer: "restart-safe answer",
+			now: 1_788_247_000_000,
+		};
+		const first = materialize(input);
+		const before = readFileSync(first.path, "utf8");
+		const seamUrl = new URL("../pi-extension/subagents/delivery-files.ts", import.meta.url).href;
+		const script = [
+			`const module = await import(process.env.LPT57_SEAM_URL);`,
+			`const result = module.materializeResultFile(JSON.parse(process.env.LPT57_INPUT));`,
+			`process.stdout.write(JSON.stringify(result));`,
+		].join("\n");
+		const childOutput = execFileSync(
+			process.execPath,
+			["--experimental-strip-types", "-e", script],
+			{
+				encoding: "utf8",
+				env: {
+					...process.env,
+					LPT57_SEAM_URL: seamUrl,
+					LPT57_INPUT: JSON.stringify(input),
+				},
+			},
+		);
+		const recovered = JSON.parse(childOutput) as typeof first;
+
+		assert.equal(recovered.path, first.path, "restart recovers the original result path");
+		assert.equal(recovered.sequence, first.sequence);
+		assert.equal(readFileSync(first.path, "utf8"), before, "restart leaves bytes immutable");
+		assert.deepEqual(filesIn(resultDir(sessionsDir, input.childSessionId)), ["01-completed.md"]);
 	});
 
 	it("TS-01 names each result file after its delivery status", async () => {

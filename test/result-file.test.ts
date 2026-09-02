@@ -27,7 +27,7 @@
  */
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -69,6 +69,54 @@ function filesIn(dir: string): string[] {
 async function loadMaterialize(): Promise<Materialize> {
 	const seam = requireSeam(await loadSeam(SEAM), SEAM);
 	return requireExport<Materialize>(seam, "materializeResultFile", SEAM);
+}
+
+/** Run one materializer in a separate process so same-child calls can collide at the file boundary. */
+function runConcurrentMaterializer(input: {
+	input: Record<string, unknown>;
+	seamUrl: string;
+	coordDir: string;
+	goPath: string;
+	readyPath: string;
+}): Promise<string> {
+	const script = [
+		`const fs = await import("node:fs");`,
+		`const input = JSON.parse(process.env.LPT57_INPUT);`,
+		`fs.writeFileSync(process.env.LPT57_READY, "ready");`,
+		`await new Promise((resolve, reject) => {`,
+		`  let watcher;`,
+		`  const release = () => { watcher?.close(); resolve(); };`,
+		`  try { watcher = fs.watch(process.env.LPT57_COORD, (_event, name) => { if (String(name) === "go") release(); }); } catch (error) { reject(error); return; }`,
+		`  if (fs.existsSync(process.env.LPT57_GO)) release();`,
+		`});`,
+		`const module = await import(process.env.LPT57_SEAM_URL);`,
+		`process.stdout.write(JSON.stringify(module.materializeResultFile(input)));`,
+	].join("\n");
+	return new Promise((resolve, reject) => {
+		execFile(
+			process.execPath,
+			["--experimental-strip-types", "-e", script],
+			{
+				encoding: "utf8",
+				env: {
+					...process.env,
+					LPT57_INPUT: JSON.stringify(input.input),
+					LPT57_SEAM_URL: input.seamUrl,
+					LPT57_COORD: input.coordDir,
+					LPT57_GO: input.goPath,
+					LPT57_READY: input.readyPath,
+				},
+			},
+			(error, stdout, stderr) => {
+				if (error) reject(new Error(`${error.message}\n${stderr}`));
+				else resolve(stdout);
+			},
+		);
+	});
+}
+
+function schedulerTurn(): Promise<void> {
+	return new Promise((resolve) => setImmediate(resolve));
 }
 
 after(cleanupTempDirs);
@@ -174,6 +222,74 @@ describe("TS-01 result file materialization", () => {
 		assert.deepEqual(filesIn(resultDir(sessionsDir, input.childSessionId)), ["01-completed.md"]);
 	});
 
+	it("TS-01 rescans after a same-child no-replace collision and preserves every delivery", async () => {
+		const materialize = await loadMaterialize();
+		const sessionsDir = tempDir("pi-ts01-collision-");
+		const coordDir = tempDir("pi-ts01-coordination-");
+		const childSessionId = "same-child-004";
+		const seamUrl = new URL("../pi-extension/subagents/delivery-files.ts", import.meta.url).href;
+		const workers = 6;
+		const inputs = Array.from({ length: workers }, (_, index) => ({
+			sessionsDir,
+			childSessionId,
+			deliveryId: `collision-delivery-${index + 1}`,
+			status: "completed" as DeliveryStatus,
+			agentName: "lpt57-collision",
+			answer: `answer-${index + 1}`,
+			now: 1_788_247_000_000 + index,
+		}));
+		const goPath = join(coordDir, "go");
+		const launches = inputs.map((input, index) =>
+			runConcurrentMaterializer({
+				input,
+				seamUrl,
+				coordDir,
+				goPath,
+				readyPath: join(coordDir, `ready-${index}`),
+			}),
+		);
+
+		for (let turn = 0; turn < 500; turn++) {
+			if (inputs.every((_, index) => existsSync(join(coordDir, `ready-${index}`)))) break;
+			await schedulerTurn();
+		}
+		assert.ok(
+			inputs.every((_, index) => existsSync(join(coordDir, `ready-${index}`))),
+			"all materializers reached the shared start gate",
+		);
+		writeFileSync(goPath, "go", "utf8");
+		const results = await Promise.all(launches).then((outputs) => outputs.map((output) => JSON.parse(output) as {
+			path: string;
+			sequence: number;
+			filename: string;
+		}));
+
+		const files = filesIn(resultDir(sessionsDir, childSessionId));
+		assert.deepEqual(
+			files,
+			inputs.map((_, index) => `0${index + 1}-completed.md`),
+			"collision recovery allocates one distinct sequence per delivery",
+		);
+		assert.equal(new Set(results.map((result) => result.path)).size, workers);
+		assert.deepEqual(
+			new Set(results.map((result) => result.sequence)),
+			new Set(inputs.map((_, index) => index + 1)),
+			"racing calls return distinct sequences after rescan",
+		);
+		const contents = files.map((file) => readFileSync(join(resultDir(sessionsDir, childSessionId), file), "utf8"));
+		const deliveryIds = contents.map((contents) => /^delivery[\\s_-]+id\\s*[:=]\\s*(.+)$/im.exec(headerOf(contents))?.[1]?.trim());
+		assert.deepEqual(new Set(deliveryIds), new Set(inputs.map((input) => input.deliveryId)));
+		assert.equal(deliveryIds.length, new Set(deliveryIds).size, "one file carries each stable delivery id");
+
+		const firstPath = results[0]?.path;
+		assert.ok(firstPath);
+		const beforeRetry = readFileSync(firstPath, "utf8");
+		const retry = materialize({ ...inputs[0], now: inputs[0].now + 60_000 });
+		assert.equal(retry.path, firstPath, "retry recovers the immutable delivery file");
+		assert.equal(readFileSync(firstPath, "utf8"), beforeRetry, "retry never replaces result bytes");
+		assert.equal(filesIn(resultDir(sessionsDir, childSessionId)).length, workers);
+	});
+
 	it("TS-01 names each result file after its delivery status", async () => {
 		const materialize = await loadMaterialize();
 		const sessionsDir = tempDir("pi-ts01-status-");
@@ -212,14 +328,15 @@ describe("TS-02 result file contents", () => {
 	it("TS-02 writes the full delivery header and the verbatim answer body", async () => {
 		const materialize = await loadMaterialize();
 		const sessionsDir = tempDir("pi-ts02-");
-		const childSessionId = "9b5db0d9";
+		const childSessionId = "child-session-alpha";
+		const deliveryId = "delivery-immutable-omega";
 		const now = 1_788_247_116_000;
 		const answer = "Line one.\n\nLine two with **markdown**.";
 
 		const handle = materialize({
 			sessionsDir,
 			childSessionId,
-			deliveryId: "terminal:9b5db0d9",
+			deliveryId,
 			status: "completed",
 			agentName: "lpt57-reviewer",
 			answer,
@@ -228,10 +345,13 @@ describe("TS-02 result file contents", () => {
 
 		const contents = readFileSync(handle.path, "utf8");
 		const header = headerOf(contents);
-		assert.match(header, /completed/, "header carries the status");
-		assert.match(header, /lpt57-reviewer/, "header carries the agent name");
-		assert.match(header, /9b5db0d9/, "header carries the child session id");
-		assert.match(header, /terminal:9b5db0d9/, "header carries the delivery id");
+		assert.match(header, /^status\s*[:=]\s*completed$/im, "header carries the status field");
+		assert.match(header, /^agent(?:\s+name)?\s*[:=]\s*lpt57-reviewer$/im, "header carries the agent name field");
+		const childHeader = /^child[\s_-]+session[\s_-]+id\s*[:=]\s*(.+)$/im.exec(header)?.[1]?.trim();
+		const deliveryHeader = /^delivery[\s_-]+id\s*[:=]\s*(.+)$/im.exec(header)?.[1]?.trim();
+		assert.equal(childHeader, childSessionId, "header carries a distinct labeled child session id");
+		assert.equal(deliveryHeader, deliveryId, "header carries a distinct labeled delivery id");
+		assert.notEqual(childHeader, deliveryHeader, "identity fields cannot be satisfied by an overlapping value");
 		assert.match(
 			header,
 			new RegExp(new Date(now).toISOString().replace(/\./g, "\\.")),

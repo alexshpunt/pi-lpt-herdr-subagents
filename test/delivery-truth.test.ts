@@ -705,9 +705,11 @@ describe("TS-07 visibility on the real drain routes", () => {
 			},
 		);
 
-		// Hold the gate until the route announces the wait, then release it.
-		// Bounded by scheduler turns, so a silent route cannot hang the test.
+		// Hold the gate until the route announces the wait, then release it only
+		// after terminal-delivered. Scheduler turns, not wall-clock sleeps, bound
+		// both observations.
 		for (let turn = 0; turn < 200 && !seen.includes("wait-open"); turn++) await tick();
+		assert.ok(seen.includes("wait-open"), "the real parent route announces its wait before polling");
 		appendLineageEvent(
 			owner.rootDir,
 			`terminal:${child.nodeId}`,
@@ -715,6 +717,12 @@ describe("TS-07 visibility on the real drain routes", () => {
 			child.nodeId,
 			{ outcome: "success" },
 		);
+		let terminalOnlyPolls = 0;
+		const originalPolls = polls;
+		for (let turn = 0; turn < 200 && polls === originalPolls; turn++) await tick();
+		terminalOnlyPolls = polls - originalPolls;
+		assert.ok(terminalOnlyPolls > 0, "the parent route observes terminal-only state");
+		assert.ok(!seen.includes("wait-release"), "terminal alone does not release the parent drain wait");
 		appendLineageEvent(
 			owner.rootDir,
 			`terminal-delivered:${child.nodeId}`,
@@ -787,9 +795,10 @@ describe("TS-07 visibility on the real drain routes", () => {
 			},
 		});
 
-		// A silent route cannot hang this check: the positive gate event is written
-		// after bounded scheduler turns, then the route must observe and release it.
+		// A silent route cannot hang this check: scheduler turns establish the wait,
+		// then terminal-delivered is the only event allowed to release it.
 		for (let turn = 0; turn < 200 && !seen.includes("wait-open"); turn++) await tick();
+		assert.ok(seen.includes("wait-open"), "the real child route announces its wait before polling");
 		appendLineageEvent(
 			owner.rootDir,
 			`terminal:${child.nodeId}`,
@@ -797,6 +806,10 @@ describe("TS-07 visibility on the real drain routes", () => {
 			child.nodeId,
 			{ outcome: "success" },
 		);
+		const originalPolls = polls;
+		for (let turn = 0; turn < 200 && polls === originalPolls; turn++) await tick();
+		assert.ok(polls > originalPolls, "the child route observes terminal-only state");
+		assert.ok(!seen.includes("wait-release"), "terminal alone does not release the child drain wait");
 		appendLineageEvent(
 			owner.rootDir,
 			`terminal-delivered:${child.nodeId}`,

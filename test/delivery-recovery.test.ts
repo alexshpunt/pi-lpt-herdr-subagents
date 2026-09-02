@@ -184,6 +184,16 @@ function readMaterializationClaim(rootDir: string, deliveryId: string): string {
 	return readFileSync(path, "utf8");
 }
 
+function lineageEvents(
+	rootDir: string,
+	type: string,
+	deliveryId: string,
+): Array<Record<string, unknown>> {
+	return readdirSync(join(rootDir, "events"))
+		.map((file) => JSON.parse(readFileSync(join(rootDir, "events", file), "utf8")))
+		.filter((event) => event.type === type && event.deliveryId === deliveryId);
+}
+
 const cleanups: string[] = [];
 after(() => {
 	while (cleanups.length > 0) rmSync(cleanups.pop() as string, { recursive: true, force: true });
@@ -255,6 +265,115 @@ describe("TS-26 recovery projection and single materialization", () => {
 			"delivery-pending",
 			"a durable inbox without a claim is pending, never finished",
 		);
+	});
+
+	it("TS-26 retries a post-claim delivery failure and converges exactly once", async () => {
+		const seam = requireSeam(await loadSeam(DELIVERY_SEAM), DELIVERY_SEAM);
+		const recover = requireExport<any>(
+			seam,
+			"recoverPendingInboxDeliveries",
+			DELIVERY_SEAM,
+		);
+		const fixture = buildIncidentCopy();
+		cleanups.push(fixture.root);
+		const otherParentBefore = readFileSync(fixture.otherParentSessionFile, "utf8");
+		const otherClaimPath = materializationClaimPath(fixture.rootDir, OTHER_DELIVERY_ID);
+		let successfulDeliveries = 0;
+
+		const failed = await recover({
+			sessionDir: fixture.root,
+			parentSessionId: PARENT_SESSION_ID,
+			parentSessionFile: fixture.parentSessionFile,
+			now: () => 1_788_247_000_000,
+			deliver: () => {
+				throw new Error("injected post-claim parent delivery failure");
+			},
+			log: () => {},
+		});
+
+		assert.deepEqual(failed.materialized, []);
+		assert.deepEqual(failed.failed, [PROOF_DELIVERY_ID]);
+		assert.equal(
+			isLineageInboxMaterialized(fixture.rootDir, PROOF_DELIVERY_ID),
+			false,
+			"a failed callback cannot acknowledge materialization",
+		);
+		assert.equal(
+			existsSync(materializationClaimPath(fixture.rootDir, PROOF_DELIVERY_ID)),
+			false,
+			"the failed callback releases its claim so supervision can retry",
+		);
+		assert.deepEqual(
+			pendingLineageInboxes(
+				fixture.rootDir,
+				PARENT_SESSION_ID,
+				fixture.parentSessionFile,
+			).map((record) => record.deliveryId),
+			[PROOF_DELIVERY_ID],
+			"the failed delivery remains pending for the exact parent",
+		);
+		assert.equal(parentEntriesContaining(fixture.parentSessionFile, PROOF_DELIVERY_ID).length, 0);
+		assert.equal(lineageEvents(fixture.rootDir, "inbox_materialized", PROOF_DELIVERY_ID).length, 0);
+
+		const retry = await recover({
+			sessionDir: fixture.root,
+			parentSessionId: PARENT_SESSION_ID,
+			parentSessionFile: fixture.parentSessionFile,
+			now: () => 1_788_247_060_000,
+			deliver: (record: { deliveryId: string; content: string }) => {
+				successfulDeliveries += 1;
+				writeFileSync(
+					fixture.parentSessionFile,
+					`${JSON.stringify({
+						type: "custom",
+						customType: "subagent_result",
+						deliveryId: record.deliveryId,
+						content: record.content,
+					})}\n`,
+					{ flag: "a" },
+				);
+			},
+			log: () => {},
+		});
+
+		assert.deepEqual(retry.materialized, [PROOF_DELIVERY_ID]);
+		assert.deepEqual(retry.failed, []);
+		assert.equal(successfulDeliveries, 1);
+		assert.equal(parentEntriesContaining(fixture.parentSessionFile, PROOF_DELIVERY_ID).length, 1);
+		assert.equal(
+			lineageEvents(fixture.rootDir, "inbox_materialized", PROOF_DELIVERY_ID).length,
+			1,
+			"the successful retry writes exactly one durable acknowledgement",
+		);
+		readMaterializationClaim(fixture.rootDir, PROOF_DELIVERY_ID);
+
+		const settled = await recover({
+			sessionDir: fixture.root,
+			parentSessionId: PARENT_SESSION_ID,
+			parentSessionFile: fixture.parentSessionFile,
+			now: () => 1_788_247_120_000,
+			deliver: () => {
+				successfulDeliveries += 1;
+			},
+			log: () => {},
+		});
+		assert.deepEqual(settled.materialized, []);
+		assert.equal(successfulDeliveries, 1, "later supervision cannot duplicate the recovered result");
+		assert.equal(parentEntriesContaining(fixture.parentSessionFile, PROOF_DELIVERY_ID).length, 1);
+		assert.equal(lineageEvents(fixture.rootDir, "inbox_materialized", PROOF_DELIVERY_ID).length, 1);
+
+		assert.deepEqual(
+			pendingLineageInboxes(
+				fixture.rootDir,
+				OTHER_PARENT_SESSION_ID,
+				fixture.otherParentSessionFile,
+			).map((record) => record.deliveryId),
+			[OTHER_DELIVERY_ID],
+			"failure, retry, and settled supervision leave the competing parent pending",
+		);
+		assert.equal(readFileSync(fixture.otherParentSessionFile, "utf8"), otherParentBefore);
+		assert.equal(existsSync(otherClaimPath), false);
+		assert.equal(lineageEvents(fixture.rootDir, "inbox_materialized", OTHER_DELIVERY_ID).length, 0);
 	});
 
 	it("TS-26 materializes the orphaned inbox exactly once through the ledger", async () => {

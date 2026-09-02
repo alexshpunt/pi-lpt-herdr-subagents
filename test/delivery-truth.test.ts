@@ -552,29 +552,34 @@ describe("TS-07 observable unbounded drain wait", () => {
 		assert.ok(clock >= 60 * 60 * 1000, "no bound fired while the gate was held");
 	});
 
-	it("TS-07 keeps the drain pending centuries past a concrete bound", async () => {
+	it("TS-07 rejects every finite-timeout release before the durable gate", async () => {
 		const seam = requireSeam(await loadSeam(DRAIN_SEAM), DRAIN_SEAM);
 		const waitForDeliveryDrain = requireExport<any>(
 			seam,
 			"waitForDeliveryDrain",
 			DRAIN_SEAM,
 		);
-		const oneCentury = 100 * 365 * 24 * 60 * 60 * 1000;
 		let clock = 1_788_247_000_000;
-		let polls = 0;
 		let released = false;
+		let releaseEvents = 0;
 		let outcome: "pending" | "resolved" | "rejected" = "pending";
+		const delayReleases: Array<() => void> = [];
 
 		const drain = waitForDeliveryDrain({
 			isDrained: () => released,
-			delay: async () => {
-				polls += 1;
-				clock += oneCentury;
-				await tick();
-			},
+			delay: () =>
+				new Promise<void>((resolve) => {
+					// Number.MAX_VALUE is the ceiling of the injected numeric clock contract.
+					// Reaching a second delay call proves the seam evaluated that clock value
+					// without taking any finite-timeout release path.
+					clock = Number.MAX_VALUE;
+					delayReleases.push(resolve);
+				}),
 			now: () => clock,
 			onWaitOpen: () => {},
-			onWaitRelease: () => {},
+			onWaitRelease: () => {
+				releaseEvents += 1;
+			},
 		}).then(
 			() => {
 				outcome = "resolved";
@@ -584,12 +589,29 @@ describe("TS-07 observable unbounded drain wait", () => {
 			},
 		);
 
-		for (let turn = 0; turn < 200 && polls < 3; turn += 1) await tick();
-		assert.ok(polls >= 3, "the held gate crosses three simulated centuries");
-		assert.equal(outcome, "pending", "no timeout or forced failure releases the held gate");
+		for (let turn = 0; turn < 200 && delayReleases.length < 1; turn += 1) await tick();
+		assert.equal(delayReleases.length, 1, "the held drain reaches its first scheduler marker");
+		delayReleases[0]?.();
+		for (
+			let turn = 0;
+			turn < 200 && delayReleases.length < 2 && outcome === "pending";
+			turn += 1
+		) {
+			await tick();
+		}
+		assert.equal(
+			delayReleases.length,
+			2,
+			"the seam starts another poll after evaluating the largest finite clock value",
+		);
+		assert.equal(outcome, "pending", "no finite timeout releases the held gate");
+		assert.equal(releaseEvents, 0, "the release callback stays silent before the durable gate");
+
 		released = true;
+		delayReleases[1]?.();
 		await drain;
 		assert.equal(outcome, "resolved", "only the positive drain gate releases the wait");
+		assert.equal(releaseEvents, 1, "the positive gate emits exactly one release marker");
 	});
 });
 /** Yield one macrotask turn. Never a sleep: bounded by scheduler turns only. */
@@ -849,7 +871,9 @@ describe("TS-07 visibility on the real drain routes", () => {
 	});
 
 	it("TS-07 announces and releases the real child-side drain wait", async () => {
-		const childModule = "../pi-extension/subagents/subagent-done.ts";
+		const childModule =
+			process.env.LPT57_CHILD_DRAIN_ROUTE_SEAM ??
+			"../pi-extension/subagents/subagent-done.ts";
 		const seam = requireSeam(await loadSeam(childModule), childModule);
 		const waitForDescendantDrain = requireExport<any>(
 			seam,
@@ -865,22 +889,34 @@ describe("TS-07 visibility on the real drain routes", () => {
 			inheritedRootDir: owner.rootDir,
 			inheritedRootId: owner.rootId,
 		});
-		assert.ok(hasUndrainedDescendants(reduceLineage(owner.rootDir), owner.nodeId));
+		const grandchild = registerLineage({
+			artifactDir: dir,
+			nodeId: "grandchild-node",
+			parentNodeId: child.nodeId,
+			inheritedRootDir: owner.rootDir,
+			inheritedRootId: owner.rootId,
+		});
+		assert.ok(
+			hasUndrainedDescendants(reduceLineage(owner.rootDir), child.nodeId),
+			"the real child route owns one undrained grandchild",
+		);
 
 		const seen: string[] = [];
 		const oneCentury = 100 * 365 * 24 * 60 * 60 * 1000;
 		let clock = 0;
 		let polls = 0;
+		let stopRoute = false;
 		let outcome: "pending" | "resolved" | "rejected" = "pending";
 		const createDeliveryLog = await loadCreateDeliveryLog();
 		const logPath = join(dir, "subagent-delivery.log");
 		const log = createDeliveryLog({ logPath, now: () => clock });
 		const drain = waitForDescendantDrain({
-			lineage: { rootDir: owner.rootDir, parentNodeId: owner.nodeId },
+			lineage: { rootDir: owner.rootDir, parentNodeId: child.nodeId },
 			delay: async () => {
 				polls += 1;
 				clock += oneCentury;
 				await tick();
+				if (stopRoute) throw new Error("test stopped a route that ignored the durable release");
 			},
 			now: () => clock,
 			onWaitOpen: () => seen.push("wait-open"),
@@ -906,24 +942,34 @@ describe("TS-07 visibility on the real drain routes", () => {
 		assert.ok(seen.includes("wait-open"), "the real child route announces its wait before polling");
 		appendLineageEvent(
 			owner.rootDir,
-			`terminal:${child.nodeId}`,
+			`terminal:${grandchild.nodeId}`,
 			"terminal",
-			child.nodeId,
+			grandchild.nodeId,
 			{ outcome: "success" },
 		);
 		const originalPolls = polls;
 		for (let turn = 0; turn < 200 && polls < originalPolls + 3; turn++) await tick();
 		assert.ok(polls >= originalPolls + 3, "the child route stays active across three centuries");
 		assert.equal(outcome, "pending", "no bound releases the child route while descendants remain");
-		assert.ok(!seen.includes("wait-release"), "terminal alone does not release the child drain wait");
+		assert.ok(!seen.includes("wait-release"), "grandchild terminal alone does not release the child drain wait");
 		appendLineageEvent(
 			owner.rootDir,
-			`terminal-delivered:${child.nodeId}`,
+			`terminal-delivered:${grandchild.nodeId}`,
 			"terminal_delivered",
-			child.nodeId,
-			{ deliveryId: `terminal:${child.nodeId}` },
+			grandchild.nodeId,
+			{ deliveryId: `terminal:${grandchild.nodeId}` },
 		);
+		const pollsAtRelease = polls;
+		for (
+			let turn = 0;
+			turn < 200 && outcome === "pending" && polls < pollsAtRelease + 3;
+			turn += 1
+		) {
+			await tick();
+		}
+		if (outcome === "pending") stopRoute = true;
 		await drain;
+		assert.equal(outcome, "resolved", "the child-owned grandchild release is the only release");
 
 		assert.deepEqual(seen.filter((event) => event === "wait-open"), ["wait-open"]);
 		assert.ok(
@@ -934,7 +980,7 @@ describe("TS-07 visibility on the real drain routes", () => {
 		assert.equal(seen[seen.length - 1], "wait-release");
 		assert.ok(polls > 0, "the child route polled the durable drain state");
 		assert.ok(clock >= oneCentury * 3, "the child route stayed pending for centuries");
-		assert.equal(outcome, "resolved", "terminal-delivered is the only release");
+		assert.equal(outcome, "resolved", "grandchild terminal-delivered releases the child route");
 		const waitRecords = readJsonLines(logPath).filter((record) =>
 			["drain-wait-open", "drain-wait-release"].includes(record.event),
 		);
@@ -944,7 +990,7 @@ describe("TS-07 visibility on the real drain routes", () => {
 			"the real child route persists one ordered wait pair",
 		);
 		for (const record of waitRecords) {
-			assert.equal(record.childId, owner.nodeId, "the child route log identifies the drained owner");
+			assert.equal(record.childId, child.nodeId, "the child route log identifies the child owner");
 		}
 	});
 });

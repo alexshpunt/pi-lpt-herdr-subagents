@@ -41,6 +41,20 @@ const FIXED_STATUSES: readonly DeliveryStatus[] = [
 	"empty",
 ];
 
+/** Return fixed status labels after removing caller-controlled data fields. */
+function emittedStatuses(
+	payload: string,
+	input: { answer?: string; childSessionFile?: string; resultPath?: string },
+): DeliveryStatus[] {
+	let framing = payload;
+	for (const value of [input.answer, input.childSessionFile, input.resultPath]) {
+		if (value) framing = framing.split(value).join("");
+	}
+	return FIXED_STATUSES.filter((status) =>
+		new RegExp(`\\b${status.replace("-", "[- ]")}\\b`, "i").test(framing),
+	);
+}
+
 type Frame = (input: {
 	status: DeliveryStatus;
 	agentName: string;
@@ -107,18 +121,19 @@ describe("TS-04 honest status framing", () => {
 		const frame = await loadFrame();
 
 		for (const status of FIXED_STATUSES) {
-			const payload = frame({
+			const input = {
 				status,
 				agentName: "reviewer",
 				childSessionId: "9b5db0d9",
 				childSessionFile: "/tmp/sessions/9b5db0d9.jsonl",
 				answer: "captured answer",
-			});
+			};
+			const payload = frame(input);
 
-			assert.match(
-				payload,
-				new RegExp(status.replace("-", "[ -]"), "i"),
-				`payload for status ${status} names that status`,
+			assert.deepEqual(
+				emittedStatuses(payload, input),
+				[status],
+				`payload for status ${status} emits exactly the requested status`,
 			);
 			if (status !== "error" && status !== "crashed" && status !== "recovery-failed") {
 				assert.doesNotMatch(
@@ -128,6 +143,20 @@ describe("TS-04 honest status framing", () => {
 				);
 			}
 		}
+	});
+
+	it("TS-04 rejects a mutation that emits every fixed status", () => {
+		const input = {
+			answer: "captured answer",
+			childSessionFile: "/tmp/sessions/9b5db0d9.jsonl",
+			resultPath: "/tmp/sessions/9b5db0d9/01-completed.md",
+		};
+		const contradictory = FIXED_STATUSES.join("\n");
+		assert.notDeepEqual(
+			emittedStatuses(contradictory, input),
+			["completed"],
+			"an all-labels framer mutation is rejected by the exclusive status check",
+		);
 	});
 
 	it("TS-04 keeps the result path and session reference on a closed payload", async () => {

@@ -114,7 +114,7 @@ import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import {
 	createLifecycle,
 	markCompleted,
@@ -161,6 +161,8 @@ function transactionHarness(options: {
 	const acknowledged: string[] = [];
 	const released: string[] = [];
 	const completed: string[] = [];
+	const inboxPayloads: unknown[] = [];
+	const steers: string[] = [];
 	return {
 		calls,
 		logCalls,
@@ -169,6 +171,8 @@ function transactionHarness(options: {
 		acknowledged,
 		released,
 		completed,
+		inboxPayloads,
+		steers,
 		sinks: {
 			materializeResultFile(input: {
 				sessionsDir: string;
@@ -187,8 +191,9 @@ function transactionHarness(options: {
 					filename: `01-${input.status}.md`,
 				};
 			},
-			publishInbox() {
+			publishInbox(payload: unknown) {
 				calls.push("publishInbox");
+				inboxPayloads.push(payload);
 				if (options.fail === "inbox") throw new Error("inbox publication failed");
 				return true;
 			},
@@ -212,6 +217,7 @@ function transactionHarness(options: {
 			},
 			sendSteer(payload: string) {
 				calls.push("sendSteer");
+				steers.push(payload);
 				if (options.fail === "steer") throw new Error("steer delivery failed");
 				return payload;
 			},
@@ -320,6 +326,45 @@ describe("TS-06 delivery projection from durable facts", () => {
 });
 
 describe("TS-06 loud failures at the delivery transaction seam", () => {
+	it("TS-06 composes one complete payload for inbox and exact-parent steer", async () => {
+		const runDeliveryTransaction = await loadTransaction();
+		const harness = transactionHarness();
+		const childSessionFile = "/tmp/sessions/9b5db0d9.jsonl";
+		const deliveryId = "terminal:9b5db0d9";
+		const answer = "captured answer";
+
+		const result = await runDeliveryTransaction({
+			sessionsDir: "/tmp/sessions",
+			childSessionId: "9b5db0d9",
+			childSessionFile,
+			deliveryId,
+			status: "completed",
+			agentName: "reviewer",
+			answer,
+			parent: {
+				sessionId: "parent-session",
+				sessionFile: "/tmp/sessions/parent.jsonl",
+				active: true,
+			},
+			now: () => 1_788_247_000_000,
+			sinks: harness.sinks,
+		});
+
+		assert.equal(result.projection.state, "delivered");
+		const resultPath = result.resultPath;
+		assert.ok(resultPath && isAbsolute(resultPath), "materialization returns an absolute result path");
+		if (!resultPath) throw new Error("missing result path");
+		assert.equal(harness.inboxPayloads.length, 1, "one inbox payload is published");
+		assert.equal(harness.steers.length, 1, "one exact-parent steer is sent");
+		for (const payload of [harness.inboxPayloads[0], harness.steers[0]]) {
+			const text = typeof payload === "string" ? payload : JSON.stringify(payload);
+			assert.ok(text, "the delivery payload is serializable");
+			for (const value of [answer, resultPath, childSessionFile, deliveryId]) {
+				assert.ok(text.includes(value), `payload carries ${value}`);
+			}
+		}
+	});
+
 	for (const failure of ["result-file", "inbox", "claim", "steer"] as const) {
 		it(`TS-06 records one attributable failure and one widget projection when ${failure} fails`, async () => {
 			const runDeliveryTransaction = await loadTransaction();
@@ -549,6 +594,9 @@ function failureRecords(path: string, deliveryId: string): any[] {
 			/fail|error/i.test(`${record.event} ${record.error ?? ""}`) &&
 			JSON.stringify(record).includes(deliveryId),
 		);
+}
+function recordField(record: any, name: string): unknown {
+	return record?.[name] ?? record?.fields?.[name];
 }
 
 // Resolved against this file, not the process cwd: `npm test` runs from the
@@ -1054,26 +1102,33 @@ describe("TS-06 loud failures at the real adapter catches", () => {
 		process.on("uncaughtException", onHostError);
 		try {
 			startRecoveredWorkflowWatcher(running, lineage.rootDir, runId, { cwd: repoDir } as any);
-			for (let turn = 0; turn < 200 && runtimeHarness.sends.length === 0; turn += 1) {
+			const logPath = join(sessionsDir, "subagent-delivery.log");
+			for (let turn = 0; turn < 200; turn += 1) {
+				const widgetText = renderedWidgetText(runtimeHarness.widgets);
+				if (
+					runtimeHarness.sends.length > 0 &&
+					failureRecords(logPath, "terminal:workflow-child").length === 1 &&
+					countOccurrences(widgetText, "delivery-failed") === 1
+				) break;
 				await tick();
 			}
 
+			const deliveryId = "terminal:workflow-child";
 			assert.equal(runtimeHarness.sends.length, 1, "the recovered workflow attempted one parent delivery");
-			const logPath = join(sessionsDir, "subagent-delivery.log");
-			const records = readFileSync(logPath, "utf8")
-				.split("\n")
-				.filter((line) => line.trim())
-				.map((line) => JSON.parse(line));
-			const failures = records.filter((record: any) =>
-				/fail|error/i.test(`${record.event} ${record.error ?? ""}`),
-			);
-			assert.equal(failures.length, 1, "one recovered workflow failure is durable");
-			assert.ok(JSON.stringify(failures[0]).includes(runId), "the failure identifies its workflow run");
+			const failures = failureRecords(logPath, deliveryId);
+			assert.equal(failures.length, 1, "one exact recovered workflow failure is durable");
+			assert.equal(recordField(failures[0], "deliveryId"), deliveryId, "failure names the exact delivery");
+			assert.ok(JSON.stringify(failures[0]).includes(runId), "failure names the exact workflow run");
+			const phase = recordField(failures[0], "phase");
+			assert.equal(typeof phase, "string", "failure carries an explicit phase");
+			assert.match(String(phase), /steer|send/i, "failure names the send phase");
+			const widgetText = renderedWidgetText(runtimeHarness.widgets);
 			assert.equal(
-				countOccurrences(renderedWidgetText(runtimeHarness.widgets), "delivery-failed"),
+				countOccurrences(widgetText, "delivery-failed"),
 				1,
 				"the recovered workflow projects one delivery-failed widget row",
 			);
+			assert.ok(widgetText.includes(deliveryId), "the failed widget row names the exact delivery");
 			assert.deepEqual(hostErrors, [], "the recovered workflow failure stays inside the Pi host");
 		} finally {
 			process.off("unhandledRejection", onHostError);

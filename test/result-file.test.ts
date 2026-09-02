@@ -237,13 +237,15 @@ describe("TS-02 result file contents", () => {
 			new RegExp(new Date(now).toISOString().replace(/\./g, "\\.")),
 			"header carries the injected UTC time",
 		);
-		assert.match(header, /sequence/i, "header names the delivery sequence");
-		assert.ok(contents.includes(answer), "body keeps the complete answer");
-		assert.equal(countOccurrences(contents, answer), 1);
-		assert.ok(
-			contents.trimEnd().endsWith(answer.trimEnd()),
-			"the answer is the tail of the result file",
-		);
+		const sequence = /(?:delivery\s+)?sequence\s*[:#=-]\s*(\d+)/i.exec(header)?.[1];
+		assert.ok(sequence, "header carries a numeric delivery sequence");
+		assert.equal(Number(sequence), handle.sequence, "header sequence matches the returned handle");
+		assert.equal(handle.sequence, 1, "the first delivery uses sequence one");
+		const separator = contents.indexOf("\n\n");
+		assert.ok(separator >= 0, "result file has a header/body separator");
+		const body = contents.slice(separator + 2);
+		assert.ok(body === answer || body === `${answer}\n`, "body is exactly the source answer");
+		assert.equal(countOccurrences(body, answer), 1);
 	});
 
 	it("TS-02 round-trips a 200k-character answer character for character", async () => {
@@ -263,14 +265,11 @@ describe("TS-02 result file contents", () => {
 		});
 
 		const contents = readFileSync(handle.path, "utf8");
-		const index = contents.indexOf(answer);
-		assert.notEqual(index, -1, "the complete answer is present");
-		assert.equal(
-			contents.slice(index, index + answer.length),
-			answer,
-			"the answer is byte-for-byte identical",
-		);
-		assert.equal(countOccurrences(contents, answer), 1);
+		const separator = contents.indexOf("\n\n");
+		assert.ok(separator >= 0, "result file has a header/body separator");
+		const body = contents.slice(separator + 2);
+		assert.ok(body === answer || body === `${answer}\n`, "the 200k body is exact");
+		assert.equal(countOccurrences(body, answer), 1);
 		assert.doesNotMatch(contents, /abbreviated/i, "no abbreviation marker");
 	});
 

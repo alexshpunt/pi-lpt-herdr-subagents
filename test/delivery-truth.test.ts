@@ -101,9 +101,18 @@
  *   record in `<sessionsDir>/subagent-delivery.log`, where `sessionsDir` is the
  *   directory holding the child session file.
  */
+
+/** Adapter-boundary checks below use the real `startRecoveredWatcher` and
+ * `observeRunningSubagent` routes with only the parent send/UI sinks replaced.
+ * The recovered watcher is exposed through `__test__` for this deterministic
+ * check; it must remain the production adapter, not a second test path. A
+ * failed send for either route must write one attributable record to the
+ * child session directory's `subagent-delivery.log` and project one
+ * `delivery-failed` widget row.
+ */
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	createLifecycle,
@@ -112,7 +121,7 @@ import {
 	markDelivery,
 	projectLifecycle,
 } from "../pi-extension/subagents/lifecycle.ts";
-import { __test__ } from "../pi-extension/subagents/index.ts";
+import subagentsExtension, { __test__ } from "../pi-extension/subagents/index.ts";
 import {
 	appendLineageEvent,
 	hasUndrainedDescendants,
@@ -121,10 +130,12 @@ import {
 } from "../pi-extension/subagents/lineage.ts";
 import {
 	cleanupTempDirs,
+	countOccurrences,
 	loadSeam,
 	requireExport,
 	requireSeam,
 	tempDir,
+	writeSessionFile,
 	type DeliveryProjection,
 	type DeliveryStatus,
 } from "./delivery-seam-support.ts";
@@ -473,6 +484,72 @@ function tick(): Promise<void> {
 	return new Promise((resolve) => setImmediate(resolve));
 }
 
+interface TestWidget {
+	render(width: number): string[];
+}
+
+/** Install the real extension adapter with only Pi/UI sinks replaced. */
+function installAdapterRuntime(dir: string, parentSessionFile: string) {
+	const handlers = new Map<string, (...args: any[]) => unknown>();
+	const widgets: TestWidget[] = [];
+	const sends: unknown[] = [];
+	const pi: any = {
+		events: {},
+		on(event: string, handler: (...args: any[]) => unknown) {
+			handlers.set(event, handler);
+		},
+		registerTool() {},
+		registerCommand() {},
+		registerMessageRenderer() {},
+		sendUserMessage() {},
+		sendMessage(message: unknown) {
+			sends.push(message);
+			throw new Error("injected parent send failure");
+		},
+	};
+	(__test__.runningSubagents as Map<string, unknown>).clear();
+	subagentsExtension(pi);
+	const context: any = {
+		cwd: process.cwd(),
+		hasUI: true,
+		sessionManager: {
+			getSessionId: () => "parent-session",
+			getSessionFile: () => parentSessionFile,
+			getSessionDir: () => dir,
+		},
+		modelRegistry: {
+			getAll: () => [],
+			getAvailable: () => [],
+			find: () => undefined,
+			hasConfiguredAuth: () => false,
+		},
+		ui: {
+			setWidget(_name: string, widget: unknown) {
+				if (typeof widget === "function") widgets.push(widget({ }, { }));
+			},
+			notify() {},
+		},
+	};
+	handlers.get("session_start")?.({}, context);
+	return { widgets, sends };
+}
+
+function renderedWidgetText(widgets: TestWidget[]): string {
+	return widgets.flatMap((widget) => widget.render(240)).join("\n");
+}
+
+function failureRecords(path: string, deliveryId: string): any[] {
+	if (!existsSync(path)) return [];
+	return readFileSync(path, "utf8")
+		.split("\n")
+		.filter((line) => line.trim())
+		.map((line) => JSON.parse(line))
+		.filter((record) =>
+			/fail|error/i.test(`${record.event} ${record.error ?? ""}`) &&
+			JSON.stringify(record).includes(deliveryId),
+		);
+}
+
 // Resolved against this file, not the process cwd: `npm test` runs from the
 // repository root, but a focused run may not.
 const INDEX_SOURCE = new URL("../pi-extension/subagents/index.ts", import.meta.url);
@@ -736,6 +813,8 @@ describe("TS-06 loud failures at the real adapter catches", () => {
 			},
 		};
 
+		const runtimeHarness = installAdapterRuntime(sessionsDir, join(sessionsDir, "parent.jsonl"));
+		(__test__.runningSubagents as Map<string, unknown>).set(running.id, running);
 		const hostErrors: unknown[] = [];
 		const onHostError = (error: unknown) => hostErrors.push(error);
 		process.on("unhandledRejection", onHostError);
@@ -765,7 +844,147 @@ describe("TS-06 loud failures at the real adapter catches", () => {
 				JSON.stringify(failures[0]).includes(deliveryId),
 				"the record names the delivery that failed",
 			);
+			assert.equal(
+				countOccurrences(renderedWidgetText(runtimeHarness.widgets), "delivery-failed"),
+				1,
+				"the terminal adapter projects exactly one delivery-failed widget row",
+			);
 			assert.deepEqual(hostErrors, [], "recording the failure never reaches the Pi host");
+		} finally {
+			process.off("unhandledRejection", onHostError);
+			process.off("uncaughtException", onHostError);
+		}
+	});
+
+	it("TS-06 records one failure and one failed projection at the settled-enqueue adapter", async () => {
+		const sessionsDir = tempDir("pi-ts06-settled-adapter-");
+		const parentSessionFile = join(sessionsDir, "parent.jsonl");
+		writeFileSync(parentSessionFile, "", "utf8");
+		const sessionFile = join(sessionsDir, "child.jsonl");
+		writeSessionFile(sessionFile, { id: "child", cwd: sessionsDir });
+		const settledEventsFile = join(sessionsDir, "child.settled.jsonl");
+		appendFileSync(
+			sessionFile,
+			`${JSON.stringify({
+				type: "message",
+				id: "assistant-1",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "settled answer" }],
+					stopReason: "stop",
+				},
+			})}\n`,
+		);
+		writeFileSync(
+			settledEventsFile,
+			`${JSON.stringify({
+				schema: 1,
+				childId: "settled-child",
+				sequence: 1,
+				recordedAt: 1_788_247_000_000,
+				outcome: "clean",
+				assistantId: "assistant-1",
+				stopReason: "stop",
+				empty: false,
+			})}\n`,
+		);
+		const runtimeHarness = installAdapterRuntime(sessionsDir, parentSessionFile);
+		const running: any = {
+			id: "settled-child",
+			name: "reviewer",
+			task: "review",
+			surface: "missing-surface",
+			startTime: 0,
+			sessionFile,
+			settledEventsFile,
+			sessionBaseline: {
+				sessionFile,
+				entryCount: 1,
+				leafId: "child",
+				assistantEntryIds: [],
+			},
+			interactive: false,
+			runtimePlan: undefined,
+			lifecycle: createLifecycle(0),
+		};
+		(__test__.runningSubagents as Map<string, unknown>).set(running.id, running);
+
+		const hostErrors: unknown[] = [];
+		const onHostError = (error: unknown) => hostErrors.push(error);
+		process.on("unhandledRejection", onHostError);
+		process.on("uncaughtException", onHostError);
+		try {
+			// This is the real observer used by the settled-delivery adapter, not
+			// the generic transaction seam or a source-text approximation.
+			(__test__.observeRunningSubagent as any)(running, 1_000);
+			for (let turn = 0; turn < 20; turn += 1) await tick();
+
+			const deliveryId = "settled:settled-child:1:assistant-1";
+			assert.equal(runtimeHarness.sends.length, 1, "the settled adapter attempted one parent delivery");
+			const records = failureRecords(join(sessionsDir, "subagent-delivery.log"), deliveryId);
+			assert.equal(records.length, 1, `one settled-enqueue failure record, saw ${JSON.stringify(records)}`);
+			assert.equal(
+				countOccurrences(renderedWidgetText(runtimeHarness.widgets), "delivery-failed"),
+				1,
+				"the settled-enqueue adapter projects exactly one delivery-failed widget row",
+			);
+			assert.deepEqual(hostErrors, [], "the settled-enqueue failure stays inside the Pi host");
+		} finally {
+			process.off("unhandledRejection", onHostError);
+			process.off("uncaughtException", onHostError);
+		}
+	});
+
+	it("TS-06 records one failure and one failed projection at the recovered-watcher adapter", async () => {
+		const startRecoveredWatcher = requireExport<any>(
+			__test__ as any,
+			"startRecoveredWatcher",
+			"pi-extension/subagents/index.ts",
+		);
+		const sessionsDir = tempDir("pi-ts06-recovered-adapter-");
+		const parentSessionFile = join(sessionsDir, "parent.jsonl");
+		writeFileSync(parentSessionFile, "", "utf8");
+		const sessionFile = join(sessionsDir, "recovered-child.jsonl");
+		writeSessionFile(sessionFile, { id: "child", cwd: sessionsDir });
+		writeFileSync(
+			`${sessionFile}.exit`,
+			JSON.stringify({ type: "done", summary: "recovered answer" }),
+			"utf8",
+		);
+		const runtimeHarness = installAdapterRuntime(sessionsDir, parentSessionFile);
+		const running: any = {
+			id: "recovered-child",
+			name: "reviewer",
+			task: "review",
+			surface: "missing-surface",
+			startTime: 0,
+			sessionFile,
+			interactive: false,
+			runtimePlan: undefined,
+			lifecycle: createLifecycle(0),
+		};
+		(__test__.runningSubagents as Map<string, unknown>).set(running.id, running);
+
+		const hostErrors: unknown[] = [];
+		const onHostError = (error: unknown) => hostErrors.push(error);
+		process.on("unhandledRejection", onHostError);
+		process.on("uncaughtException", onHostError);
+		try {
+			// Invoke the actual recovered-watcher adapter with a real completion
+			// sidecar; only the parent send sink is replaced with a failing test sink.
+			startRecoveredWatcher(running);
+			for (let turn = 0; turn < 40; turn += 1) await tick();
+
+			const deliveryId = "terminal:recovered-child";
+			assert.equal(runtimeHarness.sends.length, 1, "the recovered adapter attempted one parent delivery");
+			const records = failureRecords(join(sessionsDir, "subagent-delivery.log"), deliveryId);
+			assert.equal(records.length, 1, `one recovered-watcher failure record, saw ${JSON.stringify(records)}`);
+			assert.equal(
+				countOccurrences(renderedWidgetText(runtimeHarness.widgets), "delivery-failed"),
+				1,
+				"the recovered-watcher adapter projects exactly one delivery-failed widget row",
+			);
+			assert.deepEqual(hostErrors, [], "the recovered-watcher failure stays inside the Pi host");
 		} finally {
 			process.off("unhandledRejection", onHostError);
 			process.off("uncaughtException", onHostError);
@@ -774,7 +993,6 @@ describe("TS-06 loud failures at the real adapter catches", () => {
 
 	it("TS-06 leaves no silent catch on the approved adapter failure points", () => {
 		const source = readFileSync(INDEX_SOURCE, "utf8");
-
 		for (const site of FORMER_SWALLOW_SITES) {
 			const body = functionSource(source, site.fn);
 			assert.ok(body, `${site.fn} still exists in the subagent adapter`);

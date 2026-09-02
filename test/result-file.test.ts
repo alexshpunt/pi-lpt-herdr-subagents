@@ -28,7 +28,7 @@
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	cleanupTempDirs,
@@ -71,17 +71,40 @@ async function loadMaterialize(): Promise<Materialize> {
 	return requireExport<Materialize>(seam, "materializeResultFile", SEAM);
 }
 
-/** Run one materializer in a separate process so same-child calls can collide at the file boundary. */
+/** Run one materializer in a separate process and inject one deterministic EEXIST at installation. */
 function runConcurrentMaterializer(input: {
 	input: Record<string, unknown>;
 	seamUrl: string;
 	coordDir: string;
 	goPath: string;
 	readyPath: string;
+	collisionLogPath: string;
+	collisionClaimPath: string;
 }): Promise<string> {
 	const script = [
-		`const fs = await import("node:fs");`,
+		`const fsModule = await import("node:fs");`,
+		`const moduleApi = await import("node:module");`,
+		`const fs = fsModule.default;`,
 		`const input = JSON.parse(process.env.LPT57_INPUT);`,
+		`const append = fs.appendFileSync.bind(fs);`,
+		`const originalWriteFileSync = fs.writeFileSync.bind(fs);`,
+		`const originalOpenSync = fs.openSync.bind(fs);`,
+		`const originalCloseSync = fs.closeSync.bind(fs);`,
+		`let armed = false;`,
+		`let injected = false;`,
+		`const forceCollision = (operation, path) => {`,
+		`  if (!armed || injected || !String(path).endsWith(".md")) return false;`,
+		`  let claimFd;`,
+		`  try { claimFd = originalOpenSync(process.env.LPT57_COLLISION_CLAIM, "wx"); originalCloseSync(claimFd); } catch (error) { if (error?.code === "EEXIST") return false; throw error; }`,
+		`  injected = true;`,
+		`  append(process.env.LPT57_COLLISION_LOG, operation + "\\n");`,
+		`  const error = new Error("forced no-replace collision");`,
+		`  error.code = "EEXIST";`,
+		`  throw error;`,
+		`};`,
+		`fs.writeFileSync = (path, data, options) => { if (forceCollision("writeFileSync", path)) return undefined; return originalWriteFileSync(path, data, options); };`,
+		`fs.openSync = (path, flags, mode) => { if (forceCollision("openSync", path)) return -1; return originalOpenSync(path, flags, mode); };`,
+		`moduleApi.syncBuiltinESMExports();`,
 		`fs.writeFileSync(process.env.LPT57_READY, "ready");`,
 		`await new Promise((resolve, reject) => {`,
 		`  let watcher;`,
@@ -90,6 +113,7 @@ function runConcurrentMaterializer(input: {
 		`  if (fs.existsSync(process.env.LPT57_GO)) release();`,
 		`});`,
 		`const module = await import(process.env.LPT57_SEAM_URL);`,
+		`armed = true;`,
 		`process.stdout.write(JSON.stringify(module.materializeResultFile(input)));`,
 	].join("\n");
 	return new Promise((resolve, reject) => {
@@ -105,6 +129,8 @@ function runConcurrentMaterializer(input: {
 					LPT57_COORD: input.coordDir,
 					LPT57_GO: input.goPath,
 					LPT57_READY: input.readyPath,
+					LPT57_COLLISION_LOG: input.collisionLogPath,
+					LPT57_COLLISION_CLAIM: input.collisionClaimPath,
 				},
 			},
 			(error, stdout, stderr) => {
@@ -239,6 +265,8 @@ describe("TS-01 result file materialization", () => {
 			now: 1_788_247_000_000 + index,
 		}));
 		const goPath = join(coordDir, "go");
+		const collisionLogPath = join(coordDir, "collisions.log");
+		const collisionClaimPath = join(coordDir, "collision.claim");
 		const launches = inputs.map((input, index) =>
 			runConcurrentMaterializer({
 				input,
@@ -246,10 +274,12 @@ describe("TS-01 result file materialization", () => {
 				coordDir,
 				goPath,
 				readyPath: join(coordDir, `ready-${index}`),
+				collisionLogPath,
+				collisionClaimPath,
 			}),
 		);
 
-		for (let turn = 0; turn < 500; turn++) {
+		for (let turn = 0; turn < 5_000; turn++) {
 			if (inputs.every((_, index) => existsSync(join(coordDir, `ready-${index}`)))) break;
 			await schedulerTurn();
 		}
@@ -263,6 +293,9 @@ describe("TS-01 result file materialization", () => {
 			sequence: number;
 			filename: string;
 		}));
+		const collisions = readFileSync(collisionLogPath, "utf8").trim().split(/\r?\n/).filter(Boolean);
+		assert.equal(collisions.length, 1, "the test must observe one injected no-replace collision");
+		assert.ok(collisions.every((operation) => operation === "writeFileSync" || operation === "openSync"));
 
 		const files = filesIn(resultDir(sessionsDir, childSessionId));
 		assert.deepEqual(
@@ -277,7 +310,7 @@ describe("TS-01 result file materialization", () => {
 			"racing calls return distinct sequences after rescan",
 		);
 		const contents = files.map((file) => readFileSync(join(resultDir(sessionsDir, childSessionId), file), "utf8"));
-		const deliveryIds = contents.map((contents) => /^delivery[\\s_-]+id\\s*[:=]\\s*(.+)$/im.exec(headerOf(contents))?.[1]?.trim());
+		const deliveryIds = contents.map((contents) => /^delivery[\s_-]+id\s*[:=]\s*(.+)$/im.exec(headerOf(contents))?.[1]?.trim());
 		assert.deepEqual(new Set(deliveryIds), new Set(inputs.map((input) => input.deliveryId)));
 		assert.equal(deliveryIds.length, new Set(deliveryIds).size, "one file carries each stable delivery id");
 

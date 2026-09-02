@@ -34,7 +34,9 @@ import {
 	tempDir,
 } from "./delivery-seam-support.ts";
 
-const SEAM = "../pi-extension/subagents/delivery-log.ts";
+const SEAM =
+	process.env.LPT57_DELIVERY_LOG_SEAM ??
+	"../pi-extension/subagents/delivery-log.ts";
 
 interface DeliveryLog {
 	record(event: string, fields?: Record<string, unknown>): void;
@@ -110,26 +112,58 @@ describe("TS-06 persistent delivery log", () => {
 		assert.equal(records[1].error, "steer failed");
 	});
 
-	it("TS-06 never copies answer text into the log", async () => {
+	it("TS-06 persists only the approved metadata whitelist", async () => {
 		const createDeliveryLog = await loadCreateLog();
 		const dir = tempDir("pi-ts06-noanswer-");
 		const logPath = join(dir, "subagent-delivery.log");
-		const log = createDeliveryLog({ logPath, now: () => 1_788_247_000_000 });
+		const now = 1_788_247_000_000;
+		const log = createDeliveryLog({ logPath, now: () => now });
 		const answer = `SECRET-ANSWER-${"a".repeat(20_000)}`;
+		const resultPath = join(dir, "9b5db0d9", "01-completed.md");
 
-		log.record("delivery-sent", {
+		log.record("delivery-failed", {
+			childId: "9b5db0d9",
 			deliveryId: "terminal:9b5db0d9",
+			status: "completed",
+			resultPath,
+			phase: "steer",
+			error: "steer failed",
+			waitedSince: now - 1000,
+			waitedMs: 1000,
+			workflowRunId: "workflow-1",
 			answer,
 			resultContent: answer,
+			content: answer,
+			secret: answer,
+			unexpected: "must not become durable schema",
+			payload: { answer },
 		});
 
 		const contents = readFileSync(logPath, "utf8");
 		assert.doesNotMatch(contents, /SECRET-ANSWER/, "answer text never reaches the log");
 		assert.doesNotMatch(contents, /a{100}/, "no duplicated answer body");
+		assert.doesNotMatch(contents, /must not become durable schema/);
 		const record = readJsonLines(logPath)[0];
-		assert.equal(record.answer, undefined);
-		assert.equal(record.resultContent, undefined);
+		assert.deepEqual(
+			Object.keys(record).sort(),
+			[
+				"childId",
+				"deliveryId",
+				"error",
+				"event",
+				"phase",
+				"resultPath",
+				"status",
+				"time",
+				"version",
+				"waitedMs",
+				"waitedSince",
+				"workflowRunId",
+			].sort(),
+			"the durable record has no caller-defined fields",
+		);
 		assert.equal(record.deliveryId, "terminal:9b5db0d9");
+		assert.equal(record.resultPath, resultPath);
 	});
 
 	it("TS-06 records drain wait transitions (TS-07 log pair)", async () => {

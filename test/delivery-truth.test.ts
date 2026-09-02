@@ -35,10 +35,10 @@
  *     materializeResultFile?: (input) => { path: string; sequence: number };
  *     publishInbox?: (payload) => boolean;
  *     acknowledgeSidecar?: (path: string) => void;
- *     claimMaterialization?: () => { status: "acquired" | "materialized" | "busy"; token?: string };
+ *     claimMaterialization?: (parent: { sessionId: string; sessionFile: string }) => { status: "acquired" | "materialized" | "busy"; token?: string };
  *     completeMaterialization?: (token: string) => boolean;
  *     releaseMaterialization?: (token: string) => void;
- *     sendSteer?: (payload: string) => void;
+ *     sendSteer?: (parent: { sessionId: string; sessionFile: string }, payload: string) => void;
  *     log?: (event: string, fields?: Record<string, unknown>) => void;
  *     projectWidget?: (projection: DeliveryProjection) => void;
  *     // Fallback sink for failures raised while logging or projecting failure.
@@ -70,6 +70,7 @@
  *     onWaitOpen?: (info: { waitedSince: number }) => void;
  *     onWaitRelease?: (info: { waitedSince: number; waitedMs: number }) => void;
  *     projectWidget?: (projection: unknown) => void; // "waiting-on-descendants" while gated
+ *     log?: (event: string, fields?: Record<string, unknown>) => void;
  *   },
  * ): Promise<void>;
  * ```
@@ -86,6 +87,7 @@
  *   onWaitOpen?: (info: { waitedSince: number }) => void;
  *   onWaitRelease?: (info: { waitedSince: number; waitedMs: number }) => void;
  *   projectWidget?: (projection: unknown) => void;
+ *   log?: (event: string, fields?: Record<string, unknown>) => void;
  * }): Promise<void>;
  * ```
  *
@@ -133,6 +135,7 @@ import {
 	cleanupTempDirs,
 	countOccurrences,
 	loadSeam,
+	readJsonLines,
 	requireExport,
 	requireSeam,
 	tempDir,
@@ -141,14 +144,23 @@ import {
 	type DeliveryStatus,
 } from "./delivery-seam-support.ts";
 
-const DELIVERY_SEAM = "../pi-extension/subagents/delivery.ts";
-const DRAIN_SEAM = "../pi-extension/subagents/delivery-drain.ts";
+const DELIVERY_SEAM =
+	process.env.LPT57_DELIVERY_SEAM ?? "../pi-extension/subagents/delivery.ts";
+const DRAIN_SEAM =
+	process.env.LPT57_DRAIN_SEAM ?? "../pi-extension/subagents/delivery-drain.ts";
+const LOG_SEAM =
+	process.env.LPT57_DELIVERY_LOG_SEAM ??
+	"../pi-extension/subagents/delivery-log.ts";
 
 interface LogCall {
 	event: string;
 	fields?: Record<string, unknown>;
 }
 
+interface ParentDestination {
+	sessionId: string;
+	sessionFile: string;
+}
 /** Test doubles for one transaction run; every sink is injected, never a production branch. */
 function transactionHarness(options: {
 	fail?: "result-file" | "inbox" | "claim" | "steer" | "log" | "widget";
@@ -163,6 +175,8 @@ function transactionHarness(options: {
 	const completed: string[] = [];
 	const inboxPayloads: unknown[] = [];
 	const steers: string[] = [];
+	const claimDestinations: ParentDestination[] = [];
+	const steerDestinations: ParentDestination[] = [];
 	return {
 		calls,
 		logCalls,
@@ -173,6 +187,8 @@ function transactionHarness(options: {
 		completed,
 		inboxPayloads,
 		steers,
+		claimDestinations,
+		steerDestinations,
 		sinks: {
 			materializeResultFile(input: {
 				sessionsDir: string;
@@ -201,8 +217,9 @@ function transactionHarness(options: {
 				calls.push("acknowledgeSidecar");
 				acknowledged.push(path);
 			},
-			claimMaterialization() {
+			claimMaterialization(destination: ParentDestination) {
 				calls.push("claimMaterialization");
+				claimDestinations.push(destination);
 				if (options.fail === "claim") throw new Error("claim failed");
 				return { status: "acquired", token: "claim-token" };
 			},
@@ -215,8 +232,9 @@ function transactionHarness(options: {
 				calls.push("releaseMaterialization");
 				released.push(token);
 			},
-			sendSteer(payload: string) {
+			sendSteer(destination: ParentDestination, payload: string) {
 				calls.push("sendSteer");
+				steerDestinations.push(destination);
 				steers.push(payload);
 				if (options.fail === "steer") throw new Error("steer delivery failed");
 				return payload;
@@ -263,6 +281,15 @@ async function loadTransaction(): Promise<
 > {
 	const seam = requireSeam(await loadSeam(DELIVERY_SEAM), DELIVERY_SEAM);
 	return requireExport<any>(seam, "runDeliveryTransaction", DELIVERY_SEAM);
+}
+
+async function loadCreateDeliveryLog(): Promise<
+	(options: { logPath: string; now?: () => number }) => {
+		record(event: string, fields?: Record<string, unknown>): void;
+	}
+> {
+	const seam = requireSeam(await loadSeam(LOG_SEAM), LOG_SEAM);
+	return requireExport<any>(seam, "createDeliveryLog", LOG_SEAM);
 }
 
 describe("TS-06 widget truth at the existing lifecycle seam", () => {
@@ -332,6 +359,15 @@ describe("TS-06 loud failures at the delivery transaction seam", () => {
 		const childSessionFile = "/tmp/sessions/9b5db0d9.jsonl";
 		const deliveryId = "terminal:9b5db0d9";
 		const answer = "captured answer";
+		const parent = {
+			sessionId: "parent-session",
+			sessionFile: "/tmp/sessions/parent.jsonl",
+			active: true,
+		};
+		const unrelatedParent = {
+			sessionId: "unrelated-parent",
+			sessionFile: "/tmp/sessions/unrelated-parent.jsonl",
+		};
 
 		const result = await runDeliveryTransaction({
 			sessionsDir: "/tmp/sessions",
@@ -341,11 +377,7 @@ describe("TS-06 loud failures at the delivery transaction seam", () => {
 			status: "completed",
 			agentName: "reviewer",
 			answer,
-			parent: {
-				sessionId: "parent-session",
-				sessionFile: "/tmp/sessions/parent.jsonl",
-				active: true,
-			},
+			parent,
 			now: () => 1_788_247_000_000,
 			sinks: harness.sinks,
 		});
@@ -356,6 +388,27 @@ describe("TS-06 loud failures at the delivery transaction seam", () => {
 		if (!resultPath) throw new Error("missing result path");
 		assert.equal(harness.inboxPayloads.length, 1, "one inbox payload is published");
 		assert.equal(harness.steers.length, 1, "one exact-parent steer is sent");
+
+		const expectedDestination = {
+			sessionId: parent.sessionId,
+			sessionFile: parent.sessionFile,
+		};
+		assert.deepEqual(
+			harness.claimDestinations,
+			[expectedDestination],
+			"the materialization claim targets the supplied creator session",
+		);
+		assert.deepEqual(
+			harness.steerDestinations,
+			[expectedDestination],
+			"the steer targets the supplied creator session",
+		);
+		for (const destination of [
+			...harness.claimDestinations,
+			...harness.steerDestinations,
+		]) {
+			assert.notDeepEqual(destination, unrelatedParent, "no side effect targets the unrelated parent");
+		}
 		for (const payload of [harness.inboxPayloads[0], harness.steers[0]]) {
 			const text = typeof payload === "string" ? payload : JSON.stringify(payload);
 			assert.ok(text, "the delivery payload is serializable");
@@ -499,30 +552,44 @@ describe("TS-07 observable unbounded drain wait", () => {
 		assert.ok(clock >= 60 * 60 * 1000, "no bound fired while the gate was held");
 	});
 
-	it("TS-07 keeps the drain wait unbounded under a long gate", async () => {
+	it("TS-07 keeps the drain pending centuries past a concrete bound", async () => {
 		const seam = requireSeam(await loadSeam(DRAIN_SEAM), DRAIN_SEAM);
 		const waitForDeliveryDrain = requireExport<any>(
 			seam,
 			"waitForDeliveryDrain",
 			DRAIN_SEAM,
 		);
+		const oneCentury = 100 * 365 * 24 * 60 * 60 * 1000;
+		let clock = 1_788_247_000_000;
 		let polls = 0;
 		let released = false;
+		let outcome: "pending" | "resolved" | "rejected" = "pending";
 
-		await waitForDeliveryDrain({
-			isDrained: () => {
+		const drain = waitForDeliveryDrain({
+			isDrained: () => released,
+			delay: async () => {
 				polls += 1;
-				if (polls >= 500) released = true;
-				return released;
+				clock += oneCentury;
+				await tick();
 			},
-			delay: async () => {},
-			now: () => 1_788_247_000_000 + polls * 1000,
+			now: () => clock,
 			onWaitOpen: () => {},
 			onWaitRelease: () => {},
-		});
+		}).then(
+			() => {
+				outcome = "resolved";
+			},
+			() => {
+				outcome = "rejected";
+			},
+		);
 
-		assert.equal(released, true, "the wait finished by release, not by a bound");
-		assert.ok(polls >= 500, `expected at least 500 polls, saw ${polls}`);
+		for (let turn = 0; turn < 200 && polls < 3; turn += 1) await tick();
+		assert.ok(polls >= 3, "the held gate crosses three simulated centuries");
+		assert.equal(outcome, "pending", "no timeout or forced failure releases the held gate");
+		released = true;
+		await drain;
+		assert.equal(outcome, "resolved", "only the positive drain gate releases the wait");
 	});
 });
 /** Yield one macrotask turn. Never a sleep: bounded by scheduler turns only. */
@@ -683,8 +750,13 @@ describe("TS-07 visibility on the real drain routes", () => {
 		);
 
 		const seen: string[] = [];
+		const oneCentury = 100 * 365 * 24 * 60 * 60 * 1000;
 		let clock = 0;
 		let polls = 0;
+		let outcome: "pending" | "resolved" | "rejected" = "pending";
+		const createDeliveryLog = await loadCreateDeliveryLog();
+		const logPath = join(dir, "subagent-delivery.log");
+		const log = createDeliveryLog({ logPath, now: () => clock });
 		// The real route, not the seam: production passes its own widget and log
 		// sinks, and this call replaces them with observers.
 		const drain = (__test__.waitForDescendantDrain as any)(
@@ -692,16 +764,26 @@ describe("TS-07 visibility on the real drain routes", () => {
 			{
 				delay: async () => {
 					polls += 1;
+					clock += oneCentury;
 					await tick();
 				},
-				now: () => (clock += 60 * 60 * 1000),
+				now: () => clock,
 				onWaitOpen: () => seen.push("wait-open"),
 				onWaitRelease: () => seen.push("wait-release"),
+				log: (event: string, fields?: Record<string, unknown>) =>
+					log.record(event, fields),
 				projectWidget: (projection: unknown) => {
 					const text =
 						typeof projection === "string" ? projection : JSON.stringify(projection);
 					seen.push(`widget:${text}`);
 				},
+			},
+		).then(
+			() => {
+				outcome = "resolved";
+			},
+			() => {
+				outcome = "rejected";
 			},
 		);
 
@@ -717,11 +799,10 @@ describe("TS-07 visibility on the real drain routes", () => {
 			child.nodeId,
 			{ outcome: "success" },
 		);
-		let terminalOnlyPolls = 0;
 		const originalPolls = polls;
-		for (let turn = 0; turn < 200 && polls === originalPolls; turn++) await tick();
-		terminalOnlyPolls = polls - originalPolls;
-		assert.ok(terminalOnlyPolls > 0, "the parent route observes terminal-only state");
+		for (let turn = 0; turn < 200 && polls < originalPolls + 3; turn++) await tick();
+		assert.ok(polls >= originalPolls + 3, "the parent route stays active across three centuries");
+		assert.equal(outcome, "pending", "no bound releases the parent route while descendants remain");
 		assert.ok(!seen.includes("wait-release"), "terminal alone does not release the parent drain wait");
 		appendLineageEvent(
 			owner.rootDir,
@@ -752,10 +833,19 @@ describe("TS-07 visibility on the real drain routes", () => {
 			"the release is the last thing the wait reports",
 		);
 		assert.ok(polls > 0, "the wait actually polled the durable drain state");
-		assert.ok(
-			clock >= 60 * 60 * 1000,
-			"the unbounded wait never fired a bound while the gate was held",
+		assert.ok(clock >= oneCentury * 3, "the route stayed pending for centuries of injected time");
+		assert.equal(outcome, "resolved", "terminal-delivered is the only release");
+		const waitRecords = readJsonLines(logPath).filter((record) =>
+			["drain-wait-open", "drain-wait-release"].includes(record.event),
 		);
+		assert.deepEqual(
+			waitRecords.map((record) => record.event),
+			["drain-wait-open", "drain-wait-release"],
+			"the real parent route persists one ordered wait pair",
+		);
+		for (const record of waitRecords) {
+			assert.equal(record.childId, owner.nodeId, "the parent route log identifies the drained owner");
+		}
 	});
 
 	it("TS-07 announces and releases the real child-side drain wait", async () => {
@@ -778,22 +868,37 @@ describe("TS-07 visibility on the real drain routes", () => {
 		assert.ok(hasUndrainedDescendants(reduceLineage(owner.rootDir), owner.nodeId));
 
 		const seen: string[] = [];
+		const oneCentury = 100 * 365 * 24 * 60 * 60 * 1000;
 		let clock = 0;
 		let polls = 0;
+		let outcome: "pending" | "resolved" | "rejected" = "pending";
+		const createDeliveryLog = await loadCreateDeliveryLog();
+		const logPath = join(dir, "subagent-delivery.log");
+		const log = createDeliveryLog({ logPath, now: () => clock });
 		const drain = waitForDescendantDrain({
 			lineage: { rootDir: owner.rootDir, parentNodeId: owner.nodeId },
 			delay: async () => {
 				polls += 1;
+				clock += oneCentury;
 				await tick();
 			},
-			now: () => (clock += 60 * 60 * 1000),
+			now: () => clock,
 			onWaitOpen: () => seen.push("wait-open"),
 			onWaitRelease: () => seen.push("wait-release"),
+			log: (event: string, fields?: Record<string, unknown>) =>
+				log.record(event, fields),
 			projectWidget: (projection: unknown) => {
 				const text = typeof projection === "string" ? projection : JSON.stringify(projection);
 				seen.push(`widget:${text}`);
 			},
-		});
+		}).then(
+			() => {
+				outcome = "resolved";
+			},
+			() => {
+				outcome = "rejected";
+			},
+		);
 
 		// A silent route cannot hang this check: scheduler turns establish the wait,
 		// then terminal-delivered is the only event allowed to release it.
@@ -807,8 +912,9 @@ describe("TS-07 visibility on the real drain routes", () => {
 			{ outcome: "success" },
 		);
 		const originalPolls = polls;
-		for (let turn = 0; turn < 200 && polls === originalPolls; turn++) await tick();
-		assert.ok(polls > originalPolls, "the child route observes terminal-only state");
+		for (let turn = 0; turn < 200 && polls < originalPolls + 3; turn++) await tick();
+		assert.ok(polls >= originalPolls + 3, "the child route stays active across three centuries");
+		assert.equal(outcome, "pending", "no bound releases the child route while descendants remain");
 		assert.ok(!seen.includes("wait-release"), "terminal alone does not release the child drain wait");
 		appendLineageEvent(
 			owner.rootDir,
@@ -827,7 +933,19 @@ describe("TS-07 visibility on the real drain routes", () => {
 		assert.deepEqual(seen.filter((event) => event === "wait-release"), ["wait-release"]);
 		assert.equal(seen[seen.length - 1], "wait-release");
 		assert.ok(polls > 0, "the child route polled the durable drain state");
-		assert.ok(clock >= 60 * 60 * 1000, "no bound fired while the gate was held");
+		assert.ok(clock >= oneCentury * 3, "the child route stayed pending for centuries");
+		assert.equal(outcome, "resolved", "terminal-delivered is the only release");
+		const waitRecords = readJsonLines(logPath).filter((record) =>
+			["drain-wait-open", "drain-wait-release"].includes(record.event),
+		);
+		assert.deepEqual(
+			waitRecords.map((record) => record.event),
+			["drain-wait-open", "drain-wait-release"],
+			"the real child route persists one ordered wait pair",
+		);
+		for (const record of waitRecords) {
+			assert.equal(record.childId, owner.nodeId, "the child route log identifies the drained owner");
+		}
 	});
 });
 

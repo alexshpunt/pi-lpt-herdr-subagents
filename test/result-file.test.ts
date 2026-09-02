@@ -41,7 +41,9 @@ import {
 	type DeliveryStatus,
 } from "./delivery-seam-support.ts";
 
-const SEAM = "../pi-extension/subagents/delivery-files.ts";
+const SEAM =
+	process.env.LPT57_DELIVERY_FILES_SEAM ??
+	"../pi-extension/subagents/delivery-files.ts";
 
 type Materialize = (input: {
 	sessionsDir: string;
@@ -227,7 +229,7 @@ describe("TS-01 result file materialization", () => {
 		};
 		const first = materialize(input);
 		const before = readFileSync(first.path, "utf8");
-		const seamUrl = new URL("../pi-extension/subagents/delivery-files.ts", import.meta.url).href;
+		const seamUrl = new URL(SEAM, import.meta.url).href;
 		const script = [
 			`const module = await import(process.env.LPT57_SEAM_URL);`,
 			`const result = module.materializeResultFile(JSON.parse(process.env.LPT57_INPUT));`,
@@ -258,7 +260,7 @@ describe("TS-01 result file materialization", () => {
 		const sessionsDir = tempDir("pi-ts01-collision-");
 		const coordDir = tempDir("pi-ts01-coordination-");
 		const childSessionId = "same-child-004";
-		const seamUrl = new URL("../pi-extension/subagents/delivery-files.ts", import.meta.url).href;
+		const seamUrl = new URL(SEAM, import.meta.url).href;
 		const workers = 6;
 		const inputs = Array.from({ length: workers }, (_, index) => ({
 			sessionsDir,
@@ -342,6 +344,24 @@ describe("TS-01 result file materialization", () => {
 		assert.equal(retry.path, firstPath, "retry recovers the immutable delivery file");
 		assert.equal(readFileSync(firstPath, "utf8"), beforeRetry, "retry never replaces result bytes");
 		assert.equal(filesIn(resultDir(sessionsDir, childSessionId)).length, workers + 1);
+
+		if (process.env.LPT57_TRACE_COLLISION === "1") {
+			console.log(
+				JSON.stringify({
+					event: "lpt57-collision-trace",
+					operation: collisionOperation,
+					occupiedPath: collisionPath,
+					occupiedBytes: readFileSync(collisionPath, "utf8"),
+					collidingDeliveryId: collisionDeliveryId,
+					occupiedSequence: collisionSequence,
+					collidingSequence: collidingResult.sequence,
+					files,
+					materializedDeliveryIds,
+					retryPath: retry.path,
+					retryBytesUnchanged: readFileSync(firstPath, "utf8") === beforeRetry,
+				}),
+			);
+		}
 	});
 
 	it("TS-01 names each result file after its delivery status", async () => {

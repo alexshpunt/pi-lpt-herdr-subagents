@@ -16,6 +16,12 @@
  * - the sidecar is removed only after the result file and the inbox event are durable
  * - an injected failure before that boundary leaves the sidecar in place
  * - a second pass over the same delivery id neither re-sends nor re-writes
+ *
+ * `processCompletionSidecarDelivery` is the production composition seam used by
+ * the watcher adapter. It reads the actual `<sessionFile>.exit` evidence,
+ * derives the transaction answer/status, and calls the same ordered transaction.
+ * It accepts the transaction sinks only as dependency injection; there is no
+ * test-only production branch.
  */
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
@@ -31,9 +37,20 @@ import {
 	type DeliveryProjection,
 } from "./delivery-seam-support.ts";
 
-const DELIVERY_SEAM = "../pi-extension/subagents/delivery.ts";
+const DELIVERY_SEAM =
+	process.env.LPT57_DELIVERY_SEAM ?? "../pi-extension/subagents/delivery.ts";
+
+interface ParentDestination {
+	sessionId: string;
+	sessionFile: string;
+}
 
 type Transaction = (input: Record<string, unknown>) => Promise<{
+	projection: DeliveryProjection;
+	resultPath?: string;
+}>;
+
+type ProcessCompletionSidecar = (input: Record<string, unknown>) => Promise<{
 	projection: DeliveryProjection;
 	resultPath?: string;
 }>;
@@ -47,15 +64,32 @@ async function loadTransaction(): Promise<Transaction> {
 	);
 }
 
+async function loadProcessCompletionSidecar(): Promise<ProcessCompletionSidecar> {
+	const seam = requireSeam(await loadSeam(DELIVERY_SEAM), DELIVERY_SEAM);
+	return requireExport<ProcessCompletionSidecar>(
+		seam,
+		"processCompletionSidecarDelivery",
+		DELIVERY_SEAM,
+	);
+}
+
 /** Sink recorder with optional injected failures; the sinks are the test's own, never production. */
-function harness(options: { fail?: "result-file" | "inbox" | "steer"; alreadyMaterialized?: boolean } = {}) {
+function harness(options: {
+	fail?: "result-file" | "inbox" | "steer";
+	failOnce?: "result-file" | "inbox";
+	alreadyMaterialized?: boolean;
+} = {}) {
 	const calls: string[] = [];
 	const acknowledged: string[] = [];
 	const released: string[] = [];
 	const completed: string[] = [];
 	const steers: string[] = [];
 	const inboxPayloads: unknown[] = [];
+	const claimDestinations: ParentDestination[] = [];
+	const steerDestinations: ParentDestination[] = [];
 	let steerFailurePending = options.fail === "steer";
+	let transientFailurePending = Boolean(options.failOnce);
+	let materialized = Boolean(options.alreadyMaterialized);
 	return {
 		calls,
 		acknowledged,
@@ -63,10 +97,18 @@ function harness(options: { fail?: "result-file" | "inbox" | "steer"; alreadyMat
 		completed,
 		steers,
 		inboxPayloads,
+		claimDestinations,
+		steerDestinations,
 		sinks: {
 			materializeResultFile() {
 				calls.push("materializeResultFile");
-				if (options.fail === "result-file") throw new Error("result file write failed");
+				if (
+					options.fail === "result-file" ||
+					(options.failOnce === "result-file" && transientFailurePending)
+				) {
+					transientFailurePending = false;
+					throw new Error("result file write failed");
+				}
 				return {
 					path: "/tmp/sessions/9b5db0d9/01-completed.md",
 					sequence: 1,
@@ -76,7 +118,13 @@ function harness(options: { fail?: "result-file" | "inbox" | "steer"; alreadyMat
 			publishInbox(payload: unknown) {
 				calls.push("publishInbox");
 				inboxPayloads.push(payload);
-				if (options.fail === "inbox") throw new Error("inbox publication failed");
+				if (
+					options.fail === "inbox" ||
+					(options.failOnce === "inbox" && transientFailurePending)
+				) {
+					transientFailurePending = false;
+					throw new Error("inbox publication failed");
+				}
 				return true;
 			},
 			acknowledgeSidecar(path: string) {
@@ -84,23 +132,26 @@ function harness(options: { fail?: "result-file" | "inbox" | "steer"; alreadyMat
 				acknowledged.push(path);
 				rmSync(path, { force: true });
 			},
-			claimMaterialization() {
+			claimMaterialization(destination: ParentDestination) {
 				calls.push("claimMaterialization");
-				return options.alreadyMaterialized
+				claimDestinations.push(destination);
+				return materialized
 					? { status: "materialized" as const }
 					: { status: "acquired" as const, token: "claim-token" };
 			},
 			completeMaterialization(token: string) {
 				calls.push("completeMaterialization");
 				completed.push(token);
+				materialized = true;
 				return true;
 			},
 			releaseMaterialization(token: string) {
 				calls.push("releaseMaterialization");
 				released.push(token);
 			},
-			sendSteer(payload: string) {
+			sendSteer(destination: ParentDestination, payload: string) {
 				calls.push("sendSteer");
+				steerDestinations.push(destination);
 				steers.push(payload);
 				if (steerFailurePending) {
 					steerFailurePending = false;
@@ -140,12 +191,68 @@ describe("TS-08 durable delivery before acknowledgement", () => {
 		);
 	});
 
+	it("TS-08 connects sidecar detection, durable transaction, acknowledgement, and re-detection", async () => {
+		const processCompletionSidecarDelivery = await loadProcessCompletionSidecar();
+		const dir = tempDir("pi-ts08-connected-");
+		const sessionFile = join(dir, "child.jsonl");
+		const sidecarPath = `${sessionFile}.exit`;
+		writeFileSync(sessionFile, "", "utf8");
+		writeFileSync(
+			sidecarPath,
+			JSON.stringify({ type: "done", summary: "captured connected answer" }),
+			"utf8",
+		);
+		const recorder = harness({ failOnce: "result-file" });
+		const input = {
+			sessionFile,
+			delivery: {
+				sessionsDir: dir,
+				childSessionId: "connected-child",
+				deliveryId: "terminal:connected-child",
+				status: "completed",
+				agentName: "reviewer",
+				parent: {
+					sessionId: "creator-session",
+					sessionFile: join(dir, "creator.jsonl"),
+					active: true,
+				},
+				now: () => 1_788_247_000_000,
+				sinks: recorder.sinks,
+			},
+		};
+
+		const failed = await processCompletionSidecarDelivery(input);
+		assert.equal(failed.projection.state, "delivery-failed");
+		assert.ok(existsSync(sidecarPath), "pre-ack failure keeps the detected evidence on disk");
+		assert.equal(recorder.acknowledged.length, 0);
+		assert.equal(recorder.steers.length, 0);
+
+		const recovered = await processCompletionSidecarDelivery(input);
+		assert.equal(recovered.projection.state, "delivered");
+		assert.equal(existsSync(sidecarPath), false, "the successful retry acknowledges the sidecar");
+		assert.deepEqual(recorder.acknowledged, [sidecarPath]);
+		assert.equal(recorder.inboxPayloads.length, 1, "the connected path publishes one inbox");
+		assert.equal(recorder.steers.length, 1, "the connected path sends one steer");
+		assert.ok(recorder.steers[0]?.includes("captured connected answer"));
+
+		const callsAfterRecovery = [...recorder.calls];
+		await processCompletionSidecarDelivery(input);
+		assert.deepEqual(recorder.calls, callsAfterRecovery, "re-detection after acknowledgement is a no-op");
+		assert.equal(recorder.inboxPayloads.length, 1);
+		assert.equal(recorder.steers.length, 1);
+	});
+
 	it("TS-08 acknowledges the sidecar only after the result file and inbox are durable", async () => {
 		const runDeliveryTransaction = await loadTransaction();
 		const dir = tempDir("pi-ts08-order-");
 		const sidecarPath = join(dir, "child.jsonl.exit");
 		writeFileSync(sidecarPath, JSON.stringify({ type: "done" }), "utf8");
 		const recorder = harness();
+		const parent = {
+			sessionId: "parent-session",
+			sessionFile: join(dir, "parent.jsonl"),
+			active: true,
+		};
 
 		const result = await runDeliveryTransaction({
 			sessionsDir: dir,
@@ -155,11 +262,7 @@ describe("TS-08 durable delivery before acknowledgement", () => {
 			agentName: "reviewer",
 			answer: "captured answer",
 			sidecarPath,
-			parent: {
-				sessionId: "parent-session",
-				sessionFile: join(dir, "parent.jsonl"),
-				active: true,
-			},
+			parent,
 			now: () => 1_788_247_000_000,
 			sinks: recorder.sinks,
 		});
@@ -181,6 +284,13 @@ describe("TS-08 durable delivery before acknowledgement", () => {
 		assert.ok(steer > claim, "the exact-parent steer follows claim acquisition");
 		assert.ok(complete > steer, "claim completion follows the exact-parent steer");
 		assert.deepEqual(recorder.acknowledged, [sidecarPath]);
+
+		const expectedDestination = {
+			sessionId: parent.sessionId,
+			sessionFile: parent.sessionFile,
+		};
+		assert.deepEqual(recorder.claimDestinations, [expectedDestination]);
+		assert.deepEqual(recorder.steerDestinations, [expectedDestination]);
 		assert.equal(recorder.inboxPayloads.length, 1, "the inbox receives one payload");
 		for (const payload of [recorder.inboxPayloads[0], recorder.steers[0]]) {
 			const text = typeof payload === "string" ? payload : JSON.stringify(payload);

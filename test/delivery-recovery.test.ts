@@ -53,6 +53,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+	appendLineageEvent,
 	hasLineageEvent,
 	isLineageInboxMaterialized,
 	pendingLineageInboxes,
@@ -64,7 +65,8 @@ import {
 	writeSessionFile,
 } from "./delivery-seam-support.ts";
 
-const DELIVERY_SEAM = "../pi-extension/subagents/delivery.ts";
+const DELIVERY_SEAM =
+	process.env.LPT57_DELIVERY_SEAM ?? "../pi-extension/subagents/delivery.ts";
 
 /** Frozen, read-only incident evidence captured 2026-09-01 09:46. */
 const FROZEN_INCIDENT =
@@ -75,9 +77,14 @@ const PARENT_SESSION_ID = "01a05831-0e18-75b8-b891-716c8c93eeb9";
 const PROOF_DELIVERY_ID = "terminal:9b5db0d9";
 const PROOF_NODE_ID = "9b5db0d9";
 
+const OTHER_PARENT_SESSION_ID = "unrelated-parent-session";
+const OTHER_DELIVERY_ID = "terminal:unrelated-child";
+const OTHER_NODE_ID = "unrelated-child";
+
 interface RecoveryFixture {
 	rootDir: string;
 	parentSessionFile: string;
+	otherParentSessionFile: string;
 	root: string;
 }
 
@@ -128,10 +135,35 @@ function buildIncidentCopy(): RecoveryFixture {
 	assert.deepEqual(
 		[...claimed],
 		[PROOF_DELIVERY_ID],
-		"the trimmed fixture keeps exactly the incident's orphaned inbox",
+		"the copied fixture keeps the incident inbox under proof",
 	);
 
-	return { rootDir, parentSessionFile, root };
+	const otherParentSessionFile = join(root, "other-parent-session.jsonl");
+	writeSessionFile(otherParentSessionFile, {
+		id: OTHER_PARENT_SESSION_ID,
+		cwd: root,
+	});
+	assert.equal(
+		appendLineageEvent(
+			rootDir,
+			`inbox:${OTHER_DELIVERY_ID}`,
+			"inbox",
+			OTHER_NODE_ID,
+			{
+				deliveryId: OTHER_DELIVERY_ID,
+				sessionId: OTHER_PARENT_SESSION_ID,
+				sessionFile: otherParentSessionFile,
+				payload: {
+					kind: "terminal",
+					resultContent: "unrelated parent's durable result",
+				},
+			},
+		),
+		true,
+		"the run-owned copy contains a competing parent inbox",
+	);
+
+	return { rootDir, parentSessionFile, otherParentSessionFile, root };
 }
 
 function parentEntriesContaining(parentSessionFile: string, needle: string): string[] {
@@ -170,6 +202,16 @@ describe("TS-26 frozen incident state (existing ledger seams)", () => {
 		assert.deepEqual(
 			pending.map((record) => record.deliveryId),
 			[PROOF_DELIVERY_ID],
+		);
+
+		assert.deepEqual(
+			pendingLineageInboxes(
+				fixture.rootDir,
+				OTHER_PARENT_SESSION_ID,
+				fixture.otherParentSessionFile,
+			).map((record) => record.deliveryId),
+			[OTHER_DELIVERY_ID],
+			"the same lineage root keeps a competing parent inbox",
 		);
 		assert.equal(pending[0]?.nodeId, PROOF_NODE_ID);
 		assert.equal(
@@ -231,6 +273,10 @@ describe("TS-26 recovery projection and single materialization", () => {
 		);
 		const recordedPayload = pending[0]?.payload?.resultContent;
 		assert.equal(typeof recordedPayload, "string", "the pending inbox carries recorded content");
+
+		const otherParentBefore = readFileSync(fixture.otherParentSessionFile, "utf8");
+		const otherClaimPath = materializationClaimPath(fixture.rootDir, OTHER_DELIVERY_ID);
+		assert.equal(existsSync(otherClaimPath), false, "the competing parent starts unclaimed");
 		const delivered: Array<{ deliveryId: string; content: string }> = [];
 
 		const first = await recover({
@@ -303,6 +349,31 @@ describe("TS-26 recovery projection and single materialization", () => {
 			[],
 			"the exact parent inbox is no longer pending after materialization",
 		);
+
+		assert.deepEqual(
+			pendingLineageInboxes(
+				fixture.rootDir,
+				OTHER_PARENT_SESSION_ID,
+				fixture.otherParentSessionFile,
+			).map((record) => record.deliveryId),
+			[OTHER_DELIVERY_ID],
+			"recovery leaves the competing parent's inbox pending",
+		);
+		assert.equal(
+			readFileSync(fixture.otherParentSessionFile, "utf8"),
+			otherParentBefore,
+			"recovery does not write the competing parent session",
+		);
+		assert.equal(existsSync(otherClaimPath), false, "recovery does not claim the competing inbox");
+		assert.equal(
+			hasLineageEvent(
+				fixture.rootDir,
+				`materialized:${OTHER_DELIVERY_ID}`,
+				"inbox_materialized",
+			),
+			false,
+			"recovery does not acknowledge the competing inbox",
+		);
 		assert.equal(
 			readdirSync(join(fixture.rootDir, "materialization-claims")).filter((file) =>
 				file.endsWith(".claim"),
@@ -339,6 +410,18 @@ describe("TS-26 recovery projection and single materialization", () => {
 			).length,
 			1,
 			"the second resume does not create a second materialization claim",
+		);
+
+		assert.equal(existsSync(otherClaimPath), false);
+		assert.equal(readFileSync(fixture.otherParentSessionFile, "utf8"), otherParentBefore);
+		assert.deepEqual(
+			pendingLineageInboxes(
+				fixture.rootDir,
+				OTHER_PARENT_SESSION_ID,
+				fixture.otherParentSessionFile,
+			).map((record) => record.deliveryId),
+			[OTHER_DELIVERY_ID],
+			"the second target recovery still leaves the competing inbox untouched",
 		);
 	});
 });

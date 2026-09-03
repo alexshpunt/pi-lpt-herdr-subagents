@@ -272,6 +272,11 @@ const environment: NodeJS.ProcessEnv = { ...process.env };
 for (const key of Object.keys(environment)) {
   if (key.startsWith("PI_SUBAGENT_")) delete environment[key];
 }
+
+// A test run started from inside a restricted child session must still create
+// an ordinary top-level Pi parent. The deny list is child capability state,
+// even though its legacy variable name does not carry the PI_SUBAGENT_ prefix.
+delete environment.PI_DENY_TOOLS;
 for (const key of [
   "HERDR_ACTIVE_WORKSPACE_ID",
   "HERDR_ACTIVE_TAB_ID",

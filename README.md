@@ -267,7 +267,7 @@ Multiple subagents run concurrently. Each settled or terminal result waits until
 ╰─────────────────────────────────────────────────────────╯
 ```
 
-Completion messages render with a colored background and are expandable with `Ctrl+O`. Results larger than 16,000 characters are abbreviated in the parent context while preserving their beginning, conclusion, and session path; the complete result remains in the child session. The extension includes that bounded result and a continuation instruction directly in the single custom `subagent_result` message that triggers or steers Pi, avoiding empty turns caused by a separate context-free wake-up. The renderer uses the unadorned bounded result from structured details. Completed rows are removed from the widget as soon as their result is delivered or suppressed. If ordinary-pane cleanup fails, the delivered child remains visible as `cleanup pending` until pane absence is confirmed.
+Completion messages render with a colored background and are expandable with `Ctrl+O`. Every delivery contains the complete response, the exact child-session path, and the absolute path to an immutable Markdown result file. The same untruncated payload triggers or steers the exact creator parent, so no separate context-free wake-up can create an empty turn. Completed rows leave the widget after delivery or explicit suppression. If ordinary-pane cleanup fails, the delivered child remains visible as `cleanup pending` until pane absence is confirmed.
 
 ### Settled turns and child lifecycle
 
@@ -279,7 +279,7 @@ A persistent child can return one parent result at every settled turn without cl
 - intentional interrupt: stay silent and keep the child open;
 - unexpected abort: deliver an abort notice and keep the child open.
 
-A non-auto-exit child records completion intent with `subagent_done`; `caller_ping` records help intent. An auto-exit child records terminal intent at a clean or empty settled boundary. Done, help, and auto-exit delivery and closure wait until recursively owned descendants drain; until then, the child stays owned. Any user input permanently disables auto-exit for that session. Provider errors and aborts remain open. Interrupt and stall are non-terminal and continue to block ancestor drain. Confirmed manual pane closure is terminal: the surviving ancestor adopts and destroys every open descendant, publishes the branch from the leaves upward, and returns one failure to the exact parent. An unavailable Herdr inspection remains pending rather than guessing that a pane is gone. Settled delivery and terminal delivery use separate identity gates, so a clean auto-exit race cannot send the same result twice. Error terminal results are never suppressed as duplicates of an earlier settled turn. A failed parent enqueue remains retryable.
+A non-auto-exit child records completion intent with `subagent_done`; `caller_ping` records a nonterminal help request. An auto-exit child records terminal intent at a clean or empty settled boundary. Done and auto-exit closure wait until recursively owned descendants drain. Help delivery also waits for descendants, then wakes the exact parent and leaves the child session open for the answer. Direct user input or Escape disables automatic exit for that run; mechanical recovery interrupts do not. Provider errors and intentional aborts remain open. Confirmed manual pane closure is terminal: the surviving ancestor adopts and destroys every open descendant, publishes the branch from the leaves upward, and returns one failure to the exact parent. An unavailable Herdr inspection remains pending rather than guessing that a pane is gone. Settled delivery and terminal delivery use separate identity gates, so a clean auto-exit race cannot send the same result twice. Error terminal results are never suppressed as duplicates of an earlier settled turn. A failed parent enqueue remains retryable.
 
 Pending results remain bound to their recorded parent session ID and session file, and materialize when that exact session is restored. Legacy runs without lineage are never inferred or acted on.
 
@@ -310,9 +310,11 @@ The widget header counts **active** vs **open**:
 
 When `activeCount === 0` (every tracked row is open), the border uses an amber accent. Process elapsed time (`MM:SS` on the left) freezes when the process reaches finalizing/completed/failed. Interrupt does **not** freeze that process clock; the interrupted state shows its own duration on the right while the process remains open.
 
-A fixed internal watchdog marks a run as `stalled` when pane inspection is unavailable long enough; valid long-running `active` or `waiting` states do not become `stalled` just because time passes. Confirmed pane absence waits briefly for a racing completion sidecar, then destroys that owned branch and reports a terminal failure instead of leaving a stalled row. When a run enters `stalled` or recovers from it, the parent agent receives a steer message so it can react. All other status transitions stay in the widget only.
+The extension also supervises autonomous children. A child becomes stale only when Pi has produced no observable activity for longer than `status.quietThresholdMs` (120 seconds by default). Streaming updates reset the clock. Active tools and recursive descendant drain have no timeout. User-driven interactive children are never killed or resumed by this watchdog.
 
-**Interactive subagents stay silent.** Long-running user-driven subagents (e.g. `planner`, or any `/iterate` fork) do not wake the parent session on `stalled`/`recovered` transitions — the user is working directly in the subagent's pane, and a steer message there would just burn an orchestrator turn on a no-op "still waiting" ping. The widget still updates normally, and activity snapshots are still recorded/classified regardless of the `interactive` setting. By default, agents with `auto-exit: true` are treated as autonomous and get stall pings; agents without it are treated as interactive and stay quiet. Override per-agent with `interactive: true|false` in frontmatter, or per-spawn with `interactive: true|false` on the tool call.
+When an autonomous child process crashes or becomes stale, the extension resumes the exact session automatically. It reuses the pane when safe and otherwise creates a replacement in the same Herdr workspace. Crash and stale recovery share one durable three-attempt budget for each child. Successful recovery stays silent in the parent and appears in the widget. If the budget runs out, the exact parent receives one `recovery-failed` result with the child session and result-file paths. Recovery state survives extension reloads and parent restarts.
+
+Pane-health `stalled` status remains separate from the activity watchdog. Confirmed manual pane closure still waits briefly for a racing completion sidecar before it becomes a terminal `closed` result. Ambiguous Herdr inspection never causes a guessed close or watchdog kill.
 
 #### Configuration
 
@@ -334,7 +336,8 @@ cp config.json.example config.json
 ```json
 {
   "status": {
-    "enabled": true
+    "enabled": true,
+    "quietThresholdMs": 120000
   },
   "models": {
     "agents": {}
@@ -345,6 +348,8 @@ cp config.json.example config.json
 If `config.json` is absent, status settings fall back to `config.json.example`.
 Model routing does not read the example: no model overrides apply until a real
 `config.json` exists.
+
+`status.enabled` controls status detail in the widget. It does not disable safety supervision. `status.quietThresholdMs` must be a positive integer and controls autonomous stale detection. `PI_SUBAGENT_QUIET_THRESHOLD_MS` overrides it for the current process and must also be a positive integer. Invalid values stop extension startup with the setting name in the error.
 
 The copyable example is model-neutral, so it works without requiring credentials
 for a specific provider. To configure models, replace the empty section with

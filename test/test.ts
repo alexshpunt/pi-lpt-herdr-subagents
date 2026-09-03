@@ -75,7 +75,9 @@ import subagentDoneExtension, {
 	buildCompletionSidecar,
 } from "../pi-extension/subagents/subagent-done.ts";
 import {
+	acknowledgePingSidecar,
 	interpretExitSidecar,
+	readExitSidecar,
 	waitForCompletion,
 } from "../pi-extension/subagents/completion.ts";
 import {
@@ -896,6 +898,8 @@ describe("status.ts", () => {
 		assert.deepEqual(config, {
 			enabled: true,
 			lineLimit: 4,
+
+			quietThresholdMs: 120000,
 		});
 	});
 
@@ -2519,7 +2523,7 @@ describe("subagent-done.ts", () => {
 			assert.equal(
 				callerPing.description,
 				"Record a help request for the parent agent. " +
-					"The parent will be notified with your message, and delivery and session exit wait until recursively owned descendants drain. " +
+					"The parent will be notified with your message after recursively owned descendants drain, and this session stays open. " +
 					"Use when you're stuck, need clarification, or need the parent to take action.",
 			);
 			assert.equal(
@@ -3025,6 +3029,23 @@ describe("completion.ts", () => {
 				ping: { name: "Worker", message: "need help" },
 			},
 		);
+	});
+
+	it("acknowledges only the exact durably published help sidecar", () => {
+		withTempDir((dir) => {
+			const sessionFile = join(dir, "child.jsonl");
+			writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "ping", id: "help-1", name: "Worker", message: "help" }));
+			acknowledgePingSidecar(sessionFile, "other-help");
+			assert.equal((readExitSidecar(sessionFile) as { id: string }).id, "help-1");
+
+			writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done", summary: "finished" }));
+			acknowledgePingSidecar(sessionFile, "help-1");
+			assert.deepEqual(readExitSidecar(sessionFile), { type: "done", summary: "finished" });
+
+			writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "ping", id: "help-1", name: "Worker", message: "help" }));
+			acknowledgePingSidecar(sessionFile, "help-1");
+			assert.equal(readExitSidecar(sessionFile), null);
+		});
 	});
 
 	it("decodes done payloads", () => {
@@ -3869,6 +3890,9 @@ describe("subagent activity snapshots", () => {
 });
 
 describe("subagent interruption", () => {
+
+	const interruptionDir = mkdtempSync(join(tmpdir(), "subagent-interruption-"));
+	after(() => rmSync(interruptionDir, { recursive: true, force: true }));
 	function makeRunning(overrides: Record<string, unknown> = {}) {
 		return {
 			id: "a1",
@@ -3876,7 +3900,7 @@ describe("subagent interruption", () => {
 			task: "",
 			surface: "pane-1",
 			startTime: 0,
-			sessionFile: "worker.jsonl",
+			sessionFile: join(interruptionDir, "worker.jsonl"),
 			interactive: false,
 			lifecycle: createLifecycle(0),
 			...overrides,

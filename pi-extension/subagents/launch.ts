@@ -35,6 +35,8 @@ import {
 import type { SessionBaselineCursor } from "./settled-contract.ts";
 import {
 	createSubagentPane,
+
+	createSubagentPaneInWorkspace,
 	closePane,
 	createSubagentWorktree,
 	runScriptInPane,
@@ -116,6 +118,11 @@ export interface ResumePiLaunchRequest {
 	name: string;
 	sessionFile: string;
 	message?: string;
+
+	/** Existing pane to reuse after a verified child-process crash. */
+	surface?: string;
+	/** Exact workspace used when recovery needs a replacement pane. */
+	workspace?: { id: string; cwd: string };
 	parent: {
 		sessionId: string;
 		sessionFile: string;
@@ -145,11 +152,13 @@ export interface PiRunningChild {
 	sessionBaseline: SessionBaselineCursor;
 	runtimePlan: ResolvedRuntimePlan | undefined;
 	worktree?: WorktreeLaunch;
+	/** Exact Herdr workspace used for replacement-pane recovery. */
+	recoveryWorkspace?: { id: string; cwd: string };
 	lifecycle: SubagentLifecycle;
 }
 
 export interface PiLaunchOperations {
-	createPane(name: string): string;
+	createPane(name: string, workspace?: { id: string; cwd: string }): string;
 	createWorktree(
 		name: string,
 		cwd: string,
@@ -172,7 +181,9 @@ export interface PiLaunchOperations {
 }
 
 const defaultOperations: PiLaunchOperations = {
-	createPane: createSubagentPane,
+	createPane: (name, workspace) => workspace
+		? createSubagentPaneInWorkspace(name, workspace.cwd, workspace.id)
+		: createSubagentPane(name),
 	closePane,
 	createWorktree: createSubagentWorktree,
 	waitForShellReady,
@@ -263,7 +274,7 @@ async function launchFreshPiSubagent(
 	resolved.lineage = request.lineage ?? registerLineage({
 		artifactDir: resolved.artifactDir,
 		nodeId: resolved.id,
-		parentNodeId: inherited?.parentNodeId,
+		parentNodeId: inherited?.nodeId,
 		parentSessionId: request.parent.sessionId,
 		parentSessionFile: request.parent.sessionFile,
 		launchKind: request.worktree ? "worktree" : request.fork ? "fork" : "fresh",
@@ -293,6 +304,10 @@ async function launchFreshPiSubagent(
 				activityFile: artifacts.activityFile,
 				settledEventsFile: artifacts.settledEventsFile,
 				startTime: resolved.startTime,
+
+				interactive: request.behavior.interactive,
+				cwd: artifacts.targetCwd,
+				...(artifacts.worktree?.workspaceId ? { workspaceId: artifacts.worktree.workspaceId } : {}),
 			});
 		}
 		const command = buildPiCommand(resolved, artifacts);
@@ -702,6 +717,10 @@ function createRunningChild(
 		sessionBaseline,
 		runtimePlan: resolved.request.runtimePlan,
 		worktree: artifacts.worktree,
+
+		...(artifacts.worktree?.workspaceId
+			? { recoveryWorkspace: { id: artifacts.worktree.workspaceId, cwd: artifacts.worktree.path } }
+			: {}),
 		lifecycle: createLifecycle(resolved.startTime),
 	};
 }
@@ -710,7 +729,7 @@ async function launchResumedPiSubagent(
 	request: ResumePiLaunchRequest,
 	operations: PiLaunchOperations,
 ): Promise<PiRunningChild> {
-	const id = request.id ?? randomUUID();
+	let id = request.id ?? randomUUID();
 	const autoExit = request.behavior?.autoExit ?? true;
 	const artifactDir = join(request.parent.sessionDir, "artifacts", request.parent.sessionId);
 	const inherited = lineageFromEnvironment();
@@ -720,10 +739,12 @@ async function launchResumedPiSubagent(
 		if (!prior.rootDir || !prior.rootId || !prior.nodeId) prior = undefined;
 	} catch {}
 	const reusable = prior && !isLineageNodeDrained(reduceLineage(prior.rootDir), prior.nodeId);
+
+	if (reusable && prior) id = prior.nodeId;
 	const lineage: LineageRegistration = (reusable ? prior : registerLineage({
 		artifactDir,
 		nodeId: id,
-		parentNodeId: inherited?.parentNodeId,
+		parentNodeId: inherited?.nodeId,
 		parentSessionId: request.parent.sessionId,
 		parentSessionFile: request.parent.sessionFile,
 		launchKind: "resume",
@@ -732,7 +753,7 @@ async function launchResumedPiSubagent(
 	}))!;
 	const interactive = request.behavior?.interactive ?? !autoExit;
 	const startTime = Date.now();
-	const surface = operations.createPane(request.name);
+	const surface = request.surface ?? operations.createPane(request.name, request.workspace);
 	await operations.waitForShellReady(surface);
 	const activityFile = getSubagentActivityFile(artifactDir, id);
 	writeFileSync(`${request.sessionFile}.lineage.json`, JSON.stringify(lineage), "utf8");
@@ -748,6 +769,8 @@ async function launchResumedPiSubagent(
 			activityFile,
 			settledEventsFile,
 			startTime,
+			interactive,
+			...(request.workspace ? { workspaceId: request.workspace.id, cwd: request.workspace.cwd } : {}),
 		});
 	}
 	let messageFile: string | undefined;
@@ -819,6 +842,8 @@ async function launchResumedPiSubagent(
 		interactive,
 		runtimePlan: undefined,
 		sessionBaseline,
+
+		...(request.workspace ? { recoveryWorkspace: request.workspace } : {}),
 		lifecycle: createLifecycle(startTime),
 	};
 }

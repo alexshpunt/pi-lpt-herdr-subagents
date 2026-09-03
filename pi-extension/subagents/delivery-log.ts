@@ -11,6 +11,10 @@ const ALLOWED_FIELDS = [
   "waitedSince",
   "waitedMs",
   "workflowRunId",
+  "attempt",
+  "cause",
+  "reason",
+  "surface",
 ] as const;
 
 function normalizeError(value: unknown): string | undefined {

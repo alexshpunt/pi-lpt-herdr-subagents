@@ -1,6 +1,7 @@
 {
   "status": {
-    "enabled": true
+    "enabled": true,
+    "quietThresholdMs": 120000
   },
   "models": {
     "agents": {}

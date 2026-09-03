@@ -19,6 +19,7 @@ export type StatusActivityPhase = "starting" | "active" | "waiting" | "done";
 export interface StatusConfig {
   enabled: boolean;
   lineLimit: number;
+  quietThresholdMs?: number;
 }
 
 export type StatusObservation =
@@ -99,6 +100,15 @@ function requireBoolean(value: unknown, source: string, fieldName: string): bool
   return value;
 }
 
+
+function optionalPositiveInteger(value: unknown, source: string, fieldName: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isInteger(value) || (value as number) <= 0) {
+    invalidStatusConfig(source, `${fieldName} must be a positive integer`);
+  }
+  return value as number;
+}
+
 function rejectUnsupportedKeys(
   value: Record<string, unknown>,
   allowedKeys: string[],
@@ -138,12 +148,14 @@ function activityLabel(snapshot: Pick<StatusSnapshot, "activityLabel" | "activeS
 export function parseStatusConfig(rawConfig: unknown, source = "config.json"): StatusConfig {
   const config = requireObject(rawConfig, source, "root");
   const status = requireObject(config.status, source, "status");
-  rejectUnsupportedKeys(status, ["enabled"], source, "status");
+  rejectUnsupportedKeys(status, ["enabled", "quietThresholdMs"], source, "status");
   const enabled = requireBoolean(status.enabled, source, "status.enabled");
+  const quietThresholdMs = optionalPositiveInteger(status.quietThresholdMs, source, "status.quietThresholdMs");
 
   return {
     enabled,
     lineLimit: DEFAULT_STATUS_LINE_LIMIT,
+    ...(quietThresholdMs ? { quietThresholdMs } : {}),
   };
 }
 

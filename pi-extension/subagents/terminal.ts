@@ -4,6 +4,8 @@ import { dirname, join } from "node:path";
 import {
 	closeHerdrSurface,
 	createHerdrSurface,
+
+	createHerdrSurfaceInWorkspace,
 	createHerdrSurfaceSplit,
 	createHerdrWorktree,
 	focusHerdrWorkspace,
@@ -51,6 +53,17 @@ export function shellQuote(value: string): string {
 export function createSubagentPane(name: string): PaneId {
 	assertTerminalAvailable();
 	return createHerdrSurface(name);
+}
+
+
+/** Create a subagent tab in an exact existing Herdr workspace. */
+export function createSubagentPaneInWorkspace(
+	name: string,
+	cwd: string,
+	workspaceId: string,
+): PaneId {
+	assertTerminalAvailable();
+	return createHerdrSurfaceInWorkspace(name, cwd, workspaceId);
 }
 
 /** Create a Git worktree in its own herdr workspace and return its root surface. */

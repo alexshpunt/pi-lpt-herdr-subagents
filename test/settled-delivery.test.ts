@@ -158,6 +158,32 @@ describe("settled delivery ledger", () => {
     );
   });
 
+  it("ignores a second assistant correlation for the same activity boundary", async () => {
+    const ledger = createSettledDeliveryLedger();
+    const queue = createSettledDeliveryQueue();
+    await enqueueSettledDelivery({
+      queue,
+      ledger,
+      childId: "child",
+      identity: identity("child", "assistant-first"),
+      activitySequence: 7,
+      allowOlder: true,
+      enqueue: () => "first",
+    });
+    assert.deepEqual(
+      await enqueueSettledDelivery({
+        queue,
+        ledger,
+        childId: "child",
+        identity: identity("child", "assistant-raced"),
+        activitySequence: 7,
+        allowOlder: true,
+        enqueue: () => "duplicate",
+      }),
+      { status: "stale" },
+    );
+  });
+
   it("ignores an older activity sequence", async () => {
     const ledger = createSettledDeliveryLedger();
     const queue = createSettledDeliveryQueue();

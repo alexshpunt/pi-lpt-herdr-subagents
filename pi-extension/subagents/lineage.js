@@ -40,6 +40,18 @@ function writeDurable(path, content) {
 export function registerLineage(options) {
     const rootId = options.inheritedRootId ?? `lineage-${safeId(options.nodeId)}-${randomUUID()}`;
     const rootDir = options.inheritedRootDir ?? join(options.artifactDir, "lineage", rootId);
+    if (options.parentNodeId === options.nodeId) {
+        throw new Error(`Lineage integrity error: node ${options.nodeId} cannot be its own parent`);
+    }
+    if (options.inheritedRootDir && options.parentNodeId) {
+        const inherited = reduceLineage(options.inheritedRootDir);
+        const error = lineageIntegrityError(inherited);
+        if (error)
+            throw new Error(error);
+        if (!inherited.nodes.has(options.parentNodeId)) {
+            throw new Error(`Lineage integrity error: parent ${options.parentNodeId} does not exist`);
+        }
+    }
     mkdirSync(rootDir, { recursive: true });
     fsyncDirectory(dirname(rootDir));
     const registration = {
@@ -192,6 +204,12 @@ export function reduceLineage(rootDir) {
                 node.settledEventsFile = event.settledEventsFile;
             if (typeof event.startTime === "number")
                 node.startTime = event.startTime;
+            if (typeof event.interactive === "boolean")
+                node.interactive = event.interactive;
+            if (typeof event.workspaceId === "string")
+                node.workspaceId = event.workspaceId;
+            if (typeof event.cwd === "string")
+                node.cwd = event.cwd;
         }
         else if (event.type === "cancel_intent" || event.type === "cancel_identity" || event.type === "cancel_proven") {
             const prior = node.cancellation ?? { intent: false, pids: [], proven: false };
@@ -238,13 +256,30 @@ export function reduceLineage(rootDir) {
     }
     return { rootId, nodes, events };
 }
+/** Return an attributable graph error instead of treating a cycle as an endless drain. */
+export function lineageIntegrityError(state) {
+    for (const node of state.nodes.values()) {
+        if (node.parentNodeId && !state.nodes.has(node.parentNodeId)) {
+            return `Lineage integrity error: parent ${node.parentNodeId} of ${node.nodeId} does not exist`;
+        }
+        const path = new Set();
+        let current = node;
+        while (current?.parentNodeId) {
+            if (path.has(current.nodeId) || current.parentNodeId === current.nodeId) {
+                return `Lineage integrity error: cycle contains ${current.nodeId}`;
+            }
+            path.add(current.nodeId);
+            current = state.nodes.get(current.parentNodeId);
+        }
+    }
+    return undefined;
+}
 /** A node is drained only after terminal delivery and all recursive children. */
 export function isLineageNodeDrained(state, nodeId) {
-    const visiting = new Set();
+    const integrity = lineageIntegrityError(state);
+    if (integrity)
+        throw new Error(integrity);
     const visit = (id) => {
-        if (visiting.has(id))
-            return false;
-        visiting.add(id);
         const node = state.nodes.get(id);
         if (!node || !node.terminal || !node.terminalDelivered)
             return false;
@@ -252,12 +287,14 @@ export function isLineageNodeDrained(state, nodeId) {
             if (child.parentNodeId === id && !visit(child.nodeId))
                 return false;
         }
-        visiting.delete(id);
         return true;
     };
     return visit(nodeId);
 }
 export function hasUndrainedDescendants(state, nodeId) {
+    const integrity = lineageIntegrityError(state);
+    if (integrity)
+        throw new Error(integrity);
     return [...state.nodes.values()].some((child) => child.parentNodeId === nodeId && !isLineageNodeDrained(state, child.nodeId));
 }
 /** Record the once-only durable sink entry used by the drain boundary. */
@@ -329,7 +366,7 @@ function readMaterializationClaim(path, deliveryId, nodeId) {
         const value = JSON.parse(readFileSync(path, "utf8"));
         const identity = value.process ?? (Number.isInteger(value.pid) ? { pid: value.pid, startTime: value.startTime } : undefined);
         if (value.version !== 1 || value.deliveryId !== deliveryId || value.nodeId !== nodeId ||
-            typeof value.token !== "string" || !identity || !Number.isInteger(identity.pid) || identity.pid <= 0 ||
+            typeof value.token !== "string" || !identity || !Number.isInteger(identity.pid) || (identity.pid ?? 0) <= 0 ||
             (identity.startTime != null && typeof identity.startTime !== "string") || !Number.isFinite(value.claimedAt))
             return undefined;
         return { ...value, process: identity };
@@ -523,13 +560,7 @@ export function completeLineageInboxMaterialization(rootDir, deliveryId, nodeId,
         return false;
     const path = claimFile(rootDir, deliveryId);
     const claim = readMaterializationClaim(path, deliveryId, nodeId);
-    if (claim?.token === token) {
-        try {
-            unlinkSync(path);
-        }
-        catch { }
-    }
-    return true;
+    return claim?.token === token || isLineageInboxMaterialized(rootDir, deliveryId);
 }
 /** Release a failed claim only after exact-session evidence is checked. */
 export function releaseLineageInboxMaterialization(options) {
@@ -656,10 +687,19 @@ export function discoverLineageRoots(sessionDir, sessionFile) {
     return [...result].sort();
 }
 export function lineageEnvironment(registration) {
-    return { PI_SUBAGENT_LINEAGE_DIR: registration.rootDir, PI_SUBAGENT_LINEAGE_ROOT: registration.rootId, PI_SUBAGENT_PARENT_NODE: registration.nodeId };
+    return {
+        PI_SUBAGENT_LINEAGE_DIR: registration.rootDir,
+        PI_SUBAGENT_LINEAGE_ROOT: registration.rootId,
+        ...(registration.parentNodeId ? { PI_SUBAGENT_PARENT_NODE: registration.parentNodeId } : {}),
+    };
 }
 export function lineageFromEnvironment(env = process.env) {
     if (!env.PI_SUBAGENT_LINEAGE_DIR || !env.PI_SUBAGENT_LINEAGE_ROOT || !env.PI_SUBAGENT_ID)
         return undefined;
-    return { rootDir: env.PI_SUBAGENT_LINEAGE_DIR, rootId: env.PI_SUBAGENT_LINEAGE_ROOT, parentNodeId: env.PI_SUBAGENT_ID };
+    return {
+        rootDir: env.PI_SUBAGENT_LINEAGE_DIR,
+        rootId: env.PI_SUBAGENT_LINEAGE_ROOT,
+        nodeId: env.PI_SUBAGENT_ID,
+        ...(env.PI_SUBAGENT_PARENT_NODE ? { parentNodeId: env.PI_SUBAGENT_PARENT_NODE } : {}),
+    };
 }

@@ -19,6 +19,8 @@ import {
 	type ResumePiLaunchRequest,
 } from "../pi-extension/subagents/launch.ts";
 
+import { registerLineage } from "../pi-extension/subagents/lineage.ts";
+
 function fixture() {
 	const root = mkdtempSync(join(tmpdir(), "subagent-launch-test-"));
 	const project = join(root, "project");
@@ -64,7 +66,7 @@ function fixture() {
 			sessionMode: "standalone",
 		},
 	};
-	return { root, project, agentDir, sessionDir, request };
+	return { root, project, agentDir, sessionDir, parentSessionFile, request };
 }
 
 function withFixture(
@@ -173,7 +175,7 @@ describe("Pi launch", () => {
 	});
 
 	it("resumes a session through the launch transaction", async () => {
-		await withFixture(async ({ root, sessionDir }) => {
+		await withFixture(async ({ root, sessionDir, parentSessionFile }) => {
 			const sessionFile = join(root, "child.jsonl");
 			writeFileSync(sessionFile, "existing session\n");
 			const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -189,7 +191,7 @@ describe("Pi launch", () => {
 					name: "Resume worker",
 					sessionFile,
 					message: "Use the approved schema.",
-					parent: { sessionId: "parent", sessionDir },
+					parent: { sessionId: "parent", sessionFile: parentSessionFile, sessionDir },
 				};
 				const operations: PiLaunchOperations = {
 					createPane(name) {
@@ -264,8 +266,50 @@ describe("Pi launch", () => {
 		});
 	});
 
+	it("keeps the durable child identity and can reuse its pane during recovery", async () => {
+		await withFixture(async ({ root, sessionDir, parentSessionFile }) => {
+			const sessionFile = join(root, "recovered.jsonl");
+			writeFileSync(sessionFile, "existing session\n");
+			const lineage = registerLineage({
+				artifactDir: join(root, "artifacts"),
+				nodeId: "durable-child",
+				parentSessionId: "parent",
+				parentSessionFile,
+				launchKind: "fresh",
+			});
+			writeFileSync(`${sessionFile}.lineage.json`, JSON.stringify(lineage), "utf8");
+			let created = false;
+			let command = "";
+			const running = await launchPiSubagent({
+				kind: "resume",
+				id: "transient-recovery-id",
+				name: "Recovered worker",
+				sessionFile,
+				surface: "pane-existing",
+				parent: { sessionId: "parent", sessionFile: parentSessionFile, sessionDir },
+			}, {
+				createPane: () => {
+					created = true;
+					return "unexpected";
+				},
+				createWorktree: () => { throw new Error("unexpected worktree creation"); },
+				waitForShellReady: async (surface) => assert.equal(surface, "pane-existing"),
+				runScript: (surface, value, options) => {
+					assert.equal(surface, "pane-existing");
+					command = value;
+					return options.scriptPath;
+				},
+			});
+
+			assert.equal(created, false);
+			assert.equal(running.id, "durable-child");
+			assert.equal(running.lineage?.nodeId, "durable-child");
+			assert.match(command, /PI_SUBAGENT_ID='durable-child'/);
+		});
+	});
+
 	it("clears inherited auto-exit state when a resumed session is interactive", async () => {
-		await withFixture(async ({ root, sessionDir }) => {
+		await withFixture(async ({ root, sessionDir, parentSessionFile }) => {
 			const sessionFile = join(root, "interactive.jsonl");
 			writeFileSync(sessionFile, "existing session\n");
 			const previousAutoExit = process.env.PI_SUBAGENT_AUTO_EXIT;
@@ -278,7 +322,7 @@ describe("Pi launch", () => {
 						id: "resume-interactive",
 						name: "Interactive resume",
 						sessionFile,
-						parent: { sessionId: "parent", sessionDir },
+						parent: { sessionId: "parent", sessionFile: parentSessionFile, sessionDir },
 						behavior: { autoExit: false },
 					},
 					{

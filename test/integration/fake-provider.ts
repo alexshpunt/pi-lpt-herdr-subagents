@@ -25,6 +25,8 @@ interface ToolCall {
 
 interface ResponsePlan {
 	text?: string;
+
+	holdQuiet?: boolean;
 	emptyCompletion?: boolean;
 	toolCalls?: ToolCall[];
 }
@@ -217,6 +219,42 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 	const user = lastUserText(request);
 	const lastRole = request.messages?.at(-1)?.role;
 
+	if (/previous process became (?:stale|unavailable)/i.test(user)) {
+		if (/subagent-resume\/crash-/i.test(user)) return { text: "QUIET_RECOVERY_COMPLETE" };
+		if (/subagent-resume\/stale-/i.test(user)) return { holdQuiet: true };
+	}
+
+	if (
+		/Call the subagent tool/i.test(user) &&
+		!/Sub-agent "[^"]+" launched and is now running in the background/.test(source) &&
+		/INTEGRATION_(?:LARGE_RESULT|HOLD_QUIET_ONCE|ALWAYS_QUIET)/.test(user)
+	) {
+		const calls = subagentCalls(user);
+		if (calls.length > 0) return { toolCalls: calls };
+	}
+
+
+	if (
+		/INTEGRATION_ALWAYS_QUIET/.test(source) &&
+		(!/Sub-agent "[^"]+" launched and is now running in the background/.test(source) ||
+			/previous process became (?:stale|unavailable)/i.test(user))
+	) return { holdQuiet: true };
+
+	if (
+		/INTEGRATION_LARGE_RESULT/.test(source) &&
+		!/Sub-agent "[^"]+" launched and is now running in the background/.test(source)
+	) {
+		return { text: `LARGE_RESULT_BEGIN\n${"x".repeat(20_000)}\nLARGE_RESULT_END` };
+	}
+	if (/INTEGRATION_HOLD_QUIET_ONCE/.test(source)) {
+		if (/previous process became (?:stale|unavailable)/i.test(user)) {
+			return { text: "QUIET_RECOVERY_COMPLETE" };
+		}
+		if (!/Sub-agent "[^"]+" launched and is now running in the background/.test(source)) {
+			return { holdQuiet: true };
+		}
+	}
+
 	const resumed = !/Call the subagent_resume tool/i.test(user)
 		? user.match(/RESUME_FOLLOWUP_INPUT:\s*([a-z0-9]+)/i)?.[1]
 		: undefined;
@@ -238,6 +276,7 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 	// caller_ping is always allowlisted for public children; only use it when the
 	// prompt actually asks for a help ping (test-ping), not for ordinary tasks.
 	if (
+		lastRole !== "tool" &&
 		names.has("caller_ping") &&
 		/caller_ping|ONLY call caller_ping|call the caller_ping tool/i.test(source)
 	) {
@@ -248,7 +287,11 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 		};
 	}
 
-	if (names.has("consumer_tree_nested_launch") && lastRole !== "tool") {
+	if (
+		names.has("consumer_tree_nested_launch") &&
+		lastRole !== "tool" &&
+		!source.includes("nested leaf launched")
+	) {
 		return { toolCalls: [{ name: "consumer_tree_nested_launch", arguments: {} }] };
 	}
 
@@ -498,7 +541,18 @@ const server = createServer(async (request, response) => {
 			return;
 		}
 		providerRequests.push(providerRequest(chatRequest, 200));
-		writeResponse(response, chatRequest, await planResponse(chatRequest));
+
+		const plan = await planResponse(chatRequest);
+		if (plan.holdQuiet) {
+			response.writeHead(200, {
+				"content-type": "text/event-stream",
+				"cache-control": "no-cache",
+				connection: "keep-alive",
+			});
+			response.flushHeaders();
+			return;
+		}
+		writeResponse(response, chatRequest, plan);
 	} catch (error) {
 		providerRequests.push({ status: 500, messages: [], tools: [], text: "", userText: "" });
 		response.writeHead(500, { "content-type": "application/json" });

@@ -130,9 +130,9 @@ export function enqueueSettledDelivery<T>(options: {
   return queue.enqueue(childId, async () => {
     if (hasSettledDelivery(ledger, identity)) return { status: "duplicate" };
     if (
-      !allowOlder &&
       ledger.lastActivitySequence != null &&
-      activitySequence <= ledger.lastActivitySequence
+      (activitySequence === ledger.lastActivitySequence ||
+        (!allowOlder && activitySequence < ledger.lastActivitySequence))
     ) {
       return { status: "stale" };
     }

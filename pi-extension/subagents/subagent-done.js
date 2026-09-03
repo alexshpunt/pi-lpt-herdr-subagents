@@ -1,147 +1,227 @@
-import { stripFrontmatter } from "@earendil-works/pi-coding-agent";
+/**
+ * Extension loaded into sub-agents.
+ * - Shows agent identity + available tools as a styled widget above the editor (toggle with Ctrl+J)
+ * - Provides a `subagent_done` tool for interactive agents to self-terminate
+ */
+import { stripFrontmatter, } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
 import { createSubagentActivityRecorder } from "./activity.js";
-import { classifySettledOutcome } from "./settled-contract.js";
-import { hasUndrainedDescendants, lineageFromEnvironment, reduceLineage } from "./lineage.js";
+import { waitForDeliveryDrain } from "./delivery-drain.js";
+import { createDeliveryLog } from "./delivery-log.js";
+import { classifySettledOutcome, } from "./settled-contract.js";
+import { hasUndrainedDescendants, lineageFromEnvironment, reduceLineage, } from "./lineage.js";
 export function shouldMarkUserTookOver(agentStarted) {
     return agentStarted;
 }
-async function waitForDescendantDrain() {
-    const lineage = lineageFromEnvironment();
-    if (!lineage) return;
-    while(hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.parentNodeId)){
-        await new Promise((resolve)=>setTimeout(resolve, 50));
-    }
+/** Wait until this session's owned descendants have terminal delivery. */
+export async function waitForDescendantDrain(options = {}) {
+    const lineage = options.lineage ?? lineageFromEnvironment();
+    if (!lineage)
+        return;
+    const childId = lineage.nodeId ?? lineage.parentNodeId;
+    if (!childId)
+        return;
+    const sessionFile = process.env.PI_SUBAGENT_SESSION;
+    const persistentLog = sessionFile
+        ? createDeliveryLog({ logPath: join(dirname(sessionFile), "subagent-delivery.log"), now: options.now })
+        : undefined;
+    const record = options.log ?? ((event, fields) => persistentLog?.record(event, fields));
+    await waitForDeliveryDrain({
+        isDrained: () => !hasUndrainedDescendants(reduceLineage(lineage.rootDir), childId),
+        delay: options.delay,
+        now: options.now,
+        onWaitOpen: (info) => {
+            options.projectWidget?.({ state: "waiting-on-descendants", childId });
+            record("drain-wait-open", { childId, phase: "drain", waitedSince: info.waitedSince });
+            options.onWaitOpen?.(info);
+        },
+        onWaitRelease: (info) => {
+            record("drain-wait-release", { childId, phase: "drain", ...info });
+            options.onWaitRelease?.(info);
+        },
+    });
 }
 async function waitForOwnedChildren() {
     const contextPath = process.env.PI_SUBAGENT_TREE_CONTEXT;
-    if (!contextPath) return;
+    if (!contextPath)
+        return;
     let context;
     try {
         context = JSON.parse(readFileSync(contextPath, "utf8"));
-    } catch  {
+    }
+    catch {
         return;
     }
-    if (!context.treeDir || !context.ownerId) return;
-    for(;;){
+    if (!context.treeDir || !context.ownerId)
+        return;
+    for (;;) {
         const nodesDir = join(context.treeDir, "nodes");
-        const pending = existsSync(nodesDir) && readdirSync(nodesDir).some((file)=>{
-            if (!file.endsWith(".json")) return false;
+        const pending = existsSync(nodesDir) && readdirSync(nodesDir).some((file) => {
+            if (!file.endsWith(".json"))
+                return false;
             try {
                 const node = JSON.parse(readFileSync(join(nodesDir, file), "utf8"));
                 return node.ownerId === context.ownerId && node.status !== "settled";
-            } catch  {
+            }
+            catch {
                 return true;
             }
         });
-        if (!pending) return;
-        await new Promise((resolve)=>setTimeout(resolve, 100));
+        if (!pending)
+            return;
+        await new Promise((resolve) => setTimeout(resolve, 100));
     }
 }
 function textFromContent(content) {
-    if (!Array.isArray(content)) return "";
-    return content.filter((part)=>part != null && typeof part === "object").filter((part)=>part.type === "text" && typeof part.text === "string").map((part)=>part.text ?? "").join("");
+    if (!Array.isArray(content))
+        return "";
+    return content
+        .filter((part) => part != null && typeof part === "object")
+        .filter((part) => part.type === "text" && typeof part.text === "string")
+        .map((part) => part.text ?? "")
+        .join("");
 }
+/** Convert the latest assistant message into the frozen settled contract. */
 export function newestAssistantEntry(messages) {
-    if (!messages || messages.length === 0) return null;
+    if (!messages || messages.length === 0)
+        return null;
     const latest = messages[messages.length - 1];
-    if (latest?.role === "user") return null;
-    for(let i = messages.length - 1; i >= 0; i--){
+    if (latest?.role === "user")
+        return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
         const msg = messages[i];
-        if (msg?.role !== "assistant") continue;
+        if (msg?.role !== "assistant")
+            continue;
         const text = typeof msg.text === "string" ? msg.text : textFromContent(msg.content);
         const contentLength = text.length;
         return {
             id: typeof msg.id === "string" && msg.id ? msg.id : `assistant-${i}`,
             text: text || null,
             contentLength,
-            stopReason: typeof msg.stopReason === "string" ? msg.stopReason : undefined,
+            stopReason: typeof msg.stopReason === "string"
+                ? msg.stopReason
+                : undefined,
             errorMessage: typeof msg.errorMessage === "string" ? msg.errorMessage : undefined,
-            empty: contentLength === 0
+            empty: contentLength === 0,
         };
     }
     return null;
 }
+/** Decide whether a settled response is allowed to close an auto-exit child. */
 export function classifyAutoExitOutcome(messages, interruptRequested = false) {
     const assistant = newestAssistantEntry(messages);
-    if (!assistant) return null;
-    return classifySettledOutcome({
-        assistant,
-        interruptRequested
-    });
+    if (!assistant)
+        return null;
+    return classifySettledOutcome({ assistant, interruptRequested });
 }
+/**
+ * Compatibility predicate retained for callers that only have an agent_end
+ * snapshot. The decision is now intentionally made at agent_settled.
+ */
 export function shouldAutoExitOnAgentEnd(_userTookOver, messages) {
     const outcome = classifyAutoExitOutcome(messages);
     return outcome === "clean" || outcome === "empty";
 }
+/**
+ * If the last assistant message in the turn ended with `stopReason: "error"`
+ * (typically auto-retry exhausted on an overload / rate limit / server error),
+ * return its error info so the parent orchestrator can surface a clear
+ * failure instead of silently treating the run as completed.
+ *
+ * Returns `null` when the latest assistant turn completed normally or was
+ * aborted by the user (handled separately by shouldAutoExitOnAgentEnd).
+ */
 export function findLatestAssistantError(messages) {
-    if (!messages) return null;
-    for(let i = messages.length - 1; i >= 0; i--){
+    if (!messages)
+        return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
         const msg = messages[i];
-        if (msg?.role !== "assistant") continue;
-        if (msg.stopReason !== "error") return null;
+        if (msg?.role !== "assistant")
+            continue;
+        if (msg.stopReason !== "error")
+            return null;
         const raw = typeof msg.errorMessage === "string" ? msg.errorMessage.trim() : "";
         return {
-            errorMessage: raw || "Subagent agent loop ended with stopReason=error (no errorMessage field).",
-            stopReason: "error"
+            errorMessage: raw ||
+                "Subagent agent loop ended with stopReason=error (no errorMessage field).",
+            stopReason: "error",
         };
     }
     return null;
 }
 export function buildCompletionSidecar(messages) {
     const errorInfo = findLatestAssistantError(messages);
-    return errorInfo ? {
-        type: "error",
-        ...errorInfo
-    } : {
-        type: "done"
-    };
+    return errorInfo ? { type: "error", ...errorInfo } : { type: "done" };
+}
+export async function waitForPingAcknowledgement(sessionFile, pingId, signal, intervalMs = 50) {
+    for (;;) {
+        if (signal?.aborted)
+            throw new Error("Help request wait was cancelled");
+        try {
+            const current = JSON.parse(readFileSync(`${sessionFile}.exit`, "utf8"));
+            if (current.type !== "ping" || current.id !== pingId)
+                return;
+        }
+        catch (error) {
+            const code = error.code;
+            if (code === "ENOENT" || error instanceof SyntaxError)
+                return;
+            throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
 }
 export function parseDeniedTools(rawValue) {
-    return (rawValue ?? "").split(",").map((value)=>value.trim()).filter(Boolean);
+    return (rawValue ?? "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
 }
+/** Build one hidden, session-persistent initialization message for requested skills. */
 export function buildSkillInitialization(event, requestedSkills, notify) {
-    const names = [
-        ...new Set(requestedSkills.split(",").map((name)=>name.trim()).filter(Boolean))
-    ];
-    if (names.length === 0) return undefined;
+    const names = [...new Set(requestedSkills
+            .split(",")
+            .map((name) => name.trim())
+            .filter(Boolean))];
+    if (names.length === 0)
+        return undefined;
     const catalog = event.systemPromptOptions.skills ?? [];
     const blocks = [];
-    for (const name of names){
-        const skill = catalog.find((candidate)=>candidate.name === name);
+    for (const name of names) {
+        const skill = catalog.find((candidate) => candidate.name === name);
         if (!skill) {
             notify(`Unable to load requested skill "${name}": not found in Pi's resolved skill catalog.`, "warning");
             continue;
         }
         try {
             const body = stripFrontmatter(readFileSync(skill.filePath, "utf8")).trim();
-            blocks.push(`<skill name="${skill.name}" location="${skill.filePath}">\n` + `References are relative to ${skill.baseDir}.\n\n${body}\n</skill>`);
-        } catch (error) {
+            blocks.push(`<skill name="${skill.name}" location="${skill.filePath}">\n` +
+                `References are relative to ${skill.baseDir}.\n\n${body}\n</skill>`);
+        }
+        catch (error) {
             const reason = error instanceof Error ? error.message : String(error);
             notify(`Unable to load requested skill "${name}": ${reason}`, "warning");
         }
     }
-    if (blocks.length === 0) return undefined;
+    if (blocks.length === 0)
+        return undefined;
     return {
         message: {
             customType: "subagent_skill_initialization",
-            content: [
-                {
-                    type: "text",
-                    text: blocks.join("\n\n")
-                }
-            ],
-            display: false
-        }
+            content: [{ type: "text", text: blocks.join("\n\n") }],
+            display: false,
+        },
     };
 }
-export default function(pi) {
+export default function (pi) {
     let toolNames = [];
     let denied = [];
     let expanded = false;
+    // Read subagent identity from env vars (set by parent orchestrator)
     const subagentName = process.env.PI_SUBAGENT_NAME ?? "";
     const subagentAgent = process.env.PI_SUBAGENT_AGENT ?? "";
     const deniedToolsValue = process.env.PI_DENY_TOOLS;
@@ -150,106 +230,161 @@ export default function(pi) {
     const recorder = createSubagentActivityRecorder({
         runningChildId: process.env.PI_SUBAGENT_ID,
         activityFile: process.env.PI_SUBAGENT_ACTIVITY_FILE,
-        settledEventsFile: process.env.PI_SUBAGENT_SETTLED_EVENTS_FILE
+        settledEventsFile: process.env.PI_SUBAGENT_SETTLED_EVENTS_FILE,
     });
     function renderWidget(ctx, _theme) {
-        ctx.ui.setWidget("subagent-tools", (_tui, theme)=>{
-            const box = new Box(1, 0, (text)=>theme.bg("toolSuccessBg", text));
+        ctx.ui.setWidget("subagent-tools", (_tui, theme) => {
+            const box = new Box(1, 0, (text) => theme.bg("toolSuccessBg", text));
             const label = subagentAgent || subagentName;
-            const agentTag = label ? theme.bold(theme.fg("accent", `[${label}]`)) : "";
+            const agentTag = label
+                ? theme.bold(theme.fg("accent", `[${label}]`))
+                : "";
             if (expanded) {
+                // Expanded: full tool list + denied
                 const countInfo = theme.fg("dim", ` — ${toolNames.length} available`);
                 const hint = theme.fg("muted", "  (Ctrl+J to collapse)");
-                const toolList = toolNames.map((name)=>theme.fg("dim", name)).join(theme.fg("muted", ", "));
+                const toolList = toolNames
+                    .map((name) => theme.fg("dim", name))
+                    .join(theme.fg("muted", ", "));
                 let deniedLine = "";
                 if (denied.length > 0) {
-                    const deniedList = denied.map((name)=>theme.fg("error", name)).join(theme.fg("muted", ", "));
+                    const deniedList = denied
+                        .map((name) => theme.fg("error", name))
+                        .join(theme.fg("muted", ", "));
                     deniedLine = "\n" + theme.fg("muted", "denied: ") + deniedList;
                 }
                 const content = new Text(`${agentTag}${countInfo}${hint}\n${toolList}${deniedLine}`, 0, 0);
                 box.addChild(content);
-            } else {
+            }
+            else {
+                // Collapsed: one-line summary
                 const countInfo = theme.fg("dim", ` — ${toolNames.length} tools`);
-                const deniedInfo = denied.length > 0 ? theme.fg("dim", " · ") + theme.fg("error", `${denied.length} denied`) : "";
+                const deniedInfo = denied.length > 0
+                    ? theme.fg("dim", " · ") +
+                        theme.fg("error", `${denied.length} denied`)
+                    : "";
                 const hint = theme.fg("muted", "  (Ctrl+J to expand)");
                 const content = new Text(`${agentTag}${countInfo}${deniedInfo}${hint}`, 0, 0);
                 box.addChild(content);
             }
             return box;
-        }, {
-            placement: "aboveEditor"
-        });
+        }, { placement: "aboveEditor" });
     }
     let latestAgentEndMessages;
     let latestTurnIndex;
     let skillInitializationComplete = false;
+    // Resumed sessions replay the previous turn during startup. Do not publish
+    // that historical settlement as the new resume completion.
     let resumeTurnStarted = process.env.PI_SUBAGENT_RESUME !== "1";
     let resumeInputSeen = process.env.PI_SUBAGENT_RESUME !== "1";
-    const resumeBaselineAssistantIds = new Set((()=>{
-        if (process.env.PI_SUBAGENT_RESUME !== "1") return [];
+    const resumeBaselineAssistantIds = new Set((() => {
+        if (process.env.PI_SUBAGENT_RESUME !== "1")
+            return [];
         try {
             const value = JSON.parse(process.env.PI_SUBAGENT_RESUME_BASELINE_ASSISTANTS ?? "[]");
-            return Array.isArray(value) ? value.filter((id)=>typeof id === "string") : [];
-        } catch  {
+            return Array.isArray(value) ? value.filter((id) => typeof id === "string") : [];
+        }
+        catch {
             return [];
         }
     })());
+    // Parent-side interrupt bookkeeping is intentionally separate. Until the
+    // parent wires an explicit interrupt request, an abort remains open and is
+    // classified as an unexpected abort for delivery purposes.
     let interruptRequested = false;
-    pi.on("session_start", (_event, ctx)=>{
+    let agentStarted = false;
+    let intervened = false;
+    const mechanicalInterruptPath = process.env.PI_SUBAGENT_SESSION
+        ? `${process.env.PI_SUBAGENT_SESSION}.mechanical-interrupt`
+        : undefined;
+    // Show widget + status bar on session start
+    pi.on("session_start", (_event, ctx) => {
         recorder.sessionStart();
         const tools = pi.getAllTools();
-        toolNames = tools.map((t)=>t.name).sort();
+        toolNames = tools.map((t) => t.name).sort();
         denied = parseDeniedTools(deniedToolsValue);
         renderWidget(ctx, null);
     });
-    pi.on("input", ()=>{
+    pi.on("input", () => {
         resumeInputSeen = true;
+        if (shouldMarkUserTookOver(agentStarted))
+            intervened = true;
         recorder.input();
     });
-    pi.on("before_agent_start", (event, ctx)=>{
+    pi.on("before_agent_start", (event, ctx) => {
+        // Each run needs fresh agent_end evidence; never reuse a prior clean turn.
         latestAgentEndMessages = undefined;
         latestTurnIndex = undefined;
         resumeTurnStarted = true;
         recorder.beforeAgentStart();
-        if (skillInitializationComplete) return;
+        if (skillInitializationComplete)
+            return;
         skillInitializationComplete = true;
         const requestedSkills = process.env.PI_SUBAGENT_SKILLS;
-        if (requestedSkills === undefined) return;
-        return buildSkillInitialization(event, requestedSkills, (message, type)=>ctx.ui.notify(message, type));
+        if (requestedSkills === undefined)
+            return;
+        return buildSkillInitialization(event, requestedSkills, (message, type) => ctx.ui.notify(message, type));
     });
-    pi.on("agent_start", ()=>{
+    pi.on("agent_start", () => {
+        agentStarted = true;
         recorder.agentStart();
     });
     let exitRequested = false;
-    const finishAfterDrain = async (ctx, payload)=>{
-        if (exitRequested) return;
+    const finishAfterDrain = async (ctx, payload) => {
+        if (exitRequested)
+            return;
         exitRequested = true;
         const lineage = lineageFromEnvironment();
-        const shouldWaitForDescendants = lineage ? hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.parentNodeId) : false;
-        if (shouldWaitForDescendants) await waitForDescendantDrain();
-        if (treeOwner) await waitForOwnedChildren();
+        const shouldWaitForDescendants = lineage
+            ? hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.nodeId)
+            : false;
+        if (shouldWaitForDescendants)
+            await waitForDescendantDrain();
+        if (treeOwner)
+            await waitForOwnedChildren();
         const sessionFile = process.env.PI_SUBAGENT_SESSION;
         if (sessionFile) {
             try {
+                // Publish completion only after descendants drain so the parent can
+                // observe this owner's settled turns before its terminal result.
                 writeFileSync(`${sessionFile}.exit`, JSON.stringify(payload));
-            } catch  {}
+            }
+            catch {
+                // Best effort — the wrapper sentinel remains available after shutdown.
+            }
         }
         ctx.shutdown();
     };
-    pi.on("agent_end", (event)=>{
+    pi.on("agent_end", (event) => {
         latestAgentEndMessages = event.messages;
         const eventTurnIndex = event.turnIndex;
-        if (typeof eventTurnIndex === "number") latestTurnIndex = eventTurnIndex;
+        if (typeof eventTurnIndex === "number")
+            latestTurnIndex = eventTurnIndex;
+        const assistant = newestAssistantEntry(latestAgentEndMessages);
+        if (assistant?.stopReason === "aborted") {
+            const mechanical = Boolean(mechanicalInterruptPath && existsSync(mechanicalInterruptPath));
+            if (mechanicalInterruptPath)
+                rmSync(mechanicalInterruptPath, { force: true });
+            interruptRequested = true;
+            if (!mechanical)
+                intervened = true;
+        }
         recorder.agentEndWaiting();
     });
-    pi.on("agent_settled", (_event, ctx)=>{
+    pi.on("agent_settled", (_event, ctx) => {
         const outcome = classifyAutoExitOutcome(latestAgentEndMessages, interruptRequested);
         const assistant = newestAssistantEntry(latestAgentEndMessages);
-        if (!outcome || !assistant) return;
+        if (!outcome || !assistant)
+            return;
         if (resumeBaselineAssistantIds.has(assistant.id)) {
+            // Pi replays the previous assistant turn while opening a resumed session.
+            // Its settlement is not the follow-up requested by the parent.
             return;
         }
-        if (!resumeTurnStarted || process.env.PI_SUBAGENT_RESUME === "1" && !resumeInputSeen) return;
+        if (!resumeTurnStarted || (process.env.PI_SUBAGENT_RESUME === "1" && !resumeInputSeen))
+            return;
+        if (intervened)
+            return;
         recorder.agentSettled({
             outcome,
             assistantId: assistant.id,
@@ -257,126 +392,128 @@ export default function(pi) {
             errorMessage: assistant.errorMessage,
             empty: assistant.empty,
             turnIndex: latestTurnIndex,
-            autoExit
+            autoExit,
         });
-        if (!autoExit || outcome !== "clean" && outcome !== "empty") return;
-        void finishAfterDrain(ctx, {
-            type: "done"
-        });
+        if (!autoExit || (outcome !== "clean" && outcome !== "empty"))
+            return;
+        void finishAfterDrain(ctx, { type: "done" });
     });
-    pi.on("turn_start", (event)=>{
+    pi.on("turn_start", (event) => {
         latestTurnIndex = event.turnIndex;
         recorder.turnStart(latestTurnIndex);
     });
-    pi.on("turn_end", (event)=>{
+    pi.on("turn_end", (event) => {
         recorder.turnEnd(event.turnIndex);
     });
-    pi.on("before_provider_request", ()=>{
+    pi.on("before_provider_request", () => {
         recorder.beforeProviderRequest();
     });
-    pi.on("after_provider_response", ()=>{
+    pi.on("after_provider_response", () => {
         recorder.afterProviderResponse();
     });
-    pi.on("message_update", (event)=>{
+    pi.on("message_update", (event) => {
         recorder.messageUpdate(event.assistantMessageEvent?.type);
     });
-    pi.on("tool_execution_start", (event)=>{
+    pi.on("tool_execution_start", (event) => {
         recorder.toolExecutionStart(event.toolCallId, event.toolName);
     });
-    pi.on("tool_call", (event)=>{
+    pi.on("tool_call", (event) => {
         recorder.toolCall(event.toolCallId, event.toolName);
     });
-    pi.on("tool_execution_update", (event)=>{
+    pi.on("tool_execution_update", (event) => {
         recorder.toolExecutionUpdate(event.toolCallId, event.toolName);
     });
-    pi.on("tool_result", (event)=>{
+    pi.on("tool_result", (event) => {
         recorder.toolResult(event.toolCallId, event.toolName);
     });
-    pi.on("tool_execution_end", (event)=>{
+    pi.on("tool_execution_end", (event) => {
         recorder.toolExecutionEnd(event.toolCallId, event.toolName);
     });
-    pi.on("session_shutdown", (event)=>{
+    pi.on("session_shutdown", (event) => {
         recorder.sessionShutdown(event.reason);
     });
+    // Toggle expand/collapse with Ctrl+J
     pi.registerShortcut("ctrl+j", {
         description: "Toggle subagent tools widget",
-        handler: (ctx)=>{
+        handler: (ctx) => {
             expanded = !expanded;
             renderWidget(ctx, null);
-        }
+        },
     });
     pi.registerTool({
         name: "caller_ping",
         label: "Caller Ping",
-        description: "Record a help request for the parent agent. " + "The parent will be notified with your message, and delivery and session exit wait until recursively owned descendants drain. " + "Use when you're stuck, need clarification, or need the parent to take action.",
+        description: "Record a help request for the parent agent. " +
+            "The parent will be notified with your message after recursively owned descendants drain, and this session stays open. " +
+            "Use when you're stuck, need clarification, or need the parent to take action.",
         parameters: Type.Object({
-            message: Type.String({
-                description: "What you need help with"
-            })
+            message: Type.String({ description: "What you need help with" }),
         }),
-        async execute (_toolCallId, params, _signal, _onUpdate, ctx) {
+        async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
             const sessionFile = process.env.PI_SUBAGENT_SESSION;
             if (!sessionFile) {
-                throw new Error("caller_ping is only available in subagent contexts. " + "PI_SUBAGENT_SESSION environment variable is not set.");
+                throw new Error("caller_ping is only available in subagent contexts. " +
+                    "PI_SUBAGENT_SESSION environment variable is not set.");
             }
             recorder.callerPing();
             const exitData = {
                 type: "ping",
+                id: randomUUID(),
                 name: process.env.PI_SUBAGENT_NAME ?? "subagent",
-                message: params.message
+                message: params.message,
             };
-            await finishAfterDrain(ctx, exitData);
+            await waitForDescendantDrain();
+            writeFileSync(`${sessionFile}.exit`, JSON.stringify(exitData));
+            await waitForPingAcknowledgement(sessionFile, exitData.id, _signal);
             return {
                 content: [
                     {
                         type: "text",
-                        text: "Ping sent. Session will exit and parent will be notified."
-                    }
+                        text: "Help request sent. The parent was notified; this session stays open.",
+                    },
                 ],
-                details: {}
+                details: {},
             };
-        }
+        },
     });
-    if (autoExit) return;
+    if (autoExit)
+        return;
     pi.registerTool({
         name: "subagent_done",
         label: "Subagent Done",
-        description: "Record interactive completion intent. " + "Return results and close this session after recursively owned descendants drain. " + "Your LAST assistant message before calling this becomes the summary returned to the caller.",
-        parameters: Type.Object({
-            summary: Type.Optional(Type.String({
-                description: "Optional final summary"
-            }))
-        }),
-        async execute (_toolCallId, params, _signal, _onUpdate, ctx) {
+        description: "Record interactive completion intent. " +
+            "Return results and close this session after recursively owned descendants drain. " +
+            "Your LAST assistant message before calling this becomes the summary returned to the caller.",
+        parameters: Type.Object({ summary: Type.Optional(Type.String({ description: "Optional final summary" })) }),
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             recorder.subagentDone();
             const payload = {
                 type: "done",
-                ...typeof params.summary === "string" && params.summary.trim() ? {
-                    summary: params.summary
-                } : {}
+                ...(typeof params.summary === "string" && params.summary.trim()
+                    ? { summary: params.summary }
+                    : {}),
             };
             const lineage = lineageFromEnvironment();
-            const pendingDescendants = lineage ? hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.parentNodeId) : false;
+            const pendingDescendants = lineage
+                ? hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.nodeId)
+                : false;
             if (!pendingDescendants) {
                 const sessionFile = process.env.PI_SUBAGENT_SESSION;
                 if (sessionFile) {
                     try {
                         writeFileSync(`${sessionFile}.exit`, JSON.stringify(payload));
-                    } catch  {}
+                    }
+                    catch { }
                 }
                 ctx.shutdown();
-            } else {
+            }
+            else {
                 await finishAfterDrain(ctx, payload);
             }
             return {
-                content: [
-                    {
-                        type: "text",
-                        text: "Shutting down subagent session."
-                    }
-                ],
-                details: {}
+                content: [{ type: "text", text: "Shutting down subagent session." }],
+                details: {},
             };
-        }
+        },
     });
 }

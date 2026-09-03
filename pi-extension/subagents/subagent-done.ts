@@ -11,7 +11,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { createSubagentActivityRecorder } from "./activity.ts";
 
@@ -34,7 +35,7 @@ export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
 
 /** Wait until this session's owned descendants have terminal delivery. */
 export async function waitForDescendantDrain(options: {
-  lineage?: { rootDir: string; parentNodeId: string };
+  lineage?: { rootDir: string; nodeId?: string; parentNodeId?: string };
   delay?: (ms: number) => Promise<void>;
   now?: () => number;
   onWaitOpen?: (info: { waitedSince: number }) => void;
@@ -44,7 +45,8 @@ export async function waitForDescendantDrain(options: {
 } = {}): Promise<void> {
   const lineage = options.lineage ?? lineageFromEnvironment();
   if (!lineage) return;
-  const childId = lineage.parentNodeId;
+  const childId = lineage.nodeId ?? lineage.parentNodeId;
+  if (!childId) return;
   const sessionFile = process.env.PI_SUBAGENT_SESSION;
   const persistentLog = sessionFile
     ? createDeliveryLog({ logPath: join(dirname(sessionFile), "subagent-delivery.log"), now: options.now })
@@ -190,6 +192,26 @@ export function buildCompletionSidecar(
   | { type: "error"; errorMessage: string; stopReason: "error" } {
   const errorInfo = findLatestAssistantError(messages);
   return errorInfo ? { type: "error", ...errorInfo } : { type: "done" };
+}
+
+export async function waitForPingAcknowledgement(
+  sessionFile: string,
+  pingId: string,
+  signal?: AbortSignal,
+  intervalMs = 50,
+): Promise<void> {
+  for (;;) {
+    if (signal?.aborted) throw new Error("Help request wait was cancelled");
+    try {
+      const current = JSON.parse(readFileSync(`${sessionFile}.exit`, "utf8")) as { type?: unknown; id?: unknown };
+      if (current.type !== "ping" || current.id !== pingId) return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || error instanceof SyntaxError) return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
 }
 
 export function parseDeniedTools(rawValue: string | undefined): string[] {
@@ -340,6 +362,12 @@ export default function (pi: ExtensionAPI) {
   // parent wires an explicit interrupt request, an abort remains open and is
   // classified as an unexpected abort for delivery purposes.
   let interruptRequested = false;
+
+  let agentStarted = false;
+  let intervened = false;
+  const mechanicalInterruptPath = process.env.PI_SUBAGENT_SESSION
+    ? `${process.env.PI_SUBAGENT_SESSION}.mechanical-interrupt`
+    : undefined;
   // Show widget + status bar on session start
   pi.on("session_start", (_event, ctx) => {
     recorder.sessionStart();
@@ -352,6 +380,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("input", () => {
     resumeInputSeen = true;
+    if (shouldMarkUserTookOver(agentStarted)) intervened = true;
     recorder.input();
   });
 
@@ -372,6 +401,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_start", () => {
+    agentStarted = true;
     recorder.agentStart();
   });
   let exitRequested = false;
@@ -383,7 +413,7 @@ export default function (pi: ExtensionAPI) {
     exitRequested = true;
     const lineage = lineageFromEnvironment();
     const shouldWaitForDescendants = lineage
-      ? hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.parentNodeId)
+      ? hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.nodeId)
       : false;
     if (shouldWaitForDescendants) await waitForDescendantDrain();
     if (treeOwner) await waitForOwnedChildren();
@@ -404,6 +434,13 @@ export default function (pi: ExtensionAPI) {
     latestAgentEndMessages = (event as any).messages as any[] | undefined;
     const eventTurnIndex = (event as any).turnIndex;
     if (typeof eventTurnIndex === "number") latestTurnIndex = eventTurnIndex;
+    const assistant = newestAssistantEntry(latestAgentEndMessages);
+    if (assistant?.stopReason === "aborted") {
+      const mechanical = Boolean(mechanicalInterruptPath && existsSync(mechanicalInterruptPath));
+      if (mechanicalInterruptPath) rmSync(mechanicalInterruptPath, { force: true });
+      interruptRequested = true;
+      if (!mechanical) intervened = true;
+    }
     recorder.agentEndWaiting();
   });
 
@@ -421,6 +458,8 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (!resumeTurnStarted || (process.env.PI_SUBAGENT_RESUME === "1" && !resumeInputSeen)) return;
+
+    if (intervened) return;
 
     recorder.agentSettled({
       outcome,
@@ -504,12 +543,12 @@ export default function (pi: ExtensionAPI) {
     label: "Caller Ping",
     description:
       "Record a help request for the parent agent. " +
-      "The parent will be notified with your message, and delivery and session exit wait until recursively owned descendants drain. " +
+      "The parent will be notified with your message after recursively owned descendants drain, and this session stays open. " +
       "Use when you're stuck, need clarification, or need the parent to take action.",
     parameters: Type.Object({
       message: Type.String({ description: "What you need help with" }),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const sessionFile = process.env.PI_SUBAGENT_SESSION;
       if (!sessionFile) {
         throw new Error(
@@ -521,15 +560,19 @@ export default function (pi: ExtensionAPI) {
       recorder.callerPing();
       const exitData = {
         type: "ping" as const,
+        id: randomUUID(),
         name: process.env.PI_SUBAGENT_NAME ?? "subagent",
         message: params.message,
       };
-      await finishAfterDrain(ctx, exitData);
+      await waitForDescendantDrain();
+      writeFileSync(`${sessionFile}.exit`, JSON.stringify(exitData));
+
+      await waitForPingAcknowledgement(sessionFile, exitData.id, _signal);
       return {
         content: [
           {
             type: "text",
-            text: "Ping sent. Session will exit and parent will be notified.",
+            text: "Help request sent. The parent was notified; this session stays open.",
           },
         ],
         details: {},
@@ -557,7 +600,7 @@ export default function (pi: ExtensionAPI) {
       };
       const lineage = lineageFromEnvironment();
       const pendingDescendants = lineage
-        ? hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.parentNodeId)
+        ? hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.nodeId)
         : false;
       if (!pendingDescendants) {
         const sessionFile = process.env.PI_SUBAGENT_SESSION;

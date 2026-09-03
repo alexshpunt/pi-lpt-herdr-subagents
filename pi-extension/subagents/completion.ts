@@ -6,7 +6,7 @@ const TERMINAL_SENTINEL = /__SUBAGENT_DONE_(\d+)__/;
 export interface CompletionResult {
   reason: "done" | "ping" | "sentinel" | "error";
   exitCode: number;
-  ping?: { name: string; message: string };
+  ping?: { id?: string; name: string; message: string };
   summary?: string;
   errorMessage?: string;
   /** Confirmed Herdr pane absence without a completion artifact. */
@@ -41,6 +41,9 @@ export function interpretExitSidecar(data: unknown): CompletionResult {
       reason: "ping",
       exitCode: 0,
       ping: {
+        ...(typeof (payload as { id?: unknown }).id === "string"
+          ? { id: (payload as { id: string }).id }
+          : {}),
         name: typeof payload.name === "string" ? payload.name : "subagent",
         message: typeof payload.message === "string" ? payload.message : "",
       },
@@ -79,6 +82,16 @@ export function readExitSidecar(sessionFile: string | undefined): unknown | null
 
 /** Remove completion evidence only after durable result and inbox publication. */
 export function acknowledgeExitSidecar(sessionFile: string): void {
+  rmSync(`${sessionFile}.exit`, { force: true });
+}
+
+
+/** Remove only the exact help evidence that was durably published. */
+export function acknowledgePingSidecar(sessionFile: string, pingId: string | undefined): void {
+  const payload = readExitSidecar(sessionFile);
+  if (payload == null || typeof payload !== "object") return;
+  const candidate = payload as { type?: unknown; id?: unknown };
+  if (candidate.type !== "ping" || candidate.id !== pingId) return;
   rmSync(`${sessionFile}.exit`, { force: true });
 }
 

@@ -45,11 +45,18 @@ export function classifyStaleness(input: {
   now: number;
   quietThresholdMs: number;
   waitingForDescendants: boolean;
+  /** Latest result delivered by an owned descendant, which wakes the owner. */
+  descendantActivityAt?: number;
 }): StaleVerdict {
   if (!input.autonomous) return "active";
   if (input.waitingForDescendants) return "waiting";
   if (input.activity?.toolActive) return "active";
-  const lastEventAt = input.activity?.updatedAt ?? input.startedAt;
+
+  if (input.descendantActivityAt !== undefined && input.activity?.providerActive) return "active";
+  const lastEventAt = Math.max(
+    input.activity?.updatedAt ?? input.startedAt,
+    input.descendantActivityAt ?? 0,
+  );
   return input.now - lastEventAt > input.quietThresholdMs ? "stale" : "active";
 }
 

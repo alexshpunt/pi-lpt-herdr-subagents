@@ -266,6 +266,53 @@ describe("Pi launch", () => {
 		});
 	});
 
+	it("closes a replacement pane when resume setup fails before metadata", async () => {
+		await withFixture(async ({ root, sessionDir, parentSessionFile }) => {
+			const sessionFile = join(root, "failed-resume.jsonl");
+			writeFileSync(sessionFile, "existing session\n");
+			const events: string[] = [];
+
+			await assert.rejects(
+				launchPiSubagent(
+					{
+						kind: "resume",
+						id: "failed-resume",
+						name: "Failed resume",
+						sessionFile,
+						parent: {
+							sessionId: "parent",
+							sessionFile: parentSessionFile,
+							sessionDir,
+						},
+					},
+					{
+						createPane() {
+							events.push("create");
+							return "pane-failed-resume";
+						},
+						createWorktree: () => {
+							throw new Error("unexpected worktree creation");
+						},
+						async waitForShellReady() {
+							events.push("ready");
+							throw new Error("shell never became ready");
+						},
+						closePane(surface) {
+							assert.equal(surface, "pane-failed-resume");
+							events.push("close");
+						},
+						runScript() {
+							throw new Error("script must not start");
+						},
+					},
+				),
+				/shell never became ready/,
+			);
+
+			assert.deepEqual(events, ["create", "ready", "close"]);
+		});
+	});
+
 	it("keeps the durable child identity and can reuse its pane during recovery", async () => {
 		await withFixture(async ({ root, sessionDir, parentSessionFile }) => {
 			const sessionFile = join(root, "recovered.jsonl");

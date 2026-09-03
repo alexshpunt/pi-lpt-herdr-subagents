@@ -457,87 +457,99 @@ async function launchResumedPiSubagent(request, operations) {
     const interactive = request.behavior?.interactive ?? !autoExit;
     const startTime = Date.now();
     const surface = request.surface ?? operations.createPane(request.name, request.workspace);
-    const tabId = getPaneTabId(surface);
-    await operations.waitForShellReady(surface);
-    const activityFile = getSubagentActivityFile(artifactDir, id);
-    writeFileSync(`${request.sessionFile}.lineage.json`, JSON.stringify(lineage), "utf8");
-    const settledEventsFile = getSubagentSettledEventsFile(artifactDir, id);
-    mkdirSync(dirname(activityFile), { recursive: true });
-    if (lineage) {
-        appendLineageEvent(lineage.rootDir, `metadata:${lineage.nodeId}:${startTime}`, "launch_metadata", lineage.nodeId, {
+    const allocatedSurface = request.surface === undefined;
+    try {
+        const tabId = getPaneTabId(surface);
+        await operations.waitForShellReady(surface);
+        const activityFile = getSubagentActivityFile(artifactDir, id);
+        writeFileSync(`${request.sessionFile}.lineage.json`, JSON.stringify(lineage), "utf8");
+        const settledEventsFile = getSubagentSettledEventsFile(artifactDir, id);
+        mkdirSync(dirname(activityFile), { recursive: true });
+        if (lineage) {
+            appendLineageEvent(lineage.rootDir, `metadata:${lineage.nodeId}:${startTime}`, "launch_metadata", lineage.nodeId, {
+                name: request.name,
+                task: request.message ?? "resumed session",
+                surface,
+                sessionFile: request.sessionFile,
+                tabId,
+                activityFile,
+                settledEventsFile,
+                startTime,
+                interactive,
+                autoExit,
+                ...(request.workspace ? { workspaceId: request.workspace.id, cwd: request.workspace.cwd } : {}),
+            });
+        }
+        let messageFile;
+        if (request.message) {
+            messageFile = join(artifactDir, "subagent-resume", `${safeName(request.name) || "resume"}-${timestampForFile(false)}.md`);
+            mkdirSync(dirname(messageFile), { recursive: true });
+            writeFileSync(messageFile, request.message, "utf8");
+        }
+        // Resume must use the existing session position from before the new Pi
+        // process starts, not a line count observed after launch.
+        const sessionBaseline = captureSessionBaseline(request.sessionFile);
+        const env = [
+            ...(process.env.PI_CODING_AGENT_DIR
+                ? [`PI_CODING_AGENT_DIR=${shellQuote(process.env.PI_CODING_AGENT_DIR)}`]
+                : []),
+            ...Object.entries(lineageEnvironment(lineage)).map(([key, value]) => `${key}=${shellQuote(value)}`),
+            `PI_SUBAGENT_NAME=${shellQuote(request.name)}`,
+            `PI_SUBAGENT_SESSION=${shellQuote(request.sessionFile)}`,
+            `PI_SUBAGENT_ID=${shellQuote(id)}`,
+            `PI_SUBAGENT_ACTIVITY_FILE=${shellQuote(activityFile)}`,
+            `PI_SUBAGENT_SETTLED_EVENTS_FILE=${shellQuote(settledEventsFile)}`,
+            `PI_SUBAGENT_AUTO_EXIT=${autoExit ? "1" : "0"}`,
+            `PI_SUBAGENT_RESUME_BASELINE_ASSISTANTS=${shellQuote(JSON.stringify(sessionBaseline.assistantEntryIds))}`,
+            "PI_SUBAGENT_RESUME=1",
+        ];
+        const command = [
+            ...env,
+            "pi",
+            "--session",
+            shellQuote(request.sessionFile),
+            "-e",
+            shellQuote(join(SUBAGENTS_DIR, "subagent-done.ts")),
+            ...(messageFile ? [shellQuote(`@${messageFile}`)] : []),
+        ].join(" ");
+        const launchScriptFile = operations.runScript(surface, `${command}; echo '__SUBAGENT_DONE_'$?'__'`, {
+            scriptPath: join(artifactDir, "subagent-scripts", `${safeName(request.name) || "resume"}-resume-${Date.now()}.sh`),
+            scriptPreamble: [
+                `# Subagent resume script for ${request.name}`,
+                `# Generated: ${new Date().toISOString()}`,
+                `# Session: ${request.sessionFile}`,
+                `# Surface: ${surface}`,
+                ...(messageFile ? [`# Resume message file: ${messageFile}`] : []),
+            ].join("\n"),
+        });
+        return {
+            lineage,
+            id,
             name: request.name,
             task: request.message ?? "resumed session",
             surface,
+            startTime,
             sessionFile: request.sessionFile,
-            tabId,
+            ...(tabId ? { tabId } : {}),
+            launchScriptFile,
             activityFile,
             settledEventsFile,
-            startTime,
             interactive,
-            autoExit,
-            ...(request.workspace ? { workspaceId: request.workspace.id, cwd: request.workspace.cwd } : {}),
-        });
+            runtimePlan: undefined,
+            sessionBaseline,
+            ...(request.workspace ? { recoveryWorkspace: request.workspace } : {}),
+            lifecycle: createLifecycle(startTime),
+        };
     }
-    let messageFile;
-    if (request.message) {
-        messageFile = join(artifactDir, "subagent-resume", `${safeName(request.name) || "resume"}-${timestampForFile(false)}.md`);
-        mkdirSync(dirname(messageFile), { recursive: true });
-        writeFileSync(messageFile, request.message, "utf8");
+    catch (error) {
+        if (allocatedSurface) {
+            try {
+                operations.closePane?.(surface);
+            }
+            catch { }
+        }
+        throw error;
     }
-    // Resume must use the existing session position from before the new Pi
-    // process starts, not a line count observed after launch.
-    const sessionBaseline = captureSessionBaseline(request.sessionFile);
-    const env = [
-        ...(process.env.PI_CODING_AGENT_DIR
-            ? [`PI_CODING_AGENT_DIR=${shellQuote(process.env.PI_CODING_AGENT_DIR)}`]
-            : []),
-        ...Object.entries(lineageEnvironment(lineage)).map(([key, value]) => `${key}=${shellQuote(value)}`),
-        `PI_SUBAGENT_NAME=${shellQuote(request.name)}`,
-        `PI_SUBAGENT_SESSION=${shellQuote(request.sessionFile)}`,
-        `PI_SUBAGENT_ID=${shellQuote(id)}`,
-        `PI_SUBAGENT_ACTIVITY_FILE=${shellQuote(activityFile)}`,
-        `PI_SUBAGENT_SETTLED_EVENTS_FILE=${shellQuote(settledEventsFile)}`,
-        `PI_SUBAGENT_AUTO_EXIT=${autoExit ? "1" : "0"}`,
-        `PI_SUBAGENT_RESUME_BASELINE_ASSISTANTS=${shellQuote(JSON.stringify(sessionBaseline.assistantEntryIds))}`,
-        "PI_SUBAGENT_RESUME=1",
-    ];
-    const command = [
-        ...env,
-        "pi",
-        "--session",
-        shellQuote(request.sessionFile),
-        "-e",
-        shellQuote(join(SUBAGENTS_DIR, "subagent-done.ts")),
-        ...(messageFile ? [shellQuote(`@${messageFile}`)] : []),
-    ].join(" ");
-    const launchScriptFile = operations.runScript(surface, `${command}; echo '__SUBAGENT_DONE_'$?'__'`, {
-        scriptPath: join(artifactDir, "subagent-scripts", `${safeName(request.name) || "resume"}-resume-${Date.now()}.sh`),
-        scriptPreamble: [
-            `# Subagent resume script for ${request.name}`,
-            `# Generated: ${new Date().toISOString()}`,
-            `# Session: ${request.sessionFile}`,
-            `# Surface: ${surface}`,
-            ...(messageFile ? [`# Resume message file: ${messageFile}`] : []),
-        ].join("\n"),
-    });
-    return {
-        lineage,
-        id,
-        name: request.name,
-        task: request.message ?? "resumed session",
-        surface,
-        startTime,
-        sessionFile: request.sessionFile,
-        ...(tabId ? { tabId } : {}),
-        launchScriptFile,
-        activityFile,
-        settledEventsFile,
-        interactive,
-        runtimePlan: undefined,
-        sessionBaseline,
-        ...(request.workspace ? { recoveryWorkspace: request.workspace } : {}),
-        lifecycle: createLifecycle(startTime),
-    };
 }
 export function buildSubagentToolAllowlist(tools, autoExit = false, includeControlTools = true) {
     const requested = (tools ?? "")

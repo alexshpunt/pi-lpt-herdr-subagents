@@ -446,6 +446,12 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 		source.includes("INTEGRATION_OWNER_AFTER_CHILD") &&
 		/Sub-agent "[^"]+" launched and is now running in the background/.test(source)
 	) {
+		if (
+			source.includes("INTEGRATION_DELAY_OWNER_AFTER_CHILD") &&
+			source.includes("GRANDCHILD_DONE")
+		) {
+			await new Promise((resolve) => setTimeout(resolve, 2_500));
+		}
 		return {
 			text: source.includes("GRANDCHILD_DONE")
 				? "OWNER_AFTER_CHILD"

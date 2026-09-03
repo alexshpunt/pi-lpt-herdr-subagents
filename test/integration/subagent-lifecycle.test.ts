@@ -1237,6 +1237,40 @@ for (const backend of backends) {
 			assert.match(String(details.resultContent), /QUIET_RECOVERY_COMPLETE/);
 		});
 
+		it("cancels a manually closed subagent tab without recovery", async () => {
+			const id = uniqueId();
+			const parentSession = join(env.dir, `manual-close-parent-${id}.jsonl`);
+			const surface = createTrackedSurface(env, `manual-close-parent-${id}`);
+			await waitForPaneReady(surface);
+
+			startPi(surface, env.dir, [
+				"Call the subagent tool with these EXACT parameters:",
+				`  name: "ManualClose-${id}"`,
+				'  agent: "test-echo"',
+				'  task: "INTEGRATION_HOLD_QUIET_ONCE"',
+				"Wait for the asynchronous result.",
+			].join("\n"), {
+				extraArgs: `--session ${shellQuote(parentSession)}`,
+				environment: { PI_SUBAGENT_QUIET_THRESHOLD_MS: "30000" },
+			});
+
+			const childPane = await waitForAgentPane(`ManualClose-${id}`, env.workspaceId);
+			await waitForScreen(childPane, /INTEGRATION_HOLD_QUIET_ONCE|working|active/i, PI_TIMEOUT, 100);
+			closePane(childPane);
+			await waitForCustomResultCount(parentSession, 1);
+
+			const results = customResultEntries(readSessionEntries(parentSession));
+			assert.equal(results.length, 1);
+			const details = results[0]?.details ?? {};
+			assert.match(String(details.resultContent), /cancelled[.]\n\nSubagent cancelled by user[.]/);
+			assert.match(String(details.resultPath), /-cancelled\.md$/);
+			assert.equal(typeof details.sessionFile, "string");
+			const lineage = JSON.parse(readFileSync(`${details.sessionFile}.lineage.json`, "utf8")) as { rootDir?: string };
+			const ledgerPath = join(String(lineage.rootDir), "subagent-delivery.log");
+			const ledger = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
+			assert.doesNotMatch(ledger, /"event":"recovery-attempt"/);
+		});
+
 		it("revives a stale autonomous child three times before one recovery-failed result", async () => {
 			const id = uniqueId();
 			const parentSession = join(env.dir, `stale-parent-${id}.jsonl`);
@@ -1596,7 +1630,7 @@ for (const backend of backends) {
 			);
 		});
 
-		it("lets an autonomous owner process its last child result before closing", async () => {
+		it("keeps an autonomous owner alive past the stale threshold until its child result is processed", async () => {
 			const id = uniqueId();
 			const ownerName = `AutoOwner-${id}`;
 			const gateFile = `/tmp/pi-integ-auto-owner-${id}`;
@@ -1612,14 +1646,19 @@ for (const backend of backends) {
 					"Call subagent with these EXACT parameters:",
 					`  name: "${ownerName}"`,
 					'  agent: "test-autonomous-descendant-owner"',
-					`  task: "INTEGRATION_DESCENDANT_GATE: ${gateFile} INTEGRATION_OWNER_AFTER_CHILD Launch the descendant, then process its result."`,
+					`  task: "INTEGRATION_DESCENDANT_GATE: ${gateFile} INTEGRATION_OWNER_AFTER_CHILD INTEGRATION_DELAY_OWNER_AFTER_CHILD Launch the descendant, then process its result."`,
 					"Call the tool once and wait for its asynchronous result.",
 				].join("\n"),
-				{ extraArgs: `--session ${shellQuote(parentSession)}` },
+				{
+					extraArgs: `--session ${shellQuote(parentSession)}`,
+					environment: { PI_SUBAGENT_QUIET_THRESHOLD_MS: "1000" },
+				},
 			);
 
 			const ownerPane = await waitForAgentPane(ownerName, env.workspaceId);
 			await waitForScreen(ownerPane, /OWNER_WAITING/, PI_TIMEOUT, 300);
+
+			await sleep(1_500);
 			writeFileSync(gateFile, "drain\n");
 
 			const deadline = Date.now() + PI_TIMEOUT;
@@ -1643,6 +1682,13 @@ for (const backend of backends) {
 			assert.doesNotMatch(
 				String(ownerResults[0].details?.resultContent),
 				/^OWNER_WAITING$/m,
+			);
+			assert.equal(
+				getProviderRequests().filter((request) =>
+					/previous process became stale/i.test(request.userText),
+				).length,
+				0,
+				"waiting for and processing a descendant must not consume owner recovery",
 			);
 			await waitForTabLabelGone(env.workspaceId, ownerName);
 		});
@@ -1772,13 +1818,15 @@ for (const backend of backends) {
 				if (results.length > 0) break;
 				await sleep(50);
 			}
-			assert.equal(results.length, 1, "manual owner closure must deliver its held settle exactly once");
-			assert.match(String(results[0].details?.resultPath), /-(?:settled|closed)\.md$/);
-			assert.doesNotMatch(
-				String(results[0].details?.resultContent),
-				/pane disappeared/i,
-				"manual closure with a captured answer must not be framed as a failure",
-			);
+			assert.equal(results.length, 1, "manual owner closure must deliver cancellation exactly once");
+			const details = results[0]?.details ?? {};
+			assert.match(String(details.resultContent), /cancelled[.]\n\nSubagent cancelled by user[.]/);
+			assert.match(String(details.resultPath), /-cancelled\.md$/);
+			assert.equal(typeof details.sessionFile, "string");
+			const lineage = JSON.parse(readFileSync(`${details.sessionFile}.lineage.json`, "utf8")) as { rootDir?: string };
+			const ledgerPath = join(String(lineage.rootDir), "subagent-delivery.log");
+			const ledger = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
+			assert.doesNotMatch(ledger, /"event":"recovery-attempt"/);
 			assert.equal(
 				listWorkspacePanes(env.workspaceId).some((pane) =>
 					pane.label === ownerName || pane.label?.startsWith("Nested-"),

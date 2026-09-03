@@ -14,6 +14,7 @@ import {
   hasLineageEvent,
   pendingLineageInboxes,
   isLineageNodeDrained,
+  latestDescendantDeliveryAt,
   reduceLineage,
   registerLineage,
 } from "../pi-extension/subagents/lineage.ts";
@@ -89,6 +90,21 @@ test("reduces recursive ownership and drains only after delivery", () => {
   appendLineageEvent(root.rootDir, "terminal-delivered:root", "terminal_delivered", "root");
   assert.equal(isLineageNodeDrained(reduceLineage(root.rootDir), "root"), true);
   assert.equal(appendLineageEvent(root.rootDir, "terminal:root", "terminal", "root"), false);
+});
+
+test("projects the latest delivery activity from recursive descendants", () => {
+  const root = registerLineage({ artifactDir: tempRoot(), nodeId: "root" });
+  appendLineageEvent(root.rootDir, "launch:child", "launch", "child", { parentNodeId: "root" });
+  appendLineageEvent(root.rootDir, "launch:grandchild", "launch", "grandchild", { parentNodeId: "child" });
+  appendLineageEvent(root.rootDir, "settled-delivered:child:1", "settled_delivered", "child", { resultId: "child-answer" });
+  appendLineageEvent(root.rootDir, "materialized:grandchild", "inbox_materialized", "grandchild", { deliveryId: "grandchild-answer" });
+
+  const state = reduceLineage(root.rootDir);
+  assert.equal(
+    latestDescendantDeliveryAt(state, "root"),
+    Math.max(state.nodes.get("child")!.lastDeliveredAt!, state.nodes.get("grandchild")!.lastDeliveredAt!),
+  );
+  assert.equal(latestDescendantDeliveryAt(state, "grandchild"), undefined);
 });
 
 test("a durable inbox event satisfies terminal delivery once", () => {

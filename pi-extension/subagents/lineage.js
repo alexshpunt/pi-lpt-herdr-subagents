@@ -243,9 +243,14 @@ export function reduceLineage(rootDir) {
             if (node.terminal && (event.type === "terminal_delivered" || kind === "terminal" || payload?.kind === "terminal")) {
                 node.terminalDelivered ??= String(event.deliveryId ?? event.eventId);
             }
+            node.lastDeliveredAt = Math.max(node.lastDeliveredAt ?? 0, event.at);
+        }
+        else if (event.type === "inbox_materialized") {
+            node.lastDeliveredAt = Math.max(node.lastDeliveredAt ?? 0, event.at);
         }
         else if (event.type === "settled_delivered" && typeof event.resultId === "string" && !node.settledDelivered.includes(event.resultId)) {
             node.settledDelivered.push(event.resultId);
+            node.lastDeliveredAt = Math.max(node.lastDeliveredAt ?? 0, event.at);
         }
         else if (event.type === "cleanup_pending") {
             if (!node.terminalDelivered)
@@ -294,6 +299,25 @@ export function isLineageNodeDrained(state, nodeId) {
         return true;
     };
     return visit(nodeId);
+}
+/** Latest durable delivery activity from any direct or recursive descendant. */
+export function latestDescendantDeliveryAt(state, nodeId) {
+    const integrity = lineageIntegrityError(state);
+    if (integrity)
+        throw new Error(integrity);
+    let latest;
+    const visit = (parentId) => {
+        for (const child of state.nodes.values()) {
+            if (child.parentNodeId !== parentId)
+                continue;
+            if (child.lastDeliveredAt !== undefined) {
+                latest = Math.max(latest ?? 0, child.lastDeliveredAt);
+            }
+            visit(child.nodeId);
+        }
+    };
+    visit(nodeId);
+    return latest;
 }
 export function hasUndrainedDescendants(state, nodeId) {
     const integrity = lineageIntegrityError(state);

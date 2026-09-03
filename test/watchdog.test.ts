@@ -52,6 +52,42 @@ test("classifies only autonomous observable silence as stale", () => {
   assert.equal(classifyStaleness({ ...base, activity: activity({ updatedAt: 1_500 }) }), "active");
 });
 
+test("starts a fresh owner quiet window when a descendant result arrives", () => {
+  const base = {
+    autonomous: true,
+    activity: activity({
+      updatedAt: 1_000,
+      agentActive: false,
+      turnActive: false,
+      providerActive: false,
+    }),
+    startedAt: 1,
+    quietThresholdMs: 1_000,
+    waitingForDescendants: false,
+    descendantActivityAt: 1_500,
+  };
+
+  assert.equal(
+    classifyStaleness({ ...base, now: 2_001 }),
+    "active",
+    "recent descendant delivery starts a fresh quiet window for its owner",
+  );
+  assert.equal(
+    classifyStaleness({ ...base, now: 2_501 }),
+    "stale",
+    "the owner becomes eligible again after its fresh quiet window expires",
+  );
+  assert.equal(
+    classifyStaleness({
+      ...base,
+      now: 10_000,
+      activity: activity({ updatedAt: 1_000, providerActive: true }),
+    }),
+    "active",
+    "active model processing of a descendant result is not stale",
+  );
+});
+
 test("shares and persists one three-attempt budget across crash and stale recovery", () => {
   const dir = mkdtempSync(join(tmpdir(), "subagent-watchdog-"));
   const logPath = join(dir, "delivery.jsonl");

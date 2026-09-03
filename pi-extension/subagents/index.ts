@@ -162,8 +162,8 @@ import {
   hasLineageEvent,
   discoverLineageRoots,
   hasUndrainedDescendants,
+  latestDescendantDeliveryAt,
   lineageEnvironment,
-
   lineageIntegrityError,
   pendingLineageInboxes,
   readLineageAttachment,
@@ -719,6 +719,9 @@ interface SubagentResult {
 	supervisionEpoch?: number;
 	recoveryFailed?: boolean;
 
+	/** The user closed the owned Herdr tab, so recovery is forbidden. */
+	cancelledByUser?: boolean;
+
 	closeWithAnswer?: boolean;
 	exitCode: number;
 	elapsed: number;
@@ -795,8 +798,6 @@ interface RunningSubagent {
   recoveryFailureReason?: string;
   cleanupPending?: boolean;
   cancellationAttempt?: Promise<boolean>;
-  /** Shared reconciliation for a confirmed-missing owner with stale descendants. */
-  danglingCleanupAttempt?: Promise<void>;
 	worktree?: WorktreeLaunch;
 
 	recoveryWorkspace?: { id: string; cwd: string };
@@ -972,7 +973,7 @@ function startRecoveredWatcher(running: RunningSubagent): void {
       const settledAlreadyDelivered = result.exitCode === 0 && await waitForParentSettledResult(running, summary);
       if (!result.paneDisappeared && result.exitCode === 0 && (contentAlreadyDelivered || settledAlreadyDelivered)) return;
       if (runtime.pi) sendSubagentResult(runtime.pi, presentation, { name: running.name, task: running.task, childId: running.id, ...(result.closeWithAnswer ? {} : { exitCode: result.exitCode }), sessionFile: running.sessionFile, deliveryId: `terminal:${running.id}`, resultContent: summary });
-    }, summary, result.recoveryFailed ? "recovery-failed" : result.closeWithAnswer ? "closed" : undefined);
+    }, summary, result.cancelledByUser ? "cancelled" : result.recoveryFailed ? "recovery-failed" : result.closeWithAnswer ? "closed" : undefined);
   }).catch((error) => {
     recordDeliveryFailure(running, `terminal:${running.id}`, error, "recovered-watcher");
   });
@@ -980,23 +981,7 @@ function startRecoveredWatcher(running: RunningSubagent): void {
 
 /** Rebuild direct-child watchers from durable launch metadata after a process restart. */
 async function startRestoredSubagentWatcher(running: RunningSubagent): Promise<void> {
-	let inspection: PaneInspection;
-	try {
-		inspection = await inspectPane(running.surface);
-	} catch {
-		startRecoveredWatcher(running);
-		return;
-	}
-	if (inspection.kind !== "missing" || running.interactive) {
-		startRecoveredWatcher(running);
-		return;
-	}
-	const recovery = await attemptRecovery(running, "crash");
-	if (recovery.recovered) {
-		startRecoveredWatcher(running);
-	} else if (recovery.exhausted) {
-		deliverRecoveryFailure(running, recovery.reason ?? "Recovery failed.");
-	}
+	startRecoveredWatcher(running);
 }
 
 function startRecoveredWorkflowWatcher(running: RunningSubagent, rootDir: string, runId: string, ctx: ExtensionContext): void {
@@ -1900,8 +1885,9 @@ function observeSettledRunningSubagent(running: RunningSubagent): void {
 
 			if (running.lineage && hasLineageEvent(running.lineage.rootDir, settledBoundaryId, "settled_delivered")) return;
 
-			const durable = prepareDurableDelivery(running, deliveryId, assistant.text ?? "", "settled");
 			await waitForDescendantDrain(running);
+			if (running.lineage && reduceLineage(running.lineage.rootDir).nodes.get(running.id)?.cancellation?.intent) return;
+			const durable = prepareDurableDelivery(running, deliveryId, assistant.text ?? "", "settled");
 			if (running.lineage) {
 				if (!appendLineageInbox(running.lineage.rootDir, running.id, deliveryId, {
 					sessionId: running.lineage.parentSessionId,
@@ -2123,18 +2109,6 @@ function observeRunningSubagent(
 	);
 	observeSettledRunningSubagent(running);
   if (running.lineage && reduceLineage(running.lineage.rootDir).nodes.get(running.id)?.cancellation?.intent) void attemptPendingCancellation(running);
-
-  if (running.lineage && running.lifecycle.pane.kind === "missing" && !running.danglingCleanupAttempt) {
-    try {
-      if (hasUndrainedDescendants(reduceLineage(running.lineage.rootDir), running.id)) {
-        running.danglingCleanupAttempt = destroyOwnedLineageSubtree(running).finally(() => {
-          running.danglingCleanupAttempt = undefined;
-        });
-      }
-    } catch (error) {
-      recordDeliveryFailure(running, `lineage:${running.id}`, error, "lineage-integrity");
-    }
-  }
 	attemptPendingTerminalDelivery(running);
 	if (running.cleanupPending && tryCleanupSubagentSurface(running)) {
 		runningSubagents.delete(running.id);
@@ -2404,6 +2378,32 @@ async function destroyOwnedLineageSubtree(owner: RunningSubagent): Promise<void>
   }
 }
 
+/** Persist a user-closed tab as cancellation before descendant drain can release stale settles. */
+async function recordManualTabCancellation(running: RunningSubagent): Promise<void> {
+  if (!running.lineage) return;
+  const { rootDir } = running.lineage;
+  const intentId = `manual-tab-close:${running.id}`;
+  const current = reduceLineage(rootDir).nodes.get(running.id);
+  if (!current?.cancellation?.intent) {
+    const recorded = appendLineageEvent(rootDir, intentId, "cancel_intent", running.id, {
+      surface: running.surface,
+      source: "user_tab_close",
+    });
+    if (!recorded && !reduceLineage(rootDir).nodes.get(running.id)?.cancellation?.intent) {
+      throw new Error("Unable to persist manual tab cancellation");
+    }
+  }
+  await destroyOwnedLineageSubtree(running);
+  const provenId = `manual-tab-close-proven:${running.id}`;
+  if (!appendLineageEvent(rootDir, provenId, "cancel_proven", running.id, {
+    surface: running.surface,
+    pids: [],
+    source: "user_tab_close",
+  }) && !reduceLineage(rootDir).nodes.get(running.id)?.cancellation?.proven) {
+    throw new Error("Unable to prove manual tab cancellation");
+  }
+}
+
 async function handleSubagentCancel(params: { id?: string; name?: string }): Promise<AgentToolResult<SubagentCancelDetails>> {
   const resolved = resolveInterruptTarget(params);
   if ("error" in resolved) return { content: [{ type: "text" as const, text: resolved.error }], details: { error: resolved.error } };
@@ -2472,12 +2472,19 @@ function handleSubagentInterrupt(
 	};
 }
 
-function waitingForOwnedDescendants(running: RunningSubagent): boolean {
-	if (!running.lineage) return false;
+function ownedDescendantWatchdogState(running: RunningSubagent): {
+	waitingForDescendants: boolean;
+	descendantActivityAt?: number;
+} {
+	if (!running.lineage) return { waitingForDescendants: false };
 	const state = reduceLineage(running.lineage.rootDir);
 	const integrity = lineageIntegrityError(state);
 	if (integrity) throw new Error(integrity);
-	return hasUndrainedDescendants(state, running.id);
+	const descendantActivityAt = latestDescendantDeliveryAt(state, running.id);
+	return {
+		waitingForDescendants: hasUndrainedDescendants(state, running.id),
+		...(descendantActivityAt === undefined ? {} : { descendantActivityAt }),
+	};
 }
 
 function deliverRecoveryFailure(running: RunningSubagent, reason: string): void {
@@ -2506,9 +2513,9 @@ function deliverRecoveryFailure(running: RunningSubagent, reason: string): void 
 
 async function superviseStaleSubagent(running: RunningSubagent, now: number): Promise<void> {
 	if (running.interactive || running.pendingTerminalDelivery || running.recoveryAttempt) return;
-	let waitingForDescendants = false;
+	let descendants: ReturnType<typeof ownedDescendantWatchdogState>;
 	try {
-		waitingForDescendants = waitingForOwnedDescendants(running);
+		descendants = ownedDescendantWatchdogState(running);
 	} catch (error) {
 		recordDeliveryFailure(running, `lineage:${running.id}`, error, "lineage-integrity");
 		return;
@@ -2519,7 +2526,7 @@ async function superviseStaleSubagent(running: RunningSubagent, now: number): Pr
 		startedAt: running.startTime,
 		now,
 		quietThresholdMs,
-		waitingForDescendants,
+		...descendants,
 	}) !== "stale") return;
 
 	running.recoveryAttempt = (async () => {
@@ -3097,6 +3104,8 @@ async function watchSubagent(
 	const supervisionEpoch = running.supervisionEpoch ?? 0;
 	let recoveryFailed = false;
 
+	let cancelledByUser = false;
+
 	try {
 		let result;
 		for (;;) {
@@ -3131,7 +3140,11 @@ async function watchSubagent(
 			}
 			if (!result.ping) {
 				observeRunningSubagent(running);
-				const crashedWithoutAnswer = result.paneDisappeared && !running.interactive && !terminalAssistantIdentityFor(running);
+				if (result.paneDisappeared) {
+					await recordManualTabCancellation(running);
+					cancelledByUser = true;
+					break;
+				}
 
 				if (
 					result.reason === "sentinel" &&
@@ -3141,10 +3154,7 @@ async function watchSubagent(
 					running.ignorePriorSentinelEpoch = undefined;
 					continue;
 				}
-				if (
-					(result.reason === "sentinel" && result.exitCode !== 0 && !result.errorMessage) ||
-					crashedWithoutAnswer
-				) {
+				if (result.reason === "sentinel" && result.exitCode !== 0 && !result.errorMessage) {
 					let recovery: Awaited<ReturnType<typeof attemptRecovery>> | undefined;
 					const recoveryLock = (async () => {
 						recovery = await attemptRecovery(running, "crash");
@@ -3175,9 +3185,6 @@ async function watchSubagent(
 				recordDeliveryFailure(running, `help:${running.id}:${result.ping.id ?? "unknown"}`, error, "help-request");
 			}
 		}
-
-		if (result.paneDisappeared) await destroyOwnedLineageSubtree(running);
-
 		// Flush any settled delivery observed just before terminal evidence.
 		observeRunningSubagent(running);
 		await runtime.settledDeliveryQueue.enqueue(running.id, () => undefined);
@@ -3240,7 +3247,8 @@ async function watchSubagent(
 					: `Sub-agent exited with code ${result.exitCode}`;
 		}
 
-		const closeWithAnswer = !!result.paneDisappeared && !!lastAssistant?.trim();
+		if (cancelledByUser) summary = "Subagent cancelled by user.";
+		const closeWithAnswer = !cancelledByUser && !!result.paneDisappeared && !!lastAssistant?.trim();
 		const effectiveExitCode = closeWithAnswer ? 0 : result.exitCode;
 		if (closeWithAnswer) summary = lastAssistant!;
 
@@ -3272,11 +3280,13 @@ async function watchSubagent(
 			exitCode: effectiveExitCode,
 			elapsed,
 			ping: result.ping,
-			...(!closeWithAnswer && result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+			...(!closeWithAnswer && !cancelledByUser && result.errorMessage ? { errorMessage: result.errorMessage } : {}),
 			...(closeWithAnswer ? { closeWithAnswer: true as const } : {}),
 
 			supervisionEpoch,
 			...(recoveryFailed ? { recoveryFailed: true as const } : {}),
+
+			...(cancelledByUser ? { cancelledByUser: true as const } : {}),
 			...(result.paneDisappeared ? { paneDisappeared: true as const } : {}),
 			...(worktreeHandoff ? { worktree: worktreeHandoff } : {}),
 		};
@@ -4530,7 +4540,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 								? { runtimePlan: completedRunning.runtimePlan }
 								: {}),
 						});
-              }, result.summary, result.recoveryFailed ? "recovery-failed" : result.closeWithAnswer ? "closed" : undefined);
+              }, result.summary, result.cancelledByUser ? "cancelled" : result.recoveryFailed ? "recovery-failed" : result.closeWithAnswer ? "closed" : undefined);
 					})
 					.catch((err) => {
             if (running.pendingTerminalDelivery) {
@@ -5013,7 +5023,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                     ? { runtimePlan: running.runtimePlan }
                     : {}),
 						});
-              }, summary, result.recoveryFailed ? "recovery-failed" : result.closeWithAnswer ? "closed" : undefined);
+              }, summary, result.cancelledByUser ? "cancelled" : result.recoveryFailed ? "recovery-failed" : result.closeWithAnswer ? "closed" : undefined);
 					})
 					.catch((err) => {
             if (running.pendingTerminalDelivery) {

@@ -26,13 +26,16 @@ A tool error is recoverable when a later clean assistant response is produced
 in the same settled run. The final assistant entry remains authoritative. The
 policy constant is `SETTLED_TOOL_ERROR_POLICY`.
 
-
 For an autonomous owner, a clean or empty boundary is terminal only after the
 last descendant result has been processed. Earlier boundaries update local
 waiting state but do not enter the settled delivery stream or arm a future
-shutdown. The last descendant result wakes the owner. Its next eligible
-`agent_settled` boundary arms shutdown; publication and closure wait until the
-branch is drained.
+shutdown. The stale watchdog also excludes every owner with an undrained direct
+or recursive descendant. The last descendant result wakes the owner, resets its
+quiet window, and protects the active model turn that processes the result. Its
+next eligible `agent_settled` boundary arms shutdown; publication and closure
+wait until the branch is drained. After that processing turn and quiet window,
+normal stale-leaf evaluation resumes.
+
 Persistent children keep their existing per-turn settled delivery.
 A public `SubagentTree` owner keeps its existing callback-driven drain behavior:
 its tree runtime processes child results internally, so it does not require a
@@ -46,6 +49,12 @@ new Pi turn after the last child callback.
 | `error` | deliver explicit error | keep open |
 | `intentional-abort` | suppress | keep open |
 | `unexpected-abort` | deliver explicit aborted problem | keep open |
+
+A missing owned Herdr tab is not a recoverable process crash. After the
+completion-sidecar grace period, it records a cancellation intent, stops
+descendants from the leaves upward, and publishes one `cancelled` terminal
+outcome to the exact creator. It does not consume recovery attempts. Any
+worktree stays retained.
 
 ## Identity and ordering
 

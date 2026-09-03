@@ -128,6 +128,17 @@ export function observeActivity(lifecycle, read, observedAt) {
             return null;
         }
         if (activity.phase !== "active") return null;
+        if (activity.activeScope === "compaction") {
+            const label = activity.compactionReason ? `compacting (${activity.compactionReason})` : "compacting";
+            return {
+                kind: "scope",
+                scope: "compaction",
+                since: activity.activeSince ?? activity.updatedAt,
+                observedAt: activity.updatedAt,
+                sequence: activity.sequence,
+                label
+            };
+        }
         if (activity.activeScope === "tool") {
             return {
                 kind: "scope",

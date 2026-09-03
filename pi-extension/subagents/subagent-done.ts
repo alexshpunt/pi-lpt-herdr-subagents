@@ -418,6 +418,29 @@ export default function (pi: ExtensionAPI) {
     renderWidget(ctx, null);
   });
 
+  pi.on("session_before_compact", (event) => {
+    recorder.compactionStart({
+      reason: event.reason,
+      willRetry: event.willRetry,
+    });
+  });
+
+  pi.on("session_compact", (event) => {
+    recorder.compactionSucceeded({
+      reason: event.reason,
+      willRetry: event.willRetry,
+    });
+  });
+
+  pi.on("session_compact_failed", (event) => {
+    recorder.compactionFailed({
+      reason: event.reason,
+      willRetry: event.willRetry,
+      aborted: event.aborted,
+      errorMessage: event.errorMessage,
+    });
+  });
+
   pi.on("input", () => {
     resumeInputSeen = true;
     if (shouldMarkUserTookOver(agentStarted)) intervened = true;

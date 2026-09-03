@@ -127,6 +127,7 @@ function subagentCalls(source: string): ToolCall[] {
 		const model = quotedValue(section, "model");
 		const cwd = quotedValue(section, "cwd");
 		const systemPrompt = quotedValue(section, "systemPrompt");
+		const interactive = section.match(/\binteractive:\s*(true|false)/)?.[1];
 		const skills = quotedValue(section, "skills");
 		const hasSkills = /\bskills:\s*"/.test(section);
 		const branch = section.match(
@@ -141,6 +142,7 @@ function subagentCalls(source: string): ToolCall[] {
 					...(model ? { model } : {}),
 					...(cwd ? { cwd } : {}),
 					...(systemPrompt ? { systemPrompt } : {}),
+					...(interactive ? { interactive: interactive === "true" } : {}),
 					...(hasSkills ? { skills: skills ?? "" } : {}),
 					...(section.includes("autoExit: false") ? { autoExit: false } : {}),
 					...(section.includes("fork: true") ? { fork: true } : {}),

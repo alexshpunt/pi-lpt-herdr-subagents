@@ -36,6 +36,13 @@ next eligible `agent_settled` boundary arms shutdown; publication and closure
 wait until the branch is drained. After that processing turn and quiet window,
 normal stale-leaf evaluation resumes.
 
+Manual and automatic Pi context compaction is observable active work. A
+`session_before_compact` boundary protects the leaf from stale recovery until
+`session_compact` or `session_compact_failed` records success, failure, or
+abort. The terminal boundary refreshes activity and restores the surrounding
+active or waiting state. It never requests another turn; Pi keeps ownership of
+retry, queued work, and normal settlement.
+
 Persistent children keep their existing per-turn settled delivery.
 A public `SubagentTree` owner keeps its existing callback-driven drain behavior:
 its tree runtime processes child results internally, so it does not require a

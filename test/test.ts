@@ -69,6 +69,7 @@ import {
 	createSubagentActivityRecorder,
 	getSubagentActivityFile,
 	readSubagentActivityFile,
+	type SubagentActivityState,
 } from "../pi-extension/subagents/activity.ts";
 import subagentDoneExtension, {
 	shouldMarkUserTookOver,
@@ -2587,6 +2588,71 @@ describe("subagent-done.ts", () => {
 			restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", previousAutoExit);
 		}
 	});
+	it("wires Pi compaction hooks into child activity without forcing a turn", async () => {
+		const dir = createTestDir();
+		const previousId = process.env.PI_SUBAGENT_ID;
+		const previousActivityFile = process.env.PI_SUBAGENT_ACTIVITY_FILE;
+		try {
+			const activityFile = getSubagentActivityFile(dir, "compact-hook-child");
+			process.env.PI_SUBAGENT_ID = "compact-hook-child";
+			process.env.PI_SUBAGENT_ACTIVITY_FILE = activityFile;
+			const fake = createMockExtensionApi();
+			subagentDoneExtension(fake.api);
+
+			const before = fake.eventHandlers.get("session_before_compact")?.[0];
+			const succeeded = fake.eventHandlers.get("session_compact")?.[0];
+			const failed = fake.eventHandlers.get("session_compact_failed")?.[0];
+			assert.ok(before, "session_before_compact hook must be registered");
+			assert.ok(succeeded, "session_compact hook must be registered");
+			assert.ok(failed, "session_compact_failed hook must be registered");
+
+			await before({
+				type: "session_before_compact",
+				reason: "manual",
+				willRetry: false,
+			});
+			let read = readSubagentActivityFile(activityFile, "compact-hook-child");
+			assert.ok(read.ok);
+			assert.equal(read.activity.compactionActive, true);
+
+			await succeeded({
+				type: "session_compact",
+				reason: "manual",
+				willRetry: false,
+			});
+			read = readSubagentActivityFile(activityFile, "compact-hook-child");
+			assert.ok(read.ok);
+			assert.equal(read.activity.compactionActive, false);
+
+			await before({
+				type: "session_before_compact",
+				reason: "overflow",
+				willRetry: true,
+			});
+			await failed({
+				type: "session_compact_failed",
+				reason: "overflow",
+				willRetry: true,
+				aborted: false,
+				errorMessage: "summary failed",
+			});
+			read = readSubagentActivityFile(activityFile, "compact-hook-child");
+			assert.ok(read.ok);
+			assert.equal(read.activity.compactionActive, false);
+			assert.equal(read.activity.compactionReason, "overflow");
+			assert.equal(read.activity.compactionWillRetry, true);
+			assert.equal(read.activity.compactionAborted, false);
+			assert.equal(read.activity.compactionErrorMessage, "summary failed");
+
+			assert.equal(fake.sentMessages.length, 0, "compaction must not trigger a synthetic turn");
+			assert.equal(fake.sentUserMessages.length, 0, "compaction must not send a user message");
+		} finally {
+			restoreEnvVar("PI_SUBAGENT_ID", previousId);
+			restoreEnvVar("PI_SUBAGENT_ACTIVITY_FILE", previousActivityFile);
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	describe("shouldMarkUserTookOver", () => {
 		it("ignores the initial injected task before the first agent run", () => {
 			assert.equal(shouldMarkUserTookOver(false), false);
@@ -2714,7 +2780,9 @@ describe("subagent-done.ts", () => {
 });
 
 describe("lifecycle.ts", () => {
-	const activity = (overrides: Record<string, unknown> = {}) => ({
+	const activity = (
+		overrides: Partial<SubagentActivityState> = {},
+	): SubagentActivityState => ({
 		version: 1 as const,
 		runningChildId: "child",
 		createdAt: 1_000,
@@ -2729,6 +2797,28 @@ describe("lifecycle.ts", () => {
 		activeScope: "agent" as const,
 		activeSince: 2_000,
 		...overrides,
+	});
+
+	it("projects active compaction with its Pi reason", () => {
+		const lifecycle = observeLifecycleActivity(
+			createLifecycle(1_000),
+			{
+				ok: true,
+				activity: activity({
+					latestEvent: "session_before_compact",
+					activeScope: "compaction",
+					compactionActive: true,
+					compactionReason: "threshold",
+				}),
+			},
+			2_000,
+		);
+
+		assert.deepEqual(projectLifecycle(lifecycle, 9_000), {
+			kind: "active",
+			label: "compacting (threshold)",
+			stateDurationSince: 2_000,
+		});
 	});
 
 	it("interrupts only the turn and keeps process runtime open", () => {
@@ -3835,6 +3925,64 @@ describe("subagent activity snapshots", () => {
 		});
 	});
 
+	it("records compaction as active and restores the surrounding lifecycle", () => {
+		withTempDir((dir) => {
+			let currentNow = 1_000;
+			const activityFile = getSubagentActivityFile(dir, "compact-child");
+			const recorder = createSubagentActivityRecorder({
+				runningChildId: "compact-child",
+				activityFile,
+				now: () => currentNow,
+			});
+
+			recorder.sessionStart();
+			recorder.agentStart();
+			recorder.turnStart(1);
+			currentNow = 2_000;
+			recorder.compactionStart({ reason: "threshold", willRetry: false });
+			let read = readSubagentActivityFile(activityFile, "compact-child");
+			assert.ok(read.ok);
+			assert.equal(read.activity.latestEvent, "session_before_compact");
+			assert.equal(read.activity.phase, "active");
+			assert.equal(read.activity.activeScope, "compaction");
+			assert.equal(read.activity.compactionActive, true);
+			assert.equal(read.activity.compactionReason, "threshold");
+			assert.equal(read.activity.compactionWillRetry, false);
+
+			currentNow = 500_000;
+			recorder.compactionSucceeded({ reason: "threshold", willRetry: false });
+			read = readSubagentActivityFile(activityFile, "compact-child");
+			assert.ok(read.ok);
+			assert.equal(read.activity.latestEvent, "session_compact");
+			assert.equal(read.activity.phase, "active");
+			assert.equal(read.activity.activeScope, "turn");
+			assert.equal(read.activity.compactionActive, false);
+			assert.equal(read.activity.updatedAt, 500_000);
+
+			currentNow = 600_000;
+			recorder.agentEndWaiting();
+			currentNow = 700_000;
+			recorder.compactionStart({ reason: "manual", willRetry: false });
+			currentNow = 800_000;
+			recorder.compactionFailed({
+				reason: "manual",
+				willRetry: false,
+				aborted: true,
+				errorMessage: "compaction cancelled",
+			});
+			read = readSubagentActivityFile(activityFile, "compact-child");
+			assert.ok(read.ok);
+			assert.equal(read.activity.latestEvent, "session_compact_failed");
+			assert.equal(read.activity.phase, "waiting");
+			assert.equal(read.activity.activeScope, undefined);
+			assert.equal(read.activity.compactionActive, false);
+			assert.equal(read.activity.compactionReason, "manual");
+			assert.equal(read.activity.compactionAborted, true);
+			assert.equal(read.activity.compactionErrorMessage, "compaction cancelled");
+			assert.equal(read.activity.waitingSince, 800_000);
+		});
+	});
+
 	it("rejects malformed activity fields used by classification and rendering", () => {
 		withTempDir((dir) => {
 			mkdirSync(join(dir, "subagent-activity"), { recursive: true });
@@ -3845,6 +3993,9 @@ describe("subagent activity snapshots", () => {
 				{ latestEvent: "unknown" },
 				{ runningChildId: 42 },
 				{ toolActive: "yes" },
+				{ compactionActive: "yes" },
+				{ compactionReason: "surprise" },
+				{ compactionErrorMessage: "bad\nmessage" },
 				{ toolName: "bad\nname" },
 			];
 

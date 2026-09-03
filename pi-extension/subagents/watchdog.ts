@@ -50,6 +50,7 @@ export function classifyStaleness(input: {
 }): StaleVerdict {
   if (!input.autonomous) return "active";
   if (input.waitingForDescendants) return "waiting";
+  if (input.activity?.compactionActive) return "active";
   if (input.activity?.toolActive) return "active";
 
   if (input.descendantActivityAt !== undefined && input.activity?.providerActive) return "active";

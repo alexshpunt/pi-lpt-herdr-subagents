@@ -243,6 +243,80 @@ function customResultEntries(entries: IntegrationSessionEntry[]): IntegrationSes
 	);
 }
 
+interface ActivitySnapshot {
+	runningChildId?: string;
+	latestEvent?: string;
+	phase?: string;
+	compactionActive?: boolean;
+	compactionReason?: string;
+	compactionWillRetry?: boolean;
+	activeScope?: string;
+	activeSince?: number;
+	turnActive?: boolean;
+	providerActive?: boolean;
+	toolActive?: boolean;
+}
+
+function activityFiles(root: string): string[] {
+	const artifacts = join(root, "artifacts");
+	if (!existsSync(artifacts)) return [];
+	return readdirSync(artifacts, { withFileTypes: true }).flatMap((session) => {
+		if (!session.isDirectory()) return [];
+		const directory = join(artifacts, session.name, "subagent-activity");
+		if (!existsSync(directory)) return [];
+		return readdirSync(directory)
+			.filter((file) => file.endsWith(".json"))
+			.map((file) => join(directory, file));
+	});
+}
+
+async function waitForActivity(
+	root: string,
+	predicate: (activity: ActivitySnapshot) => boolean,
+	timeout = PI_TIMEOUT,
+): Promise<{ path: string; activity: ActivitySnapshot }> {
+	const deadline = Date.now() + timeout;
+	let last: ActivitySnapshot | undefined;
+	while (Date.now() < deadline) {
+		for (const path of activityFiles(root)) {
+			try {
+				const activity = JSON.parse(readFileSync(path, "utf8")) as ActivitySnapshot;
+				last = activity;
+				if (predicate(activity)) return { path, activity };
+			} catch {
+				// The sidecar is replaced atomically; a partial read is transient.
+			}
+		}
+		await sleep(25);
+	}
+	throw new Error(`Timeout waiting for activity state; last=${JSON.stringify(last)}`);
+}
+
+function childSessionFiles(root: string, childId: string): string[] {
+	const sessions = join(root, ".pi", "agent", "sessions");
+	if (!existsSync(sessions)) return [];
+	return readdirSync(sessions, { withFileTypes: true }).flatMap((directory) => {
+		if (!directory.isDirectory()) return [];
+		return readdirSync(join(sessions, directory.name))
+			.filter((file) => file.includes(childId) && file.endsWith(".jsonl"))
+			.map((file) => join(sessions, directory.name, file));
+	});
+}
+
+async function waitForChildSession(
+	root: string,
+	childId: string,
+	timeout = PI_TIMEOUT,
+): Promise<string> {
+	const deadline = Date.now() + timeout;
+	while (Date.now() < deadline) {
+		const [sessionFile] = childSessionFiles(root, childId);
+		if (sessionFile) return sessionFile;
+		await sleep(25);
+	}
+	throw new Error(`Timeout waiting for session for child ${childId}`);
+}
+
 function listWorkspacePanes(workspaceId: string): Array<{ pane_id?: string; label?: string; agent_session?: { value?: string } }> {
 	return JSON.parse(execFileSync("herdr", ["pane", "list", "--workspace", workspaceId], { encoding: "utf8" }))
 		.result.panes as Array<{ pane_id?: string; label?: string; agent_session?: { value?: string } }>;
@@ -441,6 +515,131 @@ for (const backend of backends) {
 
 			runInPane(surface, "/btw-close");
 			await waitForNoBtwPane(env.workspaceId);
+		});
+
+		it("keeps a real child active during manual compaction until the terminal hook", async () => {
+			const id = uniqueId();
+			const childLabel = `Compaction-${id}`;
+			const compactionAgentDir = join(env.dir, ".pi", "agent");
+			const compactionEnabled = join(compactionAgentDir, "integration-compaction-enabled");
+			const gate = join(compactionAgentDir, "integration-compaction-release");
+			const parentSession = join(env.dir, `compaction-parent-${id}.jsonl`);
+			const surface = createTrackedSurface(env, `compaction-parent-${id}`);
+			await waitForPaneReady(surface);
+			writeFileSync(
+				join(env.dir, ".pi", "settings.json"),
+				JSON.stringify({ compaction: { keepRecentTokens: 1 } }),
+				"utf8",
+			);
+			writeFileSync(compactionEnabled, "enabled\n", "utf8");
+
+			startPi(
+				surface,
+				env.dir,
+				[
+					"Call the subagent tool with these EXACT parameters:",
+					`  name: "${childLabel}"`,
+					'  agent: "test-persistent"',
+					"  interactive: false",
+					`  task: "Return exactly CHILD_READY_${id}"`,
+					"Do not do anything else. Just call the subagent tool once.",
+				].join("\n"),
+				{
+					extraArgs: `--session ${shellQuote(parentSession)}`,
+					environment: {
+						PI_SUBAGENT_QUIET_THRESHOLD_MS: "200",
+					},
+				},
+			);
+
+			const childPane = await waitForAgentPane(childLabel, env.workspaceId);
+			const active = await waitForActivity(
+				env.dir,
+				(activity) =>
+					(activity.latestEvent === "agent_end" || activity.latestEvent === "agent_settled") && activity.phase === "waiting",
+				);
+			assert.equal(active.activity.compactionActive, false);
+
+			// /compact is a real Pi command. The test extension holds its
+			// session_before_compact hook so the sidecar must remain active beyond
+			// the watchdog threshold without creating a synthetic turn.
+			runInPane(childPane, "/compact");
+			const compacting = await waitForActivity(
+				env.dir,
+				(activity) =>
+					activity.latestEvent === "session_before_compact" &&
+					activity.compactionActive === true &&
+					activity.activeScope === "compaction",
+			);
+			assert.equal(compacting.activity.compactionReason, "manual");
+			assert.equal(compacting.activity.compactionWillRetry, false);
+			assert.ok(compacting.activity.activeSince);
+
+			const watchdogRefreshMs = 1_000;
+			const observed = await waitForActivity(
+				env.dir,
+				(activity) =>
+					activity.latestEvent === "session_before_compact" &&
+					activity.compactionActive === true &&
+					activity.activeSince !== undefined &&
+					Date.now() - activity.activeSince > watchdogRefreshMs * 2 + 500,
+				);
+			assert.equal(observed.path, compacting.path);
+			assert.equal(
+				listWorkspacePanes(env.workspaceId).filter((pane) => pane.label === childLabel).length,
+				1,
+				"active compaction must not trigger stale recovery",
+			);
+
+			writeFileSync(gate, "release\n", "utf8");
+			const compacted = await waitForActivity(
+				env.dir,
+				(activity) =>
+					activity.latestEvent === "session_compact" &&
+					activity.compactionActive === false,
+			);
+			assert.equal(compacted.path, compacting.path);
+			assert.equal(compacted.activity.phase, "waiting");
+			assert.equal(compacted.activity.activeScope, undefined);
+			assert.equal(compacted.activity.turnActive, false);
+			assert.equal(compacted.activity.providerActive, false);
+			assert.equal(compacted.activity.toolActive, false);
+			assert.ok(compacted.activity.runningChildId);
+			const childSession = await waitForChildSession(
+				env.dir,
+				compacted.activity.runningChildId,
+			);
+			const lineage = JSON.parse(
+				readFileSync(`${childSession}.lineage.json`, "utf8"),
+			) as { rootDir: string };
+			const deliveryLogFile = join(lineage.rootDir, "subagent-delivery.log");
+			const deliveryLog = existsSync(deliveryLogFile)
+				? readFileSync(deliveryLogFile, "utf8")
+				: "";
+			assert.doesNotMatch(
+				deliveryLog,
+				/"event":"recovery-attempt"/,
+				"active compaction must not consume a recovery attempt",
+			);
+			const childEntries = readSessionEntries(childSession);
+			const compactionIndices = childEntries.flatMap((entry, index) =>
+				entry.type === "compaction" ? [index] : [],
+			);
+			assert.equal(compactionIndices.length, 1, "manual compaction must be saved once");
+			assert.equal(
+				compactionIndices[0],
+				childEntries.length - 1,
+				"terminal compaction must not create an artificial follow-up turn",
+			);
+			assert.equal(
+				childEntries[compactionIndices[0]].summary,
+				"INTEGRATION_COMPACTION_SUMMARY",
+			);
+			assert.equal(
+				listWorkspacePanes(env.workspaceId).filter((pane) => pane.label === childLabel).length,
+				1,
+				"terminal compaction must leave the original child open",
+			);
 		});
 
 		it("spawns a subagent that writes a file and verifies the session", async () => {

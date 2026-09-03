@@ -13,7 +13,8 @@ const KNOWN_SCOPES = new Set([
     "turn",
     "provider",
     "streaming",
-    "tool"
+    "tool",
+    "compaction"
 ]);
 const KNOWN_OUTCOMES = new Set([
     "clean",
@@ -22,8 +23,16 @@ const KNOWN_OUTCOMES = new Set([
     "intentional-abort",
     "unexpected-abort"
 ]);
+const KNOWN_COMPACTION_REASONS = new Set([
+    "manual",
+    "threshold",
+    "overflow"
+]);
 const KNOWN_EVENTS = new Set([
     "session_start",
+    "session_before_compact",
+    "session_compact",
+    "session_compact_failed",
     "input",
     "before_agent_start",
     "agent_start",
@@ -102,6 +111,10 @@ function validateOptionalInteger(object, fieldName) {
 function validateBoolean(object, fieldName) {
     return typeof object[fieldName] === "boolean" ? null : `${fieldName} must be a boolean`;
 }
+function validateOptionalBoolean(object, fieldName) {
+    const value = object[fieldName];
+    return value == null || typeof value === "boolean" ? null : `${fieldName} must be a boolean when present`;
+}
 function validateOptionalActivityString(object, fieldName) {
     const value = object[fieldName];
     if (value == null) return null;
@@ -134,6 +147,9 @@ function validateActivity(value, expectedRunningChildId) {
     if (object.activeScope != null && (typeof object.activeScope !== "string" || !KNOWN_SCOPES.has(object.activeScope))) {
         return invalidActivity("unknown activeScope");
     }
+    if (object.compactionReason != null && (typeof object.compactionReason !== "string" || !KNOWN_COMPACTION_REASONS.has(object.compactionReason))) {
+        return invalidActivity("unknown compactionReason");
+    }
     if (object.settledOutcome != null && (typeof object.settledOutcome !== "string" || !KNOWN_OUTCOMES.has(object.settledOutcome))) {
         return invalidActivity("unknown settledOutcome");
     }
@@ -147,6 +163,10 @@ function validateActivity(value, expectedRunningChildId) {
         validateBoolean(object, "turnActive"),
         validateBoolean(object, "providerActive"),
         validateBoolean(object, "toolActive"),
+        validateOptionalBoolean(object, "compactionActive"),
+        validateOptionalBoolean(object, "compactionWillRetry"),
+        validateOptionalBoolean(object, "compactionAborted"),
+        validateOptionalActivityString(object, "compactionErrorMessage"),
         validateOptionalFiniteNumber(object, "activeSince"),
         validateOptionalFiniteNumber(object, "waitingSince"),
         validateOptionalInteger(object, "turnIndex"),
@@ -204,6 +224,9 @@ export function writeSubagentActivityFile(activityFile, activity) {
 function createNoopRecorder() {
     return {
         sessionStart () {},
+        compactionStart () {},
+        compactionSucceeded () {},
+        compactionFailed () {},
         input () {},
         beforeAgentStart () {},
         agentStart () {},
@@ -230,10 +253,16 @@ function clearActiveState(activity) {
     activity.turnActive = false;
     activity.providerActive = false;
     activity.toolActive = false;
+    activity.compactionActive = false;
     delete activity.activeScope;
     delete activity.activeSince;
 }
 function refreshActiveScope(activity) {
+    if (activity.compactionActive) {
+        activity.phase = "active";
+        activity.activeScope = "compaction";
+        return;
+    }
     if (activity.toolActive) {
         activity.phase = "active";
         activity.activeScope = "tool";
@@ -263,6 +292,13 @@ function markActive(activity, scope, now, resetActiveSince = false) {
     if (activity.activeSince == null || resetActiveSince) activity.activeSince = now;
     delete activity.waitingSince;
 }
+function finishCompactionActivity(activity, observedAt) {
+    activity.compactionActive = false;
+    refreshActiveScope(activity);
+    if (activity.activeScope) return;
+    activity.phase = "waiting";
+    activity.waitingSince = observedAt;
+}
 export function createSubagentActivityRecorder(params) {
     const runningChildId = params.runningChildId?.trim();
     const activityFile = params.activityFile?.trim();
@@ -282,7 +318,8 @@ export function createSubagentActivityRecorder(params) {
         agentActive: false,
         turnActive: false,
         providerActive: false,
-        toolActive: false
+        toolActive: false,
+        compactionActive: false
     };
     let disabled = false;
     let failureCount = 0;
@@ -345,6 +382,34 @@ export function createSubagentActivityRecorder(params) {
                 current.phase = "starting";
                 clearActiveState(current);
                 delete current.waitingSince;
+            }, "immediate");
+        },
+        compactionStart (details) {
+            record("session_before_compact", (current, observedAt)=>{
+                current.compactionActive = true;
+                current.compactionReason = details.reason;
+                current.compactionWillRetry = details.willRetry;
+                delete current.compactionAborted;
+                delete current.compactionErrorMessage;
+                markActive(current, "compaction", observedAt, true);
+            }, "immediate");
+        },
+        compactionSucceeded (details) {
+            record("session_compact", (current, observedAt)=>{
+                current.compactionReason = details.reason;
+                current.compactionWillRetry = details.willRetry;
+                delete current.compactionAborted;
+                delete current.compactionErrorMessage;
+                finishCompactionActivity(current, observedAt);
+            }, "immediate");
+        },
+        compactionFailed (details) {
+            record("session_compact_failed", (current, observedAt)=>{
+                current.compactionReason = details.reason;
+                current.compactionWillRetry = details.willRetry;
+                current.compactionAborted = details.aborted;
+                current.compactionErrorMessage = details.errorMessage?.slice(0, MAX_ACTIVITY_STRING_LENGTH);
+                finishCompactionActivity(current, observedAt);
             }, "immediate");
         },
         input () {

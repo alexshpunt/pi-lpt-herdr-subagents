@@ -15,10 +15,16 @@ import type {
 
 export type SubagentActivityPhase = "starting" | "active" | "waiting" | "done";
 export type SubagentActivityScope =
-  "agent" | "turn" | "provider" | "streaming" | "tool";
+  "agent" | "turn" | "provider" | "streaming" | "tool" | "compaction";
+
+/** Pi's reason for starting manual or automatic context compaction. */
+export type SubagentCompactionReason = "manual" | "threshold" | "overflow";
 
 export type SubagentActivityEvent =
   | "session_start"
+  | "session_before_compact"
+  | "session_compact"
+  | "session_compact_failed"
   | "input"
   | "before_agent_start"
   | "agent_start"
@@ -50,6 +56,17 @@ export interface SubagentActivityState {
   turnActive: boolean;
   providerActive: boolean;
   toolActive: boolean;
+
+  /** True from Pi's start hook until a success, failure, or abort hook arrives. */
+  compactionActive?: boolean;
+  /** Pi's latest manual, threshold, or overflow compaction reason. */
+  compactionReason?: SubagentCompactionReason;
+  /** Whether Pi will retry the interrupted run after this compaction. */
+  compactionWillRetry?: boolean;
+  /** Whether the latest failed compaction was cancelled or aborted. */
+  compactionAborted?: boolean;
+  /** Bounded diagnostic from the latest failed compaction. */
+  compactionErrorMessage?: string;
   activeScope?: SubagentActivityScope;
   activeSince?: number;
   waitingSince?: number;
@@ -90,6 +107,23 @@ export type SubagentShutdownReason =
 
 export interface SubagentActivityRecorder {
   sessionStart(): void;
+  /** Mark Pi context compaction as active without starting an agent turn. */
+  compactionStart(details: {
+    reason: SubagentCompactionReason;
+    willRetry: boolean;
+  }): void;
+  /** End active compaction after Pi saves its summary. */
+  compactionSucceeded(details: {
+    reason: SubagentCompactionReason;
+    willRetry: boolean;
+  }): void;
+  /** End active compaction after Pi reports failure or abort. */
+  compactionFailed(details: {
+    reason: SubagentCompactionReason;
+    willRetry: boolean;
+    aborted: boolean;
+    errorMessage?: string;
+  }): void;
   input(): void;
   beforeAgentStart(): void;
   agentStart(): void;
@@ -135,6 +169,7 @@ const KNOWN_SCOPES = new Set<SubagentActivityScope>([
   "provider",
   "streaming",
   "tool",
+  "compaction",
 ]);
 const KNOWN_OUTCOMES = new Set<SettledOutcomeKind>([
   "clean",
@@ -143,8 +178,16 @@ const KNOWN_OUTCOMES = new Set<SettledOutcomeKind>([
   "intentional-abort",
   "unexpected-abort",
 ]);
+const KNOWN_COMPACTION_REASONS = new Set<SubagentCompactionReason>([
+  "manual",
+  "threshold",
+  "overflow",
+]);
 const KNOWN_EVENTS = new Set<SubagentActivityEvent>([
   "session_start",
+  "session_before_compact",
+  "session_compact",
+  "session_compact_failed",
   "input",
   "before_agent_start",
   "agent_start",
@@ -301,6 +344,16 @@ function validateBoolean(
     : `${fieldName} must be a boolean`;
 }
 
+function validateOptionalBoolean(
+  object: Record<string, unknown>,
+  fieldName: string,
+): string | null {
+  const value = object[fieldName];
+  return value == null || typeof value === "boolean"
+    ? null
+    : `${fieldName} must be a boolean when present`;
+}
+
 function validateOptionalActivityString(
   object: Record<string, unknown>,
   fieldName: string,
@@ -352,6 +405,14 @@ function validateActivity(
   }
 
   if (
+    object.compactionReason != null &&
+    (typeof object.compactionReason !== "string" ||
+      !KNOWN_COMPACTION_REASONS.has(object.compactionReason as SubagentCompactionReason))
+  ) {
+    return invalidActivity("unknown compactionReason");
+  }
+
+  if (
     object.settledOutcome != null &&
     (typeof object.settledOutcome !== "string" ||
       !KNOWN_OUTCOMES.has(object.settledOutcome as SettledOutcomeKind))
@@ -371,6 +432,10 @@ function validateActivity(
     validateBoolean(object, "turnActive"),
     validateBoolean(object, "providerActive"),
     validateBoolean(object, "toolActive"),
+    validateOptionalBoolean(object, "compactionActive"),
+    validateOptionalBoolean(object, "compactionWillRetry"),
+    validateOptionalBoolean(object, "compactionAborted"),
+    validateOptionalActivityString(object, "compactionErrorMessage"),
     validateOptionalFiniteNumber(object, "activeSince"),
     validateOptionalFiniteNumber(object, "waitingSince"),
     validateOptionalInteger(object, "turnIndex"),
@@ -433,6 +498,9 @@ export function writeSubagentActivityFile(
 function createNoopRecorder(): SubagentActivityRecorder {
   return {
     sessionStart() {},
+    compactionStart() {},
+    compactionSucceeded() {},
+    compactionFailed() {},
     input() {},
     beforeAgentStart() {},
     agentStart() {},
@@ -460,11 +528,17 @@ function clearActiveState(activity: SubagentActivityState): void {
   activity.turnActive = false;
   activity.providerActive = false;
   activity.toolActive = false;
+  activity.compactionActive = false;
   delete activity.activeScope;
   delete activity.activeSince;
 }
 
 function refreshActiveScope(activity: SubagentActivityState): void {
+  if (activity.compactionActive) {
+    activity.phase = "active";
+    activity.activeScope = "compaction";
+    return;
+  }
   if (activity.toolActive) {
     activity.phase = "active";
     activity.activeScope = "tool";
@@ -502,6 +576,17 @@ function markActive(
   delete activity.waitingSince;
 }
 
+function finishCompactionActivity(
+  activity: SubagentActivityState,
+  observedAt: number,
+): void {
+  activity.compactionActive = false;
+  refreshActiveScope(activity);
+  if (activity.activeScope) return;
+  activity.phase = "waiting";
+  activity.waitingSince = observedAt;
+}
+
 export function createSubagentActivityRecorder(params: {
   runningChildId?: string;
   activityFile?: string;
@@ -528,6 +613,7 @@ export function createSubagentActivityRecorder(params: {
     turnActive: false,
     providerActive: false,
     toolActive: false,
+    compactionActive: false,
   };
 
   let disabled = false;
@@ -615,6 +701,49 @@ export function createSubagentActivityRecorder(params: {
         current.phase = "starting";
         clearActiveState(current);
         delete current.waitingSince;
+        },
+        "immediate",
+      );
+    },
+    compactionStart(details) {
+      record(
+        "session_before_compact",
+        (current, observedAt) => {
+          current.compactionActive = true;
+          current.compactionReason = details.reason;
+          current.compactionWillRetry = details.willRetry;
+          delete current.compactionAborted;
+          delete current.compactionErrorMessage;
+          markActive(current, "compaction", observedAt, true);
+        },
+        "immediate",
+      );
+    },
+    compactionSucceeded(details) {
+      record(
+        "session_compact",
+        (current, observedAt) => {
+          current.compactionReason = details.reason;
+          current.compactionWillRetry = details.willRetry;
+          delete current.compactionAborted;
+          delete current.compactionErrorMessage;
+          finishCompactionActivity(current, observedAt);
+        },
+        "immediate",
+      );
+    },
+    compactionFailed(details) {
+      record(
+        "session_compact_failed",
+        (current, observedAt) => {
+          current.compactionReason = details.reason;
+          current.compactionWillRetry = details.willRetry;
+          current.compactionAborted = details.aborted;
+          current.compactionErrorMessage = details.errorMessage?.slice(
+            0,
+            MAX_ACTIVITY_STRING_LENGTH,
+          );
+          finishCompactionActivity(current, observedAt);
         },
         "immediate",
       );

@@ -234,7 +234,7 @@ export function createTestEnv(backend: MuxBackend): TestEnv {
     writeFileSync(
       join(agentDir, "extensions", "subagents-under-test.ts"),
       `import extension from ${JSON.stringify(EXTENSION_SOURCE)};\n` +
-      `import { mkdirSync, writeFileSync } from "node:fs";\n` +
+      `import { existsSync, mkdirSync, writeFileSync } from "node:fs";\n` +
       `import { join } from "node:path";\n` +
       `export default function(pi) {\n` +
       `  if (!(process.env.PI_DENY_TOOLS || '').split(',').includes('subagent')) extension(pi);\n` +
@@ -254,6 +254,20 @@ export function createTestEnv(backend: MuxBackend): TestEnv {
       `    mkdirSync(mapDir, { recursive: true });\n` +
       `    writeFileSync(join(mapDir, encodeURIComponent(paneId) + '.json'), JSON.stringify({ sessionId: sessionManager.getSessionId(), sessionFile }), 'utf8');\n` +
       `  });\n` +
+      `  const compactionAgentDir = process.env.PI_CODING_AGENT_DIR;\n` +
+      `  const compactionEnabled = compactionAgentDir ? join(compactionAgentDir, 'integration-compaction-enabled') : undefined;\n` +
+      `  const compactionGate = compactionAgentDir ? join(compactionAgentDir, 'integration-compaction-release') : undefined;\n` +
+      `  if (compactionEnabled && existsSync(compactionEnabled)) {\n` +
+      `    pi.on('session_before_compact', async (event) => {\n` +
+      `      const deadline = Date.now() + 30_000;\n` +
+      `      while (compactionGate && !existsSync(compactionGate) && Date.now() < deadline && !event.signal.aborted) {\n` +
+      `        await new Promise((resolve) => setTimeout(resolve, 25));\n` +
+      `      }\n` +
+      `      if (event.signal.aborted) return { cancel: true };\n` +
+      `      if (!compactionGate || !existsSync(compactionGate)) throw new Error('Integration compaction gate was not opened');\n` +
+      `      return { compaction: { summary: 'INTEGRATION_COMPACTION_SUMMARY', firstKeptEntryId: event.preparation.firstKeptEntryId, tokensBefore: event.preparation.tokensBefore } };\n` +
+      `    });\n` +
+      `  }\n` +
       `}\n`,
       "utf8",
     );

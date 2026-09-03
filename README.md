@@ -292,13 +292,13 @@ Pending results remain bound to their recorded parent session ID and session fil
 The widget projects each sub-agent from a **process + turn lifecycle**:
 
 - **Herdr pane inspection** is the coarse authority for whether the child process is present and whether Herdr reports it as idle, working, blocked, or done.
-- **Child activity snapshots** enrich the label with Pi-only detail (tool name, streaming, etc.) when available.
+- **Child activity snapshots** enrich the label with Pi-only detail (tool name, streaming, compaction reason, etc.) when available.
 - Session JSONL is still used for transcript, resume, lineage, and result extraction — not for liveness.
 
 Projected labels include:
 
 - `starting` — launched; pane/activity confirmation is still settling
-- `active` — processing work (agent turn, provider request, streaming, or tool execution)
+- `active` — processing work (agent turn, provider request, streaming, tool execution, or context compaction)
 - `blocked` — Herdr reports the child as blocked
 - `waiting` — turn finished; the process is intentionally open for more input or another stage
 - `interrupted` — the current turn was cancelled (Escape / `subagent_interrupt`); the process stays open and is **not** treated as active processing
@@ -312,6 +312,8 @@ The widget header counts **active** vs **open**:
 - **open** — everything else still tracked (`waiting`, `interrupted`, `stalled`, `finalizing`, …)
 
 When `activeCount === 0` (every tracked row is open), the border uses an amber accent. Process elapsed time (`MM:SS` on the left) freezes when the process reaches finalizing/completed/failed. Interrupt does **not** freeze that process clock; the interrupted state shows its own duration on the right while the process remains open.
+
+Manual, threshold, and overflow context compaction stay `active` until Pi reports success, failure, or abort. The terminal hook refreshes activity and restores the surrounding active or waiting lifecycle. Pi remains responsible for retrying, processing queued work, or settling the run; the extension does not enqueue a follow-up turn or synthetic message.
 
 The extension also supervises autonomous children. Only a current lineage leaf can become stale. An owner stays protected while any direct or recursive descendant is undrained. A descendant result starts a fresh owner quiet window, and the owner remains protected while its model turn is processing that result. After the branch drains and the owner becomes quiet again, normal stale evaluation resumes. A leaf becomes stale only when Pi has produced no observable activity for longer than `status.quietThresholdMs` (120 seconds by default). Streaming updates reset the clock. Active tools have no timeout. User-driven interactive children are never killed or resumed by this watchdog.
 

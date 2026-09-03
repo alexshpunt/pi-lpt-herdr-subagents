@@ -32,6 +32,10 @@ _Avoid_: Runtime tiers, external CLI adapter, silent fallback, inherited runtime
 The single execution path for fresh and resumed children. `launchPiSubagent()` owns the complete Pi and Herdr launch transaction; completion uses Pi sidecar evidence first and the terminal exit marker as fallback.
 _Avoid_: Runtime dispatch, adapter registry, split launch ownership
 
+**Compaction activity**:
+Manual or automatic Pi context compaction recorded as active child work from its start hook through its success, failure, or abort hook. It protects a real lineage leaf from stale recovery while Pi remains responsible for retry and continuation.
+_Avoid_: Synthetic follow-up turn, compaction timeout, stale recovery during compaction
+
 **Legacy external CLI role**:
 An old role definition that contains `cli`. Discovery reports a migration diagnostic, and launch fails before Herdr creates a pane or worktree. Remove `cli` and `cli-model`, then select the model through Pi provider/model routing.
 _Avoid_: Silent Pi reinterpretation, compatibility adapter

@@ -52,6 +52,28 @@ test("classifies only autonomous observable silence as stale", () => {
   assert.equal(classifyStaleness({ ...base, activity: activity({ updatedAt: 1_500 }) }), "active");
 });
 
+test("never treats active context compaction as stale", () => {
+  const compacting = activity({
+    updatedAt: 1_000,
+    latestEvent: "session_before_compact",
+    activeScope: "compaction",
+    compactionActive: true,
+  });
+
+  assert.equal(
+    classifyStaleness({
+      autonomous: true,
+      activity: compacting,
+      startedAt: 1,
+      now: 1_000_000,
+      quietThresholdMs: 1_000,
+      waitingForDescendants: false,
+    }),
+    "active",
+    "normal compaction stays protected beyond the quiet threshold",
+  );
+});
+
 test("starts a fresh owner quiet window when a descendant result arrives", () => {
   const base = {
     autonomous: true,

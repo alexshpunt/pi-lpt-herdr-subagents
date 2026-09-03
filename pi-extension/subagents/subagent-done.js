@@ -13,7 +13,7 @@ import { createSubagentActivityRecorder } from "./activity.js";
 import { waitForDeliveryDrain } from "./delivery-drain.js";
 import { createDeliveryLog } from "./delivery-log.js";
 import { classifySettledOutcome, } from "./settled-contract.js";
-import { hasUndrainedDescendants, lineageFromEnvironment, reduceLineage, } from "./lineage.js";
+import { hasUndrainedDescendants, isLineageNodeDrained, lineageFromEnvironment, reduceLineage, } from "./lineage.js";
 export function shouldMarkUserTookOver(agentStarted) {
     return agentStarted;
 }
@@ -45,36 +45,58 @@ export async function waitForDescendantDrain(options = {}) {
         },
     });
 }
-async function waitForOwnedChildren() {
+function hasPendingOwnedChildren() {
     const contextPath = process.env.PI_SUBAGENT_TREE_CONTEXT;
     if (!contextPath)
-        return;
+        return false;
     let context;
     try {
         context = JSON.parse(readFileSync(contextPath, "utf8"));
     }
     catch {
-        return;
+        return false;
     }
     if (!context.treeDir || !context.ownerId)
-        return;
-    for (;;) {
-        const nodesDir = join(context.treeDir, "nodes");
-        const pending = existsSync(nodesDir) && readdirSync(nodesDir).some((file) => {
-            if (!file.endsWith(".json"))
-                return false;
-            try {
-                const node = JSON.parse(readFileSync(join(nodesDir, file), "utf8"));
-                return node.ownerId === context.ownerId && node.status !== "settled";
-            }
-            catch {
-                return true;
-            }
-        });
-        if (!pending)
-            return;
+        return false;
+    const nodesDir = join(context.treeDir, "nodes");
+    return existsSync(nodesDir) && readdirSync(nodesDir).some((file) => {
+        if (!file.endsWith(".json"))
+            return false;
+        try {
+            const node = JSON.parse(readFileSync(join(nodesDir, file), "utf8"));
+            return node.ownerId === context.ownerId && node.status !== "settled";
+        }
+        catch {
+            return true;
+        }
+    });
+}
+async function waitForOwnedChildren() {
+    while (hasPendingOwnedChildren()) {
         await new Promise((resolve) => setTimeout(resolve, 100));
     }
+}
+function settledChildIdFromPrompt(prompt) {
+    if (typeof prompt !== "string" || !/^Subagent .+ settled\.$/m.test(prompt))
+        return undefined;
+    return prompt.match(/^Delivery: settled:([^:\s]+):/m)?.[1];
+}
+function settledChildIdFromMessage(message) {
+    if (!message || typeof message !== "object")
+        return undefined;
+    if (message.customType !== "subagent_result")
+        return undefined;
+    if (message.details?.kind === "settled" &&
+        (message.details.outcome === "clean" || message.details.outcome === "empty") &&
+        typeof message.details.childId === "string") {
+        return message.details.childId;
+    }
+    return settledChildIdFromPrompt(message.content);
+}
+function hasOtherUndrainedDescendants(state, ownerId, settledChildId) {
+    return [...state.nodes.values()].some((child) => child.parentNodeId === ownerId &&
+        !isLineageNodeDrained(state, child.nodeId) &&
+        (child.nodeId !== settledChildId || child.autoExit !== true));
 }
 function textFromContent(content) {
     if (!Array.isArray(content))
@@ -272,6 +294,7 @@ export default function (pi) {
     }
     let latestAgentEndMessages;
     let latestTurnIndex;
+    let settledChildResultId;
     let skillInitializationComplete = false;
     // Resumed sessions replay the previous turn during startup. Do not publish
     // that historical settlement as the new resume completion.
@@ -312,6 +335,8 @@ export default function (pi) {
         recorder.input();
     });
     pi.on("before_agent_start", (event, ctx) => {
+        settledChildResultId =
+            settledChildIdFromPrompt(event.prompt) ?? settledChildResultId;
         // Each run needs fresh agent_end evidence; never reuse a prior clean turn.
         latestAgentEndMessages = undefined;
         latestTurnIndex = undefined;
@@ -385,6 +410,23 @@ export default function (pi) {
             return;
         if (intervened)
             return;
+        const observedSettledChildId = settledChildResultId;
+        settledChildResultId = undefined;
+        const terminalAutoExit =
+            autoExit && (outcome === "clean" || outcome === "empty");
+        const lineage = lineageFromEnvironment();
+        const lineageState = lineage ? reduceLineage(lineage.rootDir) : undefined;
+        const anyDescendantPending =
+            terminalAutoExit &&
+                !!lineage &&
+                !!lineageState &&
+                hasUndrainedDescendants(lineageState, lineage.nodeId);
+        const descendantPending =
+            terminalAutoExit &&
+                !!lineage &&
+                !!lineageState &&
+                hasOtherUndrainedDescendants(lineageState, lineage.nodeId, observedSettledChildId);
+        const waitsForChildResult = !treeOwner && descendantPending;
         recorder.agentSettled({
             outcome,
             assistantId: assistant.id,
@@ -392,9 +434,10 @@ export default function (pi) {
             errorMessage: assistant.errorMessage,
             empty: assistant.empty,
             turnIndex: latestTurnIndex,
-            autoExit,
+            autoExit: terminalAutoExit && !waitsForChildResult,
+            publish: !waitsForChildResult && (treeOwner || !anyDescendantPending),
         });
-        if (!autoExit || (outcome !== "clean" && outcome !== "empty"))
+        if (!terminalAutoExit || waitsForChildResult)
             return;
         void finishAfterDrain(ctx, { type: "done" });
     });
@@ -410,6 +453,10 @@ export default function (pi) {
     });
     pi.on("after_provider_response", () => {
         recorder.afterProviderResponse();
+    });
+    pi.on("message_start", (event) => {
+        settledChildResultId =
+            settledChildIdFromMessage(event.message) ?? settledChildResultId;
     });
     pi.on("message_update", (event) => {
         recorder.messageUpdate(event.assistantMessageEvent?.type);

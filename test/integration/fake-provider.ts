@@ -331,6 +331,15 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 	}
 
 	if (lastRole === "tool") {
+	if (
+		descendantOwner &&
+		source.includes("INTEGRATION_OWNER_AFTER_CHILD") &&
+		lastRole === "tool" &&
+		names.has("subagent")
+	) {
+		return { text: "OWNER_WAITING" };
+	}
+
 		if (workflowPrompt) {
 			const runId =
 				source.match(
@@ -432,6 +441,18 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 	}
 
 	if (names.has("subagent")) {
+	if (
+		descendantOwner &&
+		source.includes("INTEGRATION_OWNER_AFTER_CHILD") &&
+		/Sub-agent "[^"]+" launched and is now running in the background/.test(source)
+	) {
+		return {
+			text: source.includes("GRANDCHILD_DONE")
+				? "OWNER_AFTER_CHILD"
+				: "OWNER_WAITING",
+		};
+	}
+
 		if (/Sub-agent "[^"]+" launched and is now running in the background/.test(source)) {
 			const continuation = source.match(
 				/\b(?:say|respond with)\s+([A-Z][A-Za-z0-9_]*)/,

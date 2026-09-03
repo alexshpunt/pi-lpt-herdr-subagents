@@ -26,8 +26,10 @@ import {
 } from "./settled-contract.ts";
 import {
   hasUndrainedDescendants,
+  isLineageNodeDrained,
   lineageFromEnvironment,
   reduceLineage,
+  type LineageState,
 } from "./lineage.ts";
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
   return agentStarted;
@@ -68,26 +70,63 @@ export async function waitForDescendantDrain(options: {
   });
 }
 
-async function waitForOwnedChildren(): Promise<void> {
+function hasPendingOwnedChildren(): boolean {
   const contextPath = process.env.PI_SUBAGENT_TREE_CONTEXT;
-  if (!contextPath) return;
+  if (!contextPath) return false;
   let context: { treeDir?: string; ownerId?: string };
-  try { context = JSON.parse(readFileSync(contextPath, "utf8")); } catch { return; }
-  if (!context.treeDir || !context.ownerId) return;
-  for (;;) {
-    const nodesDir = join(context.treeDir, "nodes");
-    const pending = existsSync(nodesDir) && readdirSync(nodesDir).some((file) => {
-      if (!file.endsWith(".json")) return false;
-      try {
-        const node = JSON.parse(readFileSync(join(nodesDir, file), "utf8"));
-        return node.ownerId === context.ownerId && node.status !== "settled";
-      } catch { return true; }
-    });
-    if (!pending) return;
+  try { context = JSON.parse(readFileSync(contextPath, "utf8")); } catch { return false; }
+  if (!context.treeDir || !context.ownerId) return false;
+  const nodesDir = join(context.treeDir, "nodes");
+  return existsSync(nodesDir) && readdirSync(nodesDir).some((file) => {
+    if (!file.endsWith(".json")) return false;
+    try {
+      const node = JSON.parse(readFileSync(join(nodesDir, file), "utf8"));
+      return node.ownerId === context.ownerId && node.status !== "settled";
+    } catch { return true; }
+  });
+}
+
+async function waitForOwnedChildren(): Promise<void> {
+  while (hasPendingOwnedChildren()) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
 
+
+function settledChildIdFromPrompt(prompt: unknown): string | undefined {
+  if (typeof prompt !== "string" || !/^Subagent .+ settled\.$/m.test(prompt)) return undefined;
+  return prompt.match(/^Delivery: settled:([^:\s]+):/m)?.[1];
+}
+
+
+function settledChildIdFromMessage(message: unknown): string | undefined {
+  if (!message || typeof message !== "object") return undefined;
+  const value = message as {
+    customType?: unknown;
+    content?: unknown;
+    details?: { kind?: unknown; outcome?: unknown; childId?: unknown };
+  };
+  if (value.customType !== "subagent_result") return undefined;
+  if (
+    value.details?.kind === "settled" &&
+    (value.details.outcome === "clean" || value.details.outcome === "empty") &&
+    typeof value.details.childId === "string"
+  ) {
+    return value.details.childId;
+  }
+  return settledChildIdFromPrompt(value.content);
+}
+function hasOtherUndrainedDescendants(
+  state: LineageState,
+  ownerId: string,
+  settledChildId: string | undefined,
+): boolean {
+  return [...state.nodes.values()].some((child) =>
+    child.parentNodeId === ownerId &&
+    !isLineageNodeDrained(state, child.nodeId) &&
+    (child.nodeId !== settledChildId || child.autoExit !== true)
+  );
+}
 function textFromContent(content: unknown): string {
   if (!Array.isArray(content)) return "";
   return content
@@ -344,6 +383,7 @@ export default function (pi: ExtensionAPI) {
 
   let latestAgentEndMessages: any[] | undefined;
   let latestTurnIndex: number | undefined;
+  let settledChildResultId: string | undefined;
 	let skillInitializationComplete = false;
   // Resumed sessions replay the previous turn during startup. Do not publish
   // that historical settlement as the new resume completion.
@@ -385,6 +425,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", (event, ctx) => {
+    settledChildResultId =
+      settledChildIdFromPrompt(event.prompt) ?? settledChildResultId;
     // Each run needs fresh agent_end evidence; never reuse a prior clean turn.
     latestAgentEndMessages = undefined;
     latestTurnIndex = undefined;
@@ -461,6 +503,29 @@ export default function (pi: ExtensionAPI) {
 
     if (intervened) return;
 
+
+    const observedSettledChildId = settledChildResultId;
+    settledChildResultId = undefined;
+    const terminalAutoExit =
+      autoExit && (outcome === "clean" || outcome === "empty");
+    const lineage = lineageFromEnvironment();
+    const lineageState = lineage ? reduceLineage(lineage.rootDir) : undefined;
+    const anyDescendantPending =
+      terminalAutoExit &&
+      !!lineage &&
+      !!lineageState &&
+      hasUndrainedDescendants(lineageState, lineage.nodeId);
+    const descendantPending =
+      terminalAutoExit &&
+      !!lineage &&
+      !!lineageState &&
+      hasOtherUndrainedDescendants(
+        lineageState,
+        lineage.nodeId,
+        observedSettledChildId,
+      );
+    const waitsForChildResult = !treeOwner && descendantPending;
+
     recorder.agentSettled({
       outcome,
       assistantId: assistant.id,
@@ -468,10 +533,12 @@ export default function (pi: ExtensionAPI) {
       errorMessage: assistant.errorMessage,
       empty: assistant.empty,
       turnIndex: latestTurnIndex,
-      autoExit,
+      autoExit: terminalAutoExit && !waitsForChildResult,
+      publish:
+        !waitsForChildResult && (treeOwner || !anyDescendantPending),
     });
 
-    if (!autoExit || (outcome !== "clean" && outcome !== "empty")) return;
+    if (!terminalAutoExit || waitsForChildResult) return;
     void finishAfterDrain(ctx, { type: "done" });
   });
 
@@ -490,6 +557,11 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("after_provider_response", () => {
     recorder.afterProviderResponse();
+  });
+
+  pi.on("message_start", (event) => {
+    settledChildResultId =
+      settledChildIdFromMessage((event as any).message) ?? settledChildResultId;
   });
 
   pi.on("message_update", (event) => {

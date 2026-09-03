@@ -8,6 +8,10 @@ import subagentDoneExtension, {
   newestAssistantEntry,
 } from "../pi-extension/subagents/subagent-done.ts";
 import {
+  appendLineageEvent,
+  registerLineage,
+} from "../pi-extension/subagents/lineage.ts";
+import {
   getSubagentActivityFile,
   getSubagentSettledEventsFile,
   readSubagentActivityFile,
@@ -15,7 +19,10 @@ import {
 } from "../pi-extension/subagents/activity.ts";
 
 function createApi() {
-  const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => void>>();
+  const handlers = new Map<
+    string,
+    Array<(event: unknown, ctx: unknown) => void | Promise<void>>
+  >();
   let shutdowns = 0;
   const api = {
     on(event: string, handler: (event: unknown, ctx: unknown) => void) {
@@ -30,6 +37,15 @@ function createApi() {
     get shutdowns() { return shutdowns; },
     emit(event: string, payload: unknown = {}, ctx: unknown = { shutdown: () => { shutdowns += 1; } }) {
       for (const handler of handlers.get(event) ?? []) handler(payload, ctx);
+    },
+    async emitAsync(
+      event: string,
+      payload: unknown = {},
+      ctx: unknown = { shutdown: () => { shutdowns += 1; } },
+    ) {
+      await Promise.all(
+        (handlers.get(event) ?? []).map((handler) => handler(payload, ctx)),
+      );
     },
   };
 }
@@ -82,6 +98,67 @@ const empty = (id = "assistant-empty") => ({ id, role: "assistant", stopReason: 
 const error = (id = "assistant-error") => ({ id, role: "assistant", stopReason: "error", errorMessage: "provider failed" });
 const aborted = (id = "assistant-aborted") => ({ id, role: "assistant", stopReason: "aborted" });
 
+
+async function withOwnedDescendant(
+  run: (paths: {
+    session: string;
+    descendantId: string;
+    lineageRoot: string;
+  }) => Promise<void>,
+): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), "settled-owner-descendant-"));
+  const session = join(dir, "owner.jsonl");
+  const owner = registerLineage({ artifactDir: dir, nodeId: "child-1" });
+  const descendantId = "descendant-1";
+  registerLineage({
+    artifactDir: dir,
+    nodeId: descendantId,
+    parentNodeId: owner.nodeId,
+    inheritedRootDir: owner.rootDir,
+    inheritedRootId: owner.rootId,
+  });
+  appendLineageEvent(
+    owner.rootDir,
+    `metadata:${descendantId}:1`,
+    "launch_metadata",
+    descendantId,
+    { autoExit: true, startTime: 1 },
+  );
+  const old = {
+    autoExit: process.env.PI_SUBAGENT_AUTO_EXIT,
+    session: process.env.PI_SUBAGENT_SESSION,
+    id: process.env.PI_SUBAGENT_ID,
+    activity: process.env.PI_SUBAGENT_ACTIVITY_FILE,
+    settledEvents: process.env.PI_SUBAGENT_SETTLED_EVENTS_FILE,
+    lineageDir: process.env.PI_SUBAGENT_LINEAGE_DIR,
+    lineageRoot: process.env.PI_SUBAGENT_LINEAGE_ROOT,
+  };
+  process.env.PI_SUBAGENT_AUTO_EXIT = "1";
+  process.env.PI_SUBAGENT_SESSION = session;
+  process.env.PI_SUBAGENT_ID = owner.nodeId;
+  process.env.PI_SUBAGENT_ACTIVITY_FILE = getSubagentActivityFile(dir, owner.nodeId);
+  process.env.PI_SUBAGENT_SETTLED_EVENTS_FILE = getSubagentSettledEventsFile(dir, owner.nodeId);
+  process.env.PI_SUBAGENT_LINEAGE_DIR = owner.rootDir;
+  process.env.PI_SUBAGENT_LINEAGE_ROOT = owner.rootId;
+  try {
+    await run({ session, descendantId, lineageRoot: owner.rootDir });
+  } finally {
+    const values: Record<string, string | undefined> = {
+      PI_SUBAGENT_AUTO_EXIT: old.autoExit,
+      PI_SUBAGENT_SESSION: old.session,
+      PI_SUBAGENT_ID: old.id,
+      PI_SUBAGENT_ACTIVITY_FILE: old.activity,
+      PI_SUBAGENT_SETTLED_EVENTS_FILE: old.settledEvents,
+      PI_SUBAGENT_LINEAGE_DIR: old.lineageDir,
+      PI_SUBAGENT_LINEAGE_ROOT: old.lineageRoot,
+    };
+    for (const [key, value] of Object.entries(values)) {
+      if (value == null) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 describe("settled child event boundary", () => {
   it("does not shut down at agent_end and shuts down once at clean agent_settled", () => {
     withChildEnv(({ session, activity }) => {
@@ -109,7 +186,54 @@ describe("settled child event boundary", () => {
     });
   });
 
+
+  it("waits for a new settled turn after the last descendant result", async () => {
+    await withOwnedDescendant(async ({ session, descendantId, lineageRoot }) => {
+      const fake = createApi();
+      subagentDoneExtension(fake.api);
+
+      fake.emit("agent_end", { messages: [clean("owner-before-child")] });
+      fake.emit("agent_settled");
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(fake.shutdowns, 0);
+      assert.equal(existsSync(`${session}.exit`), false);
+
+      appendLineageEvent(
+        lineageRoot,
+        `terminal:${descendantId}`,
+        "terminal",
+        descendantId,
+        { outcome: "success" },
+      );
+      appendLineageEvent(
+        lineageRoot,
+        `terminal-delivered:${descendantId}`,
+        "terminal_delivered",
+        descendantId,
+        { deliveryId: `terminal:${descendantId}` },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      assert.equal(
+        fake.shutdowns,
+        0,
+        "descendant drain alone must not close its owner",
+      );
+      assert.equal(existsSync(`${session}.exit`), false);
+
+      fake.emit("before_agent_start");
+      fake.emit("agent_end", { messages: [clean("owner-after-child")] });
+      await fake.emitAsync("agent_settled");
+
+      assert.equal(fake.shutdowns, 1);
+      assert.deepEqual(JSON.parse(readFileSync(`${session}.exit`, "utf8")), {
+        type: "done",
+      });
+    });
+  });
+
   it("records clean settled turns without closing a persistent child", () => {
+
     withChildEnv(({ session, activity }) => {
       const fake = createApi();
       subagentDoneExtension(fake.api);
@@ -129,6 +253,56 @@ describe("settled child event boundary", () => {
       }
     }, false);
 
+  });
+  it("settles after processing the last autonomous child before terminal delivery finishes", async () => {
+    await withOwnedDescendant(async ({ session, descendantId, lineageRoot }) => {
+      const fake = createApi();
+      subagentDoneExtension(fake.api);
+
+      fake.emit("agent_end", { messages: [clean("owner-before-child")] });
+      fake.emit("agent_settled");
+      assert.equal(fake.shutdowns, 0);
+
+      fake.emit("message_start", {
+        message: {
+          customType: "subagent_result",
+          content: "Subagent Descendant settled.",
+          details: {
+            kind: "settled",
+            outcome: "clean",
+            childId: descendantId,
+          },
+        },
+      });
+      fake.emit("before_agent_start");
+      fake.emit("agent_end", { messages: [clean("owner-after-child")] });
+      fake.emit("agent_settled");
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      assert.equal(fake.shutdowns, 0);
+      assert.equal(existsSync(`${session}.exit`), false);
+
+      appendLineageEvent(
+        lineageRoot,
+        `terminal:${descendantId}`,
+        "terminal",
+        descendantId,
+        { outcome: "success" },
+      );
+      appendLineageEvent(
+        lineageRoot,
+        `terminal-delivered:${descendantId}`,
+        "terminal_delivered",
+        descendantId,
+        { deliveryId: `terminal:${descendantId}` },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      assert.equal(fake.shutdowns, 1);
+      assert.deepEqual(JSON.parse(readFileSync(`${session}.exit`, "utf8")), {
+        type: "done",
+      });
+    });
   });
 
 

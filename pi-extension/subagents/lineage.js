@@ -196,6 +196,8 @@ export function reduceLineage(rootDir) {
                 node.agent = event.agent;
             if (typeof event.surface === "string")
                 node.surface = event.surface;
+            if (typeof event.tabId === "string")
+                node.tabId = event.tabId;
             if (typeof event.sessionFile === "string")
                 node.sessionFile = event.sessionFile;
             if (typeof event.activityFile === "string")
@@ -206,6 +208,8 @@ export function reduceLineage(rootDir) {
                 node.startTime = event.startTime;
             if (typeof event.interactive === "boolean")
                 node.interactive = event.interactive;
+            if (typeof event.autoExit === "boolean")
+                node.autoExit = event.autoExit;
             if (typeof event.workspaceId === "string")
                 node.workspaceId = event.workspaceId;
             if (typeof event.cwd === "string")

@@ -38,6 +38,7 @@ import {
 
 	createSubagentPaneInWorkspace,
 	closePane,
+	getPaneTabId,
 	createSubagentWorktree,
 	runScriptInPane,
 	shellQuote,
@@ -144,6 +145,7 @@ export interface PiRunningChild {
 	agent?: string;
 	surface: string;
 	startTime: number;
+	tabId?: string;
 	sessionFile: string;
 	launchScriptFile: string;
 	activityFile: string;
@@ -207,6 +209,7 @@ interface ResolvedLaunch {
 
 interface PreparedSurface {
 	surface: string;
+	tabId?: string;
 	targetCwd: string;
 	effectiveAgentDir: string;
 	localAgentDir: string | null;
@@ -300,12 +303,14 @@ async function launchFreshPiSubagent(
 				task: request.task,
 				agent: request.agent,
 				surface: artifacts.surface,
+				tabId: artifacts.tabId,
 				sessionFile: artifacts.sessionFile,
 				activityFile: artifacts.activityFile,
 				settledEventsFile: artifacts.settledEventsFile,
 				startTime: resolved.startTime,
 
 				interactive: request.behavior.interactive,
+				autoExit: request.behavior.autoExit,
 				cwd: artifacts.targetCwd,
 				...(artifacts.worktree?.workspaceId ? { workspaceId: artifacts.worktree.workspaceId } : {}),
 			});
@@ -372,8 +377,11 @@ function prepareLaunchSurface(
 ): PreparedSurface {
 	const { request } = resolved;
 	if (!request.worktree) {
+		const surface = request.surface ?? operations.createPane(request.name);
+		const tabId = getPaneTabId(surface);
 		return {
-			surface: request.surface ?? operations.createPane(request.name),
+			surface,
+			...(tabId ? { tabId } : {}),
 			targetCwd: resolved.sourceCwd,
 			effectiveAgentDir: resolved.localAgentDir ?? resolved.agentDir,
 			localAgentDir: resolved.localAgentDir,
@@ -709,6 +717,7 @@ function createRunningChild(
 		agent: resolved.request.agent,
 		surface: artifacts.surface,
 		startTime: resolved.startTime,
+		...(artifacts.tabId ? { tabId: artifacts.tabId } : {}),
 		sessionFile: artifacts.sessionFile,
 		launchScriptFile,
 		activityFile: artifacts.activityFile,
@@ -754,6 +763,7 @@ async function launchResumedPiSubagent(
 	const interactive = request.behavior?.interactive ?? !autoExit;
 	const startTime = Date.now();
 	const surface = request.surface ?? operations.createPane(request.name, request.workspace);
+	const tabId = getPaneTabId(surface);
 	await operations.waitForShellReady(surface);
 	const activityFile = getSubagentActivityFile(artifactDir, id);
 	writeFileSync(`${request.sessionFile}.lineage.json`, JSON.stringify(lineage), "utf8");
@@ -766,10 +776,12 @@ async function launchResumedPiSubagent(
 			task: request.message ?? "resumed session",
 			surface,
 			sessionFile: request.sessionFile,
+			tabId,
 			activityFile,
 			settledEventsFile,
 			startTime,
 			interactive,
+			autoExit,
 			...(request.workspace ? { workspaceId: request.workspace.id, cwd: request.workspace.cwd } : {}),
 		});
 	}
@@ -836,6 +848,7 @@ async function launchResumedPiSubagent(
 		surface,
 		startTime,
 		sessionFile: request.sessionFile,
+		...(tabId ? { tabId } : {}),
 		launchScriptFile,
 		activityFile,
     settledEventsFile,

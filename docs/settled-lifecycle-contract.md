@@ -26,12 +26,23 @@ A tool error is recoverable when a later clean assistant response is produced
 in the same settled run. The final assistant entry remains authoritative. The
 policy constant is `SETTLED_TOOL_ERROR_POLICY`.
 
+
+For an autonomous owner, a clean or empty boundary is terminal only after the
+last descendant result has been processed. Earlier boundaries update local
+waiting state but do not enter the settled delivery stream or arm a future
+shutdown. The last descendant result wakes the owner. Its next eligible
+`agent_settled` boundary arms shutdown; publication and closure wait until the
+branch is drained.
+Persistent children keep their existing per-turn settled delivery.
+A public `SubagentTree` owner keeps its existing callback-driven drain behavior:
+its tree runtime processes child results internally, so it does not require a
+new Pi turn after the last child callback.
 `SETTLED_OUTCOME_POLICY` freezes the parent and child action for each outcome:
 
 | Outcome | Parent | Child |
 | --- | --- | --- |
-| `clean` | record for delivery after recursive descendants drain | record auto-exit intent; close after recursive descendants drain |
-| `empty` | record explicit empty result for delivery after recursive descendants drain | record auto-exit intent; close after recursive descendants drain |
+| `clean` | persistent: record; autonomous: record only when no descendant result remains to process | autonomous: close from that boundary after final branch drain |
+| `empty` | persistent: record explicit empty result; autonomous: record only when no descendant result remains to process | autonomous: close from that boundary after final branch drain |
 | `error` | deliver explicit error | keep open |
 | `intentional-abort` | suppress | keep open |
 | `unexpected-abort` | deliver explicit aborted problem | keep open |

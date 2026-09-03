@@ -7,11 +7,12 @@ import {
 	readFileSync,
 	mkdirSync,
 	rmSync,
+	chmodSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
 	createEventBus,
 	SessionManager,
@@ -43,6 +44,7 @@ import {
 import {
 	isHerdrAvailable,
 	waitForProcessesExit,
+	closeHerdrSurface,
 	__herdrTest__,
 } from "../pi-extension/subagents/herdr.ts";
 import {
@@ -113,6 +115,49 @@ function createTestDir(): string {
 	return mkdtempSync(join(tmpdir(), "subagents-test-"));
 }
 
+
+function withFakeHerdrClose(
+	run: (logFile: string, executableDir: string) => void,
+): void {
+	const dir = mkdtempSync(join(tmpdir(), "subagents-herdr-close-"));
+	const executable = join(dir, "herdr");
+	const logFile = join(dir, "calls.log");
+	writeFileSync(
+		executable,
+		[
+			"#!/bin/sh",
+			'printf \'%s\\n\' "$*" >> "$HERDR_CLOSE_LOG"',
+			'if [ "$3" = "missing-pane" ]; then',
+			'  printf \'{"error":{"code":"pane_not_found","message":"pane missing-pane not found"}}\\n\' >&2',
+			"  exit 1",
+			"fi",
+			'if [ "$1" = "pane" ] && [ "$2" = "get" ]; then',
+			'  printf \'{"result":{"pane":{"pane_id":"%s","tab_id":"tab-7"}}}\\n\' "$3"',
+			"  exit 0",
+			"fi",
+			'if [ "$1" = "tab" ] && [ "$2" = "close" ] && [ "$3" = "tab-7" ]; then',
+			'  printf \'{"result":{"type":"tab_closed"}}\\n\'',
+			"  exit 0",
+			"fi",
+			'printf \'unexpected herdr call: %s\\n\' "$*" >&2',
+			"exit 1",
+		].join("\n") + "\n",
+	);
+	chmodSync(executable, 0o755);
+	const oldPath = process.env.PATH;
+	const oldLog = process.env.HERDR_CLOSE_LOG;
+	process.env.PATH = `${dir}:${oldPath ?? ""}`;
+	process.env.HERDR_CLOSE_LOG = logFile;
+	try {
+		run(logFile, dir);
+	} finally {
+		if (oldPath == null) delete process.env.PATH;
+		else process.env.PATH = oldPath;
+		if (oldLog == null) delete process.env.HERDR_CLOSE_LOG;
+		else process.env.HERDR_CLOSE_LOG = oldLog;
+		rmSync(dir, { recursive: true, force: true });
+	}
+}
 function createSessionFile(dir: string, entries: object[]): string {
 	const file = join(dir, "test-session.jsonl");
 	const content = entries.map((e) => JSON.stringify(e)).join("\n") + "\n";
@@ -5151,6 +5196,41 @@ describe("herdr.ts", () => {
 	});
 
 	describe("herdr response parsing", () => {
+		it("closes the dedicated tab that owns an ordinary subagent pane", () => {
+			withFakeHerdrClose((logFile) => {
+				closeHerdrSurface("pane-7");
+				assert.deepEqual(readFileSync(logFile, "utf8").trim().split("\n"), [
+					"pane get pane-7",
+					"tab close tab-7",
+				]);
+			});
+		});
+
+		it("treats repeated close of a missing pane as silent success", () => {
+			withFakeHerdrClose((logFile) => {
+				const moduleUrl = new URL(
+					"../pi-extension/subagents/herdr.ts",
+					import.meta.url,
+				).href;
+				const result = spawnSync(
+					process.execPath,
+					[
+						"--experimental-strip-types",
+						"--input-type=module",
+						"--eval",
+						`import { closeHerdrSurface } from ${JSON.stringify(moduleUrl)}; closeHerdrSurface("missing-pane"); closeHerdrSurface("missing-pane");`,
+					],
+					{ encoding: "utf8", env: process.env },
+				);
+				assert.equal(result.status, 0, result.stderr);
+				assert.equal(result.stderr, "");
+				assert.deepEqual(readFileSync(logFile, "utf8").trim().split("\n"), [
+					"pane get missing-pane",
+					"pane get missing-pane",
+				]);
+			});
+		});
+
 		it("extracts pane id from a pane split response", () => {
 			const output = JSON.stringify({
 				result: {

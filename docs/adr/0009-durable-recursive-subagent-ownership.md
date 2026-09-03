@@ -12,11 +12,18 @@ Herdr pane or workspace exists. Descendants inherit an explicit root and
 immediate-parent node identity. Stable event and effect IDs make concurrent
 writes and retries idempotent without a resident coordinator.
 
-Settled and terminal results wait until recursive descendants drain. A node
-drains only after its terminal outcome is recorded once in its exact parent
-sink and every descendant has drained. Held settled results are then released
-in their original order. Interrupt and stall are not terminal outcomes.
+Publishable settled and terminal results wait until recursive descendants drain.
+A persistent owner keeps held settled results in their original order. An
+autonomous owner's intermediate clean or empty response is not publishable while
+a descendant still owes a result. The descendant result wakes that owner; only
+a new eligible `agent_settled` boundary may publish the owner's answer and arm
+shutdown. A node drains only after its terminal outcome is recorded once in its
+exact parent sink and every descendant has drained. Interrupt and stall are not
+terminal outcomes.
 
+Public `SubagentTree` owners keep their callback-driven drain behavior because
+the tree runtime processes child results internally rather than through a new Pi
+turn.
 A session sink is bound to the recorded parent session ID and file. Recording
 its durable inbox entry completes delivery even while that session is closed;
 the entry materializes once when that exact session is restored. Delivery does
@@ -40,8 +47,10 @@ preparing session.
 
 Cancellation is terminal only after pane absence and process exit are proven
 and its result reaches the parent sink. Cleanup is separate from delivery.
-Missing panes are an idempotent cleanup success; other failures remain visible
-and retryable without blocking drain or replaying a result. Pre-lineage evidence
+Missing panes or tabs are an idempotent cleanup success. A finished ordinary
+subagent closes its dedicated Herdr tab so no empty tab header remains; retained
+worktree cleanup is unchanged. Other failures remain visible and retryable
+without blocking drain or replaying a result. Pre-lineage evidence
 stays unknown and is never inferred or acted on.
 
 ## Consequences

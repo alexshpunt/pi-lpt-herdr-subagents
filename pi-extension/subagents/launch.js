@@ -9,7 +9,7 @@ import { getSubagentActivityFile, getSubagentSettledEventsFile, } from "./activi
 import { createLifecycle } from "./lifecycle.js";
 import { HerdrWorktreeCreateError } from "./herdr.js";
 import { captureSessionBaseline, createWorktreeSessionFork, seedStandaloneSessionFile, seedSubagentSessionFile, } from "./session.js";
-import { createSubagentPane, createSubagentPaneInWorkspace, closePane, createSubagentWorktree, runScriptInPane, shellQuote, waitForPiReady, waitForShellReady, focusWorkspace, } from "./terminal.js";
+import { createSubagentPane, createSubagentPaneInWorkspace, closePane, getPaneTabId, createSubagentWorktree, runScriptInPane, shellQuote, waitForPiReady, waitForShellReady, focusWorkspace, } from "./terminal.js";
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 const defaultOperations = {
     createPane: (name, workspace) => workspace
@@ -89,11 +89,13 @@ async function launchFreshPiSubagent(request, operations) {
                 task: request.task,
                 agent: request.agent,
                 surface: artifacts.surface,
+                tabId: artifacts.tabId,
                 sessionFile: artifacts.sessionFile,
                 activityFile: artifacts.activityFile,
                 settledEventsFile: artifacts.settledEventsFile,
                 startTime: resolved.startTime,
                 interactive: request.behavior.interactive,
+                autoExit: request.behavior.autoExit,
                 cwd: artifacts.targetCwd,
                 ...(artifacts.worktree?.workspaceId ? { workspaceId: artifacts.worktree.workspaceId } : {}),
             });
@@ -158,8 +160,11 @@ function resolveLaunchRequest(request) {
 function prepareLaunchSurface(resolved, operations) {
     const { request } = resolved;
     if (!request.worktree) {
+        const surface = request.surface ?? operations.createPane(request.name);
+        const tabId = getPaneTabId(surface);
         return {
-            surface: request.surface ?? operations.createPane(request.name),
+            surface,
+            ...(tabId ? { tabId } : {}),
             targetCwd: resolved.sourceCwd,
             effectiveAgentDir: resolved.localAgentDir ?? resolved.agentDir,
             localAgentDir: resolved.localAgentDir,
@@ -410,6 +415,7 @@ function createRunningChild(resolved, artifacts, launchScriptFile, sessionBaseli
         surface: artifacts.surface,
         startTime: resolved.startTime,
         sessionFile: artifacts.sessionFile,
+        ...(artifacts.tabId ? { tabId: artifacts.tabId } : {}),
         launchScriptFile,
         activityFile: artifacts.activityFile,
         settledEventsFile: artifacts.settledEventsFile,
@@ -451,6 +457,7 @@ async function launchResumedPiSubagent(request, operations) {
     const interactive = request.behavior?.interactive ?? !autoExit;
     const startTime = Date.now();
     const surface = request.surface ?? operations.createPane(request.name, request.workspace);
+    const tabId = getPaneTabId(surface);
     await operations.waitForShellReady(surface);
     const activityFile = getSubagentActivityFile(artifactDir, id);
     writeFileSync(`${request.sessionFile}.lineage.json`, JSON.stringify(lineage), "utf8");
@@ -462,10 +469,12 @@ async function launchResumedPiSubagent(request, operations) {
             task: request.message ?? "resumed session",
             surface,
             sessionFile: request.sessionFile,
+            tabId,
             activityFile,
             settledEventsFile,
             startTime,
             interactive,
+            autoExit,
             ...(request.workspace ? { workspaceId: request.workspace.id, cwd: request.workspace.cwd } : {}),
         });
     }
@@ -519,6 +528,7 @@ async function launchResumedPiSubagent(request, operations) {
         surface,
         startTime,
         sessionFile: request.sessionFile,
+        ...(tabId ? { tabId } : {}),
         launchScriptFile,
         activityFile,
         settledEventsFile,

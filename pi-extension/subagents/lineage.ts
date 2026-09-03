@@ -37,12 +37,14 @@ export interface LineageNodeState {
   task?: string;
   agent?: string;
   surface?: string;
+  tabId?: string;
   sessionFile?: string;
   activityFile?: string;
   settledEventsFile?: string;
   startTime?: number;
 
   interactive?: boolean;
+  autoExit?: boolean;
   workspaceId?: string;
   cwd?: string;
   terminal?: { outcome: string; resultId?: string; resultContent?: string };
@@ -259,12 +261,14 @@ export function reduceLineage(rootDir: string): LineageState {
       if (typeof event.task === "string") node.task = event.task;
       if (typeof event.agent === "string") node.agent = event.agent;
       if (typeof event.surface === "string") node.surface = event.surface;
+      if (typeof event.tabId === "string") node.tabId = event.tabId;
       if (typeof event.sessionFile === "string") node.sessionFile = event.sessionFile;
       if (typeof event.activityFile === "string") node.activityFile = event.activityFile;
       if (typeof event.settledEventsFile === "string") node.settledEventsFile = event.settledEventsFile;
       if (typeof event.startTime === "number") node.startTime = event.startTime;
 
       if (typeof event.interactive === "boolean") node.interactive = event.interactive;
+      if (typeof event.autoExit === "boolean") node.autoExit = event.autoExit;
       if (typeof event.workspaceId === "string") node.workspaceId = event.workspaceId;
       if (typeof event.cwd === "string") node.cwd = event.cwd;
     } else if (event.type === "cancel_intent" || event.type === "cancel_identity" || event.type === "cancel_proven") {

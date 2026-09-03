@@ -30,6 +30,7 @@ import {
 	createSubagentPane,
 	runScriptInPane,
 	closePane,
+	rememberPaneTab,
 	interruptPane,
 	shellQuote,
 	readPaneAsync,
@@ -752,6 +753,7 @@ interface RunningSubagent {
 	agent?: string;
 	surface: string;
 	startTime: number;
+	tabId?: string;
 	sessionFile: string;
 	launchScriptFile?: string;
 	activityFile?: string;
@@ -1075,6 +1077,7 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
         agent: node.agent,
         surface: node.surface,
         startTime: node.startTime ?? Date.now(),
+        ...(node.tabId ? { tabId: node.tabId } : {}),
         sessionFile: node.sessionFile,
         activityFile: node.activityFile,
         settledEventsFile: node.settledEventsFile,
@@ -1088,6 +1091,7 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
         cleanupPending: !!node.cleanupPending,
       };
       runningSubagents.set(running.id, running);
+      if (running.tabId) rememberPaneTab(running.surface, running.tabId);
       if (cancellationPending) {
         void attemptPendingCancellation(running);
       } else if (workflowNode && !drained) {

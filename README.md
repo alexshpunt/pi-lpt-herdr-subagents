@@ -257,7 +257,7 @@ launch workflow.
 5. Main agent processes result     → continues with new context
 ```
 
-Multiple subagents run concurrently. Each settled or terminal result waits until every recursively owned descendant has drained, then returns once to the exact parent. Held settled results keep their original order. A failed inbox publication remains pending without timeout or rerouting. Pending results remain bound to their recorded parent session ID and session file, and materialize when that exact session is restored. Quitting Pi stops the current watchers but keeps durable ownership for startup recovery. The live widget above the input tracks every agent still in flight:
+Multiple subagents run concurrently. Each publishable settled or terminal result waits until every recursively owned descendant has drained, then returns once to the exact parent. A persistent child keeps the original order of held settled results. When an autonomous owner settles while descendants are still active, that intermediate response stays local: the last descendant result wakes the owner, and only the owner's next eligible `agent_settled` can publish its result and close the session. A failed inbox publication remains pending without timeout or rerouting. Pending results remain bound to their recorded parent session ID and session file, and materialize when that exact session is restored. Quitting Pi stops the current watchers but keeps durable ownership for startup recovery. The live widget above the input tracks every agent still in flight:
 
 ```
 ╭─ Subagents ──────────────────── 1 active · 2 open ─╮
@@ -267,20 +267,22 @@ Multiple subagents run concurrently. Each settled or terminal result waits until
 ╰─────────────────────────────────────────────────────────╯
 ```
 
-Completion messages render with a colored background and are expandable with `Ctrl+O`. Every delivery contains the complete response, the exact child-session path, and the absolute path to an immutable Markdown result file. The same untruncated payload triggers or steers the exact creator parent, so no separate context-free wake-up can create an empty turn. Completed rows leave the widget after delivery or explicit suppression. If ordinary-pane cleanup fails, the delivered child remains visible as `cleanup pending` until pane absence is confirmed.
+Completion messages render with a colored background and are expandable with `Ctrl+O`. Every delivery contains the complete response, the exact child-session path, and the absolute path to an immutable Markdown result file. The same untruncated payload triggers or steers the exact creator parent, so no separate context-free wake-up can create an empty turn. Completed rows leave the widget after delivery or explicit suppression. After durable terminal publication, an ordinary subagent closes its dedicated Herdr tab; worktree-backed runs keep their existing retained workspace. Closing an already missing pane or tab is a silent idempotent success. Other cleanup failures leave the delivered child visible as `cleanup pending` until absence is confirmed.
 
 ### Settled turns and child lifecycle
 
 A persistent child can return one parent result at every settled turn without closing its session. The five outcomes are:
 
-- clean: record the settled result and, for an `auto-exit` child, terminal intent at that boundary; delivery and closure wait until recursively owned descendants drain;
-- empty: record the explicit empty result and, for an `auto-exit` child, terminal intent at that boundary; delivery and closure wait until recursively owned descendants drain;
+- clean: a persistent child records the settled result; an `auto-exit` child accepts this as terminal only when no descendant result remains to process, then publishes and closes after the branch drains;
+- empty: a persistent child records the explicit empty result; an `auto-exit` child accepts this as terminal only when no descendant result remains to process, then publishes and closes after the branch drains;
 - provider/agent error: deliver the error and keep the child open;
 - intentional interrupt: stay silent and keep the child open;
 - unexpected abort: deliver an abort notice and keep the child open.
 
-A non-auto-exit child records completion intent with `subagent_done`; `caller_ping` records a nonterminal help request. An auto-exit child records terminal intent at a clean or empty settled boundary. Done and auto-exit closure wait until recursively owned descendants drain. Help delivery also waits for descendants, then wakes the exact parent and leaves the child session open for the answer. Direct user input or Escape disables automatic exit for that run; mechanical recovery interrupts do not. Provider errors and intentional aborts remain open. Confirmed manual pane closure is terminal: the surviving ancestor adopts and destroys every open descendant, publishes the branch from the leaves upward, and returns one failure to the exact parent. An unavailable Herdr inspection remains pending rather than guessing that a pane is gone. Settled delivery and terminal delivery use separate identity gates, so a clean auto-exit race cannot send the same result twice. Error terminal results are never suppressed as duplicates of an earlier settled turn. A failed parent enqueue remains retryable.
+A non-auto-exit child records completion intent with `subagent_done`; `caller_ping` records a nonterminal help request. An auto-exit child records terminal intent only from a clean or empty `agent_settled` boundary after it has processed the last descendant result. Earlier settles stay local. The last descendant result wakes the owner; its next eligible boundary waits for final branch drain before publication and closure. Explicit `subagent_done` still waits for recursive drain. Help delivery also waits for descendants, then wakes the exact parent and leaves the child session open for the answer. Direct user input or Escape disables automatic exit for that run; mechanical recovery interrupts do not. Provider errors and intentional aborts remain open. Confirmed manual pane closure is terminal: the surviving ancestor adopts and destroys every open descendant, publishes the branch from the leaves upward, and returns one failure to the exact parent. An unavailable Herdr inspection remains pending rather than guessing that a pane is gone. Settled delivery and terminal delivery use separate identity gates, so a clean auto-exit race cannot send the same result twice. Error terminal results are never suppressed as duplicates of an earlier settled turn. A failed parent enqueue remains retryable.
 
+
+A public `SubagentTree` owner is different: its callbacks process child results inside the tree runtime, so its accepted owner settle may wait on tree drain without requiring another Pi turn.
 Pending results remain bound to their recorded parent session ID and session file, and materialize when that exact session is restored. Legacy runs without lineage are never inferred or acted on.
 
 
@@ -534,7 +536,7 @@ The `caller_ping` tool lets a Pi-backed subagent request help from its parent ag
 - `sessionPath` (required): Path to the child session `.jsonl` file
 - `name` (optional): Display name for the resumed pane (defaults to `Resume`)
 - `message` (optional): Follow-up prompt to send after resuming
-- `autoExit` (optional): Whether the resumed session should record auto-exit intent after its next clean or empty response, then deliver and close after recursively owned descendants drain. Defaults to `true` for autonomous follow-up work; set `false` for an interactive handoff.
+- `autoExit` (optional): Whether the resumed session should close after a clean or empty `agent_settled` that has processed the last descendant result. Earlier settles stay local; the accepted boundary waits for final branch drain before publication and closure. Defaults to `true` for autonomous follow-up work; set `false` for an interactive handoff.
 
 **Interaction flow:**
 
@@ -781,7 +783,7 @@ and verify them with `/subagent list` plus a smoke launch.
 | `session-mode` | string | Default child-session mode: `standalone`, `lineage-only`, or `fork` |
 | `spawning`    | boolean | Set `false` to deny all subagent-spawning tools                                                                                                                                                                                                                             |
 | `deny-tools`  | string  | Comma-separated `pi-lpt-herdr-subagents` tool names to suppress; this is not a universal cross-extension deny list                                                                                                                                                                  |
-| `auto-exit`   | boolean | Record terminal intent at a clean or empty settled outcome — no `subagent_done` call needed — then deliver and shut down after recursively owned descendants drain. Provider errors and aborted turns keep the session open so it can be resumed. If the user sends any input, auto-exit is permanently disabled and the user takes over the session. Recommended for autonomous agents (scout, worker); not for interactive ones (planner). Also determines the default value of `interactive` (see below). |
+| `auto-exit`   | boolean | Accept a clean or empty `agent_settled` as terminal only after the last descendant result has been processed, then deliver and shut down after final branch drain. Keep earlier responses local and wait for the descendant result to trigger a new turn. Provider errors and aborted turns keep the session open so it can be resumed. If the user sends any input, auto-exit is permanently disabled and the user takes over the session. Recommended for autonomous agents (scout, worker); not for interactive ones (planner). Also determines the default value of `interactive` (see below). |
 | `interactive` | boolean | Override whether stall/recovery transitions wake the parent session. Defaults to the inverse of `auto-exit`: autonomous agents (`auto-exit: true`) are non-interactive and get stall pings; agents without `auto-exit` are interactive and stay quiet. Explicit values take precedence. |
 | `cwd`         | string  | Default working directory. Absolute paths are unambiguous; relative agent-frontmatter paths resolve from Pi's agent config directory (`PI_CODING_AGENT_DIR` or `~/.pi/agent`), not the project root                                                                                                                                                                                                            |
 | `disable-model-invocation` | boolean | Hide a role from discovery surfaces like `subagents_list`. The definition remains directly invocable by exact name via `subagent({ agent: "name", ... })`. |
@@ -811,11 +813,11 @@ session-mode: lineage-only
 
 ### `auto-exit`
 
-When set to `true`, a clean or empty settled outcome records terminal intent — no explicit `subagent_done` call is needed. The result is delivered and the session shuts down only after recursively owned descendants drain. Provider errors and aborted turns keep the session open so they can be resumed.
+When set to `true`, a clean or empty `agent_settled` becomes terminal only after the owner has processed the last descendant result. Earlier responses stay local. The last descendant result wakes the owner; after the triggered turn reaches another eligible `agent_settled`, publication and closure wait for final branch drain. Provider errors and aborted turns keep the session open so they can be resumed.
 
 **Behavior:**
 
-- A clean final message or empty final response records terminal intent at the settled boundary; delivery and closure wait until recursively owned descendants drain
+- A clean final message or empty final response becomes terminal only after the last descendant result has been processed; publication and closure then wait for final branch drain
 - If the user sends **any input** before the agent finishes, auto-exit is permanently disabled for that session — the user takes over interactively
 - The modeHint injected into the agent's task is adjusted accordingly: autonomous agents see "Complete your task autonomously." rather than instructions to call `subagent_done`
 

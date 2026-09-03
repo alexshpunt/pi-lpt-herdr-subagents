@@ -247,6 +247,31 @@ function listWorkspacePanes(workspaceId: string): Array<{ pane_id?: string; labe
 		.result.panes as Array<{ pane_id?: string; label?: string; agent_session?: { value?: string } }>;
 }
 
+
+function listWorkspaceTabs(
+	workspaceId: string,
+): Array<{ tab_id: string; label?: string }> {
+	return JSON.parse(
+		execFileSync("herdr", ["tab", "list", "--workspace", workspaceId], {
+			encoding: "utf8",
+		}),
+	).result.tabs as Array<{ tab_id: string; label?: string }>;
+}
+
+async function waitForTabLabelGone(
+	workspaceId: string,
+	label: string,
+	timeout = PI_TIMEOUT,
+): Promise<void> {
+	const deadline = Date.now() + timeout;
+	while (Date.now() < deadline) {
+		if (!listWorkspaceTabs(workspaceId).some((tab) => tab.label === label)) return;
+		await sleep(50);
+	}
+	throw new Error(
+		`Timeout waiting for Herdr tab ${label} to close; tabs=${JSON.stringify(listWorkspaceTabs(workspaceId))}`,
+	);
+}
 async function waitForAgentPane(
 	paneLabel: string,
 	workspaceId: string,
@@ -475,7 +500,7 @@ for (const backend of backends) {
 			}
 		});
 
-		it("delivers one model-visible custom completion message", async () => {
+		it("delivers one model-visible completion and closes its dedicated tab", async () => {
 			const id = uniqueId();
 			const childMarker = `CHILD_RESULT_${id}`;
 			const parentMarker = `PARENT_CONTINUED_${id}`;
@@ -550,6 +575,12 @@ for (const backend of backends) {
 						(entry) => entry.type === "message" && entry.message?.role === "user",
 					),
 				false,
+			);
+
+			await waitForTabLabelGone(
+				env.workspaceId,
+				`SingleResult-${id}`,
+				3_000,
 			);
 		});
 
@@ -1563,6 +1594,57 @@ for (const backend of backends) {
 				content.includes(`SYSPROMPT_${id}`),
 				`System prompt test marker should exist`,
 			);
+		});
+
+		it("lets an autonomous owner process its last child result before closing", async () => {
+			const id = uniqueId();
+			const ownerName = `AutoOwner-${id}`;
+			const gateFile = `/tmp/pi-integ-auto-owner-${id}`;
+			const parentSession = join(env.dir, `auto-owner-parent-${id}.jsonl`);
+			trackTempFile(env, gateFile);
+
+			const surface = createTrackedSurface(env, `auto-owner-parent-${id}`);
+			await waitForPaneReady(surface);
+			startPi(
+				surface,
+				env.dir,
+				[
+					"Call subagent with these EXACT parameters:",
+					`  name: "${ownerName}"`,
+					'  agent: "test-autonomous-descendant-owner"',
+					`  task: "INTEGRATION_DESCENDANT_GATE: ${gateFile} INTEGRATION_OWNER_AFTER_CHILD Launch the descendant, then process its result."`,
+					"Call the tool once and wait for its asynchronous result.",
+				].join("\n"),
+				{ extraArgs: `--session ${shellQuote(parentSession)}` },
+			);
+
+			const ownerPane = await waitForAgentPane(ownerName, env.workspaceId);
+			await waitForScreen(ownerPane, /OWNER_WAITING/, PI_TIMEOUT, 300);
+			writeFileSync(gateFile, "drain\n");
+
+			const deadline = Date.now() + PI_TIMEOUT;
+			let ownerResults: IntegrationSessionEntry[] = [];
+			while (Date.now() < deadline) {
+				ownerResults = existsSync(parentSession)
+					? customResultEntries(readSessionEntries(parentSession)).filter(
+							(entry) => String(entry.details?.name) === ownerName,
+						)
+					: [];
+				if (ownerResults.length > 0) break;
+				await sleep(50);
+			}
+
+			assert.equal(ownerResults.length, 1, readPane(surface, 300));
+			assert.match(
+				String(ownerResults[0].details?.resultContent),
+				/^OWNER_AFTER_CHILD$/m,
+				"the owner must answer after processing the last descendant result",
+			);
+			assert.doesNotMatch(
+				String(ownerResults[0].details?.resultContent),
+				/^OWNER_WAITING$/m,
+			);
+			await waitForTabLabelGone(env.workspaceId, ownerName);
 		});
 
 		it("withholds an owner's terminal result until its nested child drains", async () => {

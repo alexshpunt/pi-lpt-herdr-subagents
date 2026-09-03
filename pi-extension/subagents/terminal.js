@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { closeHerdrSurface, createHerdrSurface, createHerdrSurfaceInWorkspace, createHerdrSurfaceSplit, createHerdrWorktree, focusHerdrWorkspace, getHerdrPaneProcessInfo, waitForHerdrPiReady, waitForHerdrShellReady, isHerdrAvailable, isProcessAlive, readHerdrScreen, readHerdrScreenAsync, inspectHerdrPane, renameHerdrTab, renameHerdrWorkspace, sendHerdrCommand, sendHerdrEscape, waitForHerdrPaneAbsence, waitForProcessesExit, } from "./herdr.js";
+import { closeHerdrSurface, createHerdrSurface, createHerdrSurfaceInWorkspace, createHerdrSurfaceSplit, createHerdrWorktree, focusHerdrWorkspace, getHerdrPaneProcessInfo, getHerdrSurfaceTabId, rememberHerdrSurfaceTab, waitForHerdrPiReady, waitForHerdrShellReady, isHerdrAvailable, isProcessAlive, readHerdrScreen, readHerdrScreenAsync, inspectHerdrPane, renameHerdrTab, renameHerdrWorkspace, sendHerdrCommand, sendHerdrEscape, waitForHerdrPaneAbsence, waitForProcessesExit, } from "./herdr.js";
 const SETUP_HINT = "Start pi inside herdr (`herdr`, then run `pi`).";
 export function isTerminalAvailable() {
     return isHerdrAvailable();
@@ -25,6 +25,14 @@ export function createSubagentPane(name) {
 export function createSubagentPaneInWorkspace(name, cwd, workspaceId) {
     assertTerminalAvailable();
     return createHerdrSurfaceInWorkspace(name, cwd, workspaceId);
+}
+/** Return the owning Herdr tab remembered for a package-created pane. */
+export function getPaneTabId(paneId) {
+    return getHerdrSurfaceTabId(paneId);
+}
+/** Restore a pane-to-tab association from durable launch metadata. */
+export function rememberPaneTab(paneId, tabId) {
+    rememberHerdrSurfaceTab(paneId, tabId);
 }
 /** Create a Git worktree in its own herdr workspace and return its root surface. */
 export function createSubagentWorktree(name, cwd, branch, base) {

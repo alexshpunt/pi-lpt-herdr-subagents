@@ -10,6 +10,8 @@ import {
 	createHerdrWorktree,
 	focusHerdrWorkspace,
 	getHerdrPaneProcessInfo,
+	getHerdrSurfaceTabId,
+	rememberHerdrSurfaceTab,
 	waitForHerdrPiReady,
 	waitForHerdrShellReady,
 	isHerdrAvailable,
@@ -66,6 +68,16 @@ export function createSubagentPaneInWorkspace(
 	return createHerdrSurfaceInWorkspace(name, cwd, workspaceId);
 }
 
+
+/** Return the owning Herdr tab remembered for a package-created pane. */
+export function getPaneTabId(paneId: PaneId): string | undefined {
+	return getHerdrSurfaceTabId(paneId);
+}
+
+/** Restore a pane-to-tab association from durable launch metadata. */
+export function rememberPaneTab(paneId: PaneId, tabId: string): void {
+	rememberHerdrSurfaceTab(paneId, tabId);
+}
 /** Create a Git worktree in its own herdr workspace and return its root surface. */
 export function createSubagentWorktree(
 	name: string,

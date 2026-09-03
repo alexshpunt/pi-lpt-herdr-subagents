@@ -103,6 +103,8 @@ export interface SubagentActivityRecorder {
     empty?: boolean;
     turnIndex?: number;
     autoExit?: boolean;
+    /** Append this boundary to the parent-observed settled stream. */
+    publish?: boolean;
   }): void;
   turnStart(turnIndex?: number): void;
   turnEnd(turnIndex?: number): void;
@@ -674,7 +676,7 @@ export function createSubagentActivityRecorder(params: {
         },
         "immediate",
       );
-      if (settledEventsFile) {
+      if (settledEventsFile && details.publish !== false) {
         try {
           mkdirSync(dirname(settledEventsFile), { recursive: true });
           const event: SettledActivityEvent = {

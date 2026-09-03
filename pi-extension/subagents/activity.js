@@ -386,7 +386,7 @@ export function createSubagentActivityRecorder(params) {
                 current.settledEmpty = details.empty;
                 if (details.turnIndex != null) current.turnIndex = details.turnIndex;
             }, "immediate");
-            if (settledEventsFile) {
+            if (settledEventsFile && details.publish !== false) {
                 try {
                     mkdirSync(dirname(settledEventsFile), {
                         recursive: true

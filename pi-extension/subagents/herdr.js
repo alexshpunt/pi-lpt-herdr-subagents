@@ -2,6 +2,7 @@ import { execFile, execSync, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const commandAvailability = new Map();
+const surfaceTabs = new Map();
 function hasCommand(command) {
     if (commandAvailability.has(command)) {
         return commandAvailability.get(command);
@@ -63,6 +64,31 @@ function extractHerdrRootPaneId(output, context) {
     }
     return paneId;
 }
+function extractHerdrTabSurface(output, context) {
+    const parsed = parseHerdrJson(output);
+    const paneId = parsed?.result?.root_pane?.pane_id;
+    const tabId = parsed?.result?.tab?.tab_id ?? parsed?.result?.root_pane?.tab_id;
+    if (typeof paneId !== "string" || !paneId ||
+        typeof tabId !== "string" || !tabId) {
+        throw new Error(`Unexpected herdr ${context} output: ${output.trim() || "(empty)"}`);
+    }
+    return { paneId, tabId };
+}
+/** Return the remembered owning tab for a Herdr surface created by this process. */
+export function getHerdrSurfaceTabId(surface) {
+    return surfaceTabs.get(surface);
+}
+/** Restore a durable surface-to-tab association before retrying cleanup. */
+export function rememberHerdrSurfaceTab(surface, tabId) {
+    if (surface && tabId)
+        surfaceTabs.set(surface, tabId);
+}
+function forgetHerdrTab(tabId) {
+    for (const [surface, rememberedTab] of surfaceTabs) {
+        if (rememberedTab === tabId)
+            surfaceTabs.delete(surface);
+    }
+}
 function extractHerdrWorktree(output) {
     const parsed = parseHerdrJson(output);
     const result = parsed?.result;
@@ -85,7 +111,10 @@ function extractHerdrWorktree(output) {
     };
 }
 function herdrExec(args) {
-    return execFileSync("herdr", args, { encoding: "utf8" });
+    return execFileSync("herdr", args, {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+    });
 }
 async function herdrExecAsync(args) {
     const { stdout } = await execFileAsync("herdr", args, { encoding: "utf8" });
@@ -153,7 +182,8 @@ function buildWorktreeCreateArgs(name, cwd, branch, base) {
 }
 export function createHerdrSurfaceInWorkspace(name, cwd, workspaceId) {
     const output = herdrExec(buildTabCreateArgs(name, cwd, workspaceId));
-    const paneId = extractHerdrRootPaneId(output, "tab create");
+    const { paneId, tabId } = extractHerdrTabSurface(output, "tab create");
+    rememberHerdrSurfaceTab(paneId, tabId);
     try {
         herdrExec(["pane", "rename", paneId, name]);
     }
@@ -520,8 +550,68 @@ export function sendHerdrCommand(surface, command) {
 export function sendHerdrEscape(surface) {
     herdrExec(["pane", "send-keys", surface, "Escape"]);
 }
+function hasHerdrErrorCode(error, codes) {
+    const accepted = new Set(codes);
+    for (const raw of [error?.stderr, error?.stdout, error?.message]) {
+        if (typeof raw !== "string" || !raw.trim())
+            continue;
+        const parsed = parseHerdrJson(raw);
+        if (typeof parsed?.error?.code === "string" &&
+            accepted.has(parsed.error.code)) {
+            return true;
+        }
+        for (const code of accepted) {
+            if (new RegExp(`\\b${code}\\b`).test(raw))
+                return true;
+        }
+    }
+    return false;
+}
+function lookupHerdrSurfaceTab(surface) {
+    try {
+        const output = herdrExec(["pane", "get", surface]);
+        const parsed = parseHerdrJson(output);
+        if (parsed?.error?.code === "pane_not_found" ||
+            parsed?.error?.code === "not_found") {
+            return undefined;
+        }
+        const pane = parsed?.result?.pane;
+        if (pane?.pane_id !== surface ||
+            typeof pane.tab_id !== "string" ||
+            !pane.tab_id) {
+            throw new Error(`Unexpected herdr pane get output: ${output.trim() || "(empty)"}`);
+        }
+        rememberHerdrSurfaceTab(surface, pane.tab_id);
+        return pane.tab_id;
+    }
+    catch (error) {
+        if (hasHerdrErrorCode(error, ["pane_not_found", "not_found"])) {
+            return undefined;
+        }
+        throw error;
+    }
+}
+/** Close the dedicated tab for a surface; an already missing target is success. */
 export function closeHerdrSurface(surface) {
-    herdrExec(["pane", "close", surface]);
+    const rememberedTab = getHerdrSurfaceTabId(surface);
+    const tabId = rememberedTab ?? lookupHerdrSurfaceTab(surface);
+    if (!tabId)
+        return;
+    try {
+        herdrExec(["tab", "close", tabId]);
+        forgetHerdrTab(tabId);
+    }
+    catch (error) {
+        if (hasHerdrErrorCode(error, [
+            "tab_not_found",
+            "pane_not_found",
+            "not_found",
+        ])) {
+            forgetHerdrTab(tabId);
+            return;
+        }
+        throw error;
+    }
 }
 export function renameHerdrTab(title) {
     const { tab_id: tabId } = getHerdrCurrentPaneInfo();

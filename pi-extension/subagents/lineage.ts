@@ -579,10 +579,7 @@ export function completeLineageInboxMaterialization(
   if (!acknowledged) return false;
   const path = claimFile(rootDir, deliveryId);
   const claim = readMaterializationClaim(path, deliveryId, nodeId);
-  if (claim?.token === token) {
-    try { unlinkSync(path); } catch {}
-  }
-  return true;
+  return claim?.token === token || isLineageInboxMaterialized(rootDir, deliveryId);
 }
 
 /** Release a failed claim only after exact-session evidence is checked. */

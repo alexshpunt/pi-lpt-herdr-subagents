@@ -68,20 +68,23 @@ export function interpretExitSidecar(data: unknown): CompletionResult {
   };
 }
 
-function consumeExitSidecar(sessionFile: string | undefined): CompletionResult | null {
+/** Read completion evidence without acknowledging or removing it. */
+export function readExitSidecar(sessionFile: string | undefined): unknown | null {
   if (!sessionFile) return null;
-
   const exitFile = `${sessionFile}.exit`;
   if (!existsSync(exitFile)) return null;
+  try { return JSON.parse(readFileSync(exitFile, "utf8")); }
+  catch { return null; }
+}
 
-  try {
-    const result = interpretExitSidecar(JSON.parse(readFileSync(exitFile, "utf8")));
-    rmSync(exitFile, { force: true });
-    return result;
-  } catch {
-    // The child may still be writing the file. Retry on the next polling cycle.
-    return null;
-  }
+/** Remove completion evidence only after durable result and inbox publication. */
+export function acknowledgeExitSidecar(sessionFile: string): void {
+  rmSync(`${sessionFile}.exit`, { force: true });
+}
+
+function consumeExitSidecar(sessionFile: string | undefined): CompletionResult | null {
+  const payload = readExitSidecar(sessionFile);
+  return payload == null ? null : interpretExitSidecar(payload);
 }
 
 function terminalExitCode(screen: string): number | null {

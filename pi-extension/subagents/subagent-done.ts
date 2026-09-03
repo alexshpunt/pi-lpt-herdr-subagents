@@ -12,8 +12,11 @@ import {
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createSubagentActivityRecorder } from "./activity.ts";
+
+import { waitForDeliveryDrain } from "./delivery-drain.ts";
+import { createDeliveryLog } from "./delivery-log.ts";
 import {
   classifySettledOutcome,
   type AssistantStopReason,
@@ -30,12 +33,37 @@ export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
 }
 
 /** Wait until this session's owned descendants have terminal delivery. */
-async function waitForDescendantDrain(): Promise<void> {
-  const lineage = lineageFromEnvironment();
+export async function waitForDescendantDrain(options: {
+  lineage?: { rootDir: string; parentNodeId: string };
+  delay?: (ms: number) => Promise<void>;
+  now?: () => number;
+  onWaitOpen?: (info: { waitedSince: number }) => void;
+  onWaitRelease?: (info: { waitedSince: number; waitedMs: number }) => void;
+  projectWidget?: (projection: unknown) => void;
+  log?: (event: string, fields?: Record<string, unknown>) => void;
+} = {}): Promise<void> {
+  const lineage = options.lineage ?? lineageFromEnvironment();
   if (!lineage) return;
-  while (hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.parentNodeId)) {
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
-  }
+  const childId = lineage.parentNodeId;
+  const sessionFile = process.env.PI_SUBAGENT_SESSION;
+  const persistentLog = sessionFile
+    ? createDeliveryLog({ logPath: join(dirname(sessionFile), "subagent-delivery.log"), now: options.now })
+    : undefined;
+  const record = options.log ?? ((event: string, fields?: Record<string, unknown>) => persistentLog?.record(event, fields));
+  await waitForDeliveryDrain({
+    isDrained: () => !hasUndrainedDescendants(reduceLineage(lineage.rootDir), childId),
+    delay: options.delay,
+    now: options.now,
+    onWaitOpen: (info) => {
+      options.projectWidget?.({ state: "waiting-on-descendants", childId });
+      record("drain-wait-open", { childId, phase: "drain", waitedSince: info.waitedSince });
+      options.onWaitOpen?.(info);
+    },
+    onWaitRelease: (info) => {
+      record("drain-wait-release", { childId, phase: "drain", ...info });
+      options.onWaitRelease?.(info);
+    },
+  });
 }
 
 async function waitForOwnedChildren(): Promise<void> {

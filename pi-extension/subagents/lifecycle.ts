@@ -474,8 +474,16 @@ export function markSettledAssistantDelivered(
 export function projectLifecycle(lifecycle: SubagentLifecycle, now: number): LifecycleProjection {
   const process = lifecycle.process;
   if (process.kind === "finalizing") return { kind: "finalizing", runtimeEndedAt: process.detectedAt };
-  if (process.kind === "completed") return { kind: "completed", runtimeEndedAt: process.completedAt };
-  if (process.kind === "failed") return { kind: "failed", label: process.error, runtimeEndedAt: process.completedAt };
+  if (process.kind === "completed") {
+    return lifecycle.delivery === "delivered" || lifecycle.delivery === "suppressed"
+      ? { kind: "completed", runtimeEndedAt: process.completedAt }
+      : { kind: "finalizing", label: "delivery-pending", runtimeEndedAt: process.completedAt };
+  }
+  if (process.kind === "failed") {
+    return lifecycle.delivery === "delivered" || lifecycle.delivery === "suppressed"
+      ? { kind: "failed", label: process.error, runtimeEndedAt: process.completedAt }
+      : { kind: "finalizing", label: "delivery-pending", runtimeEndedAt: process.completedAt };
+  }
 
   // Pi activity is optional enrichment. Only authoritative Herdr inspection
   // unavailability may produce a stalled projection.

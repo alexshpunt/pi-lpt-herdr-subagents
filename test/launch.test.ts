@@ -117,6 +117,7 @@ describe("Pi launch", () => {
 			assert.ok(running.sessionFile.startsWith(join(agentDir, "sessions")));
 			assert.equal(command.includes(projectAgentDir), false);
 			assert.match(command, new RegExp(`^cd '${project}' && `));
+			assert.match(command, /PI_SUBAGENT_LAUNCHER_PID=\$\$/);
 			assert.match(command, /--model 'fake\/worker'/);
 			assert.match(command, /--thinking 'high'/);
 			assert.match(command, /--tools 'read,bash,caller_ping'/);
@@ -241,6 +242,7 @@ describe("Pi launch", () => {
 					new RegExp(`PI_SUBAGENT_SESSION='${sessionFile}'`),
 				);
 				assert.match(command, /PI_SUBAGENT_ID='resume-1'/);
+				assert.match(command, /PI_SUBAGENT_LAUNCHER_PID=\$\$/);
 				assert.match(command, /PI_SUBAGENT_ACTIVITY_FILE='/);
 				assert.match(command, /PI_SUBAGENT_AUTO_EXIT=1/);
 				assert.doesNotMatch(command, /--model|--thinking|^cd /);

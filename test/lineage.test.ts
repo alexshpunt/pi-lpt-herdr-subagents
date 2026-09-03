@@ -15,6 +15,7 @@ import {
   pendingLineageInboxes,
   isLineageNodeDrained,
   latestDescendantDeliveryAt,
+  lineageFromEnvironment,
   reduceLineage,
   registerLineage,
 } from "../pi-extension/subagents/lineage.ts";
@@ -22,6 +23,28 @@ import {
 const tempRoot = () => mkdtempSync(join(tmpdir(), "pi-lineage-test-"));
 
 const observerModule = new URL("../pi-extension/subagents/lineage.ts", import.meta.url).href;
+
+test("trusts inherited lineage only in its launched Pi process", () => {
+  const env = {
+    PI_SUBAGENT_LINEAGE_DIR: "/tmp/live-lineage",
+    PI_SUBAGENT_LINEAGE_ROOT: "root",
+    PI_SUBAGENT_ID: "owner",
+    PI_SUBAGENT_PARENT_NODE: "parent",
+    PI_SUBAGENT_LAUNCHER_PID: "41",
+  };
+
+  assert.deepEqual(lineageFromEnvironment(env, 41), {
+    rootDir: "/tmp/live-lineage",
+    rootId: "root",
+    nodeId: "owner",
+    parentNodeId: "parent",
+  });
+  assert.equal(
+    lineageFromEnvironment(env, 42),
+    undefined,
+    "an ordinary subprocess must not impersonate the Pi process that owns the lineage",
+  );
+});
 
 function spawnObserver(options: {
   rootDir: string;

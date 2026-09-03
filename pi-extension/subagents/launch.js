@@ -359,6 +359,7 @@ function buildPiCommand(resolved, artifacts) {
             env.push(`${key}=${shellQuote(value)}`);
     }
     if (resolved.lineage && !request.handoff) {
+        env.push("PI_SUBAGENT_LAUNCHER_PID=$$");
         for (const [key, value] of Object.entries(lineageEnvironment(resolved.lineage))) {
             env.push(`${key}=${shellQuote(value)}`);
         }
@@ -493,6 +494,7 @@ async function launchResumedPiSubagent(request, operations) {
             ...(process.env.PI_CODING_AGENT_DIR
                 ? [`PI_CODING_AGENT_DIR=${shellQuote(process.env.PI_CODING_AGENT_DIR)}`]
                 : []),
+            "PI_SUBAGENT_LAUNCHER_PID=$$",
             ...Object.entries(lineageEnvironment(lineage)).map(([key, value]) => `${key}=${shellQuote(value)}`),
             `PI_SUBAGENT_NAME=${shellQuote(request.name)}`,
             `PI_SUBAGENT_SESSION=${shellQuote(request.sessionFile)}`,

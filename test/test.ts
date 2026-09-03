@@ -94,6 +94,12 @@ import {
 	projectLifecycle,
 } from "../pi-extension/subagents/lifecycle.ts";
 
+import {
+	appendLineageEvent,
+	reduceLineage,
+	registerLineage,
+} from "../pi-extension/subagents/lineage.ts";
+
 // Tool-registration behavior is environment-sensitive for child subagents.
 // Isolate the unit suite from inherited parent/child capability variables.
 const inheritedSubagentId = process.env.PI_SUBAGENT_ID;
@@ -4004,6 +4010,37 @@ describe("subagent interruption", () => {
 			assert.match(ambiguous.error, /Ambiguous subagent name/);
 		} finally {
 			runningMap.clear();
+		}
+	});
+
+	it("does not turn an already delivered terminal result into manual-close cancellation", async () => {
+		const testApi = (subagentsModule as any).__test__;
+		const dir = createTestDir();
+		try {
+			const lineage = registerLineage({ artifactDir: dir, nodeId: "a1" });
+			appendLineageEvent(lineage.rootDir, "terminal:a1", "terminal", "a1", {
+				outcome: "terminal",
+				resultContent: "RESEARCH_FANOUT_ERROR\nORIGINAL_ERROR",
+			});
+			appendLineageEvent(
+				lineage.rootDir,
+				"terminal-delivered:a1",
+				"terminal_delivered",
+				"a1",
+				{ deliveryId: "terminal:a1" },
+			);
+
+			await testApi.recordManualTabCancellation(makeRunning({ lineage }));
+
+			const node = reduceLineage(lineage.rootDir).nodes.get("a1");
+			assert.equal(node?.terminal?.resultContent, "RESEARCH_FANOUT_ERROR\nORIGINAL_ERROR");
+			assert.equal(
+				node?.cancellation?.intent,
+				undefined,
+				"a terminal result that already won must remain the only outcome",
+			);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 

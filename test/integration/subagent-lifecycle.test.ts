@@ -22,6 +22,7 @@ import {
 	existsSync,
 	mkdirSync,
 	readFileSync,
+	readdirSync,
 	writeFileSync,
 } from "node:fs";
 import { isAbsolute, join } from "node:path";
@@ -582,6 +583,73 @@ for (const backend of backends) {
 				`SingleResult-${id}`,
 				3_000,
 			);
+		});
+
+		it("keeps test subprocess fixtures out of the live subagent lineage", async () => {
+			const id = uniqueId();
+			const childName = `LineageIsolation-${id}`;
+			const childMarker = `LINEAGE_SUBPROCESS_DONE_${id}`;
+			const parentSession = join(env.dir, `lineage-isolation-parent-${id}.jsonl`);
+			const surface = createTrackedSurface(env, `lineage-isolation-${id}`);
+			await waitForPaneReady(surface);
+
+			startPi(
+				surface,
+				env.dir,
+				[
+					"Call the subagent tool with these EXACT parameters:",
+					`  name: "${childName}"`,
+					'  agent: "test-echo"',
+					`  task: "Run this bash command: echo 'START_LINEAGE_SUBPROCESS_${id}'; node --experimental-strip-types --test '${join(process.cwd(), "test", "launch.test.ts")}'; echo 'END_LINEAGE_SUBPROCESS_${id}'. After it finishes, Return exactly ${childMarker}"`,
+					"Do not do anything else. Just call the subagent tool once.",
+				].join("\n"),
+				{ extraArgs: `--session ${shellQuote(parentSession)}` },
+			);
+
+			const childPane = await waitForAgentPane(childName, env.workspaceId);
+			const childSessionMap = join(
+				env.dir,
+				".pi",
+				"agent",
+				"pane-session-map",
+				`${encodeURIComponent(childPane)}.json`,
+			);
+			await waitForFile(childSessionMap);
+			const { sessionFile: childSession } = JSON.parse(
+				readFileSync(childSessionMap, "utf8"),
+			) as PaneSessionRecord;
+			assert.equal(typeof childSession, "string", "child pane must expose its Pi session");
+			await waitForFile(childSession, PI_TIMEOUT, new RegExp(childMarker));
+
+			const lineage = JSON.parse(
+				readFileSync(`${childSession}.lineage.json`, "utf8"),
+			) as { rootDir: string };
+			const liveNodeIds = new Set(
+				readdirSync(join(lineage.rootDir, "events"))
+					.filter((name) => name.endsWith(".json"))
+					.map((name) =>
+						JSON.parse(
+							readFileSync(join(lineage.rootDir, "events", name), "utf8"),
+						) as { nodeId?: string },
+					)
+					.map((event) => event.nodeId)
+					.filter((nodeId): nodeId is string => typeof nodeId === "string"),
+			);
+			for (const fixtureId of ["child-1", "failed-resume", "resume-1", "resume-interactive"]) {
+				assert.equal(
+					liveNodeIds.has(fixtureId),
+					false,
+					`test fixture ${fixtureId} must not join the live lineage`,
+				);
+			}
+
+			await waitForParentEvidence(
+				parentSession,
+				new RegExp(`"customType":"subagent_result"[\\s\\S]*${childMarker}`),
+				surface,
+				PI_TIMEOUT,
+			);
+			await waitForTabLabelGone(env.workspaceId, childName, 3_000);
 		});
 
 		it("injects role-derived skills into the first child request without extra turns", async () => {

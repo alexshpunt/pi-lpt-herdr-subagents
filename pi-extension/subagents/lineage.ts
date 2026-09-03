@@ -762,8 +762,23 @@ export function lineageEnvironment(registration: LineageRegistration): Record<st
   };
 }
 
-export function lineageFromEnvironment(env: NodeJS.ProcessEnv = process.env): Pick<LineageRegistration, "rootDir" | "rootId" | "nodeId" | "parentNodeId"> | undefined {
-  if (!env.PI_SUBAGENT_LINEAGE_DIR || !env.PI_SUBAGENT_LINEAGE_ROOT || !env.PI_SUBAGENT_ID) return undefined;
+/**
+ * Read lineage only in the Pi process launched for this node.
+ *
+ * Shell commands inherit the Pi environment. The launcher PID prevents an
+ * ordinary child process from impersonating its Pi owner and registering test
+ * fixtures or other local work as real descendants.
+ */
+export function lineageFromEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+  parentPid = process.ppid,
+): Pick<LineageRegistration, "rootDir" | "rootId" | "nodeId" | "parentNodeId"> | undefined {
+  if (
+    !env.PI_SUBAGENT_LINEAGE_DIR ||
+    !env.PI_SUBAGENT_LINEAGE_ROOT ||
+    !env.PI_SUBAGENT_ID ||
+    env.PI_SUBAGENT_LAUNCHER_PID !== String(parentPid)
+  ) return undefined;
   return {
     rootDir: env.PI_SUBAGENT_LINEAGE_DIR,
     rootId: env.PI_SUBAGENT_LINEAGE_ROOT,

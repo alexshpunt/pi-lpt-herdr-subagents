@@ -86,6 +86,16 @@ has drained. Failed inbox publication remains pending without timeout or
 rerouting. A pending session inbox remains bound to its recorded parent session
 ID and file, and materializes when that exact session is restored.
 
+A lineage environment is accepted only by the Pi process started by its launch
+shell. Ordinary subprocesses inherit environment variables but have a different
+launcher relationship, so test fixtures and imported launch helpers cannot
+register themselves as descendants. Every genuine nested or resumed Pi launch
+receives a new process-bound lineage identity.
+
+Once a terminal outcome wins, a later missing-pane observation is cleanup, not
+user cancellation. The watcher preserves the winning terminal payload and does
+not append manual-close intent.
+
 Active materialization is protected by a durable lineage gate plus one exclusive
 claim per delivery ID. The gate compares all still-pending inbox entries for the
 same exact parent sink by activity sequence, so independent Pi processes cannot

@@ -2379,11 +2379,12 @@ async function destroyOwnedLineageSubtree(owner: RunningSubagent): Promise<void>
 }
 
 /** Persist a user-closed tab as cancellation before descendant drain can release stale settles. */
-async function recordManualTabCancellation(running: RunningSubagent): Promise<void> {
-  if (!running.lineage) return;
+async function recordManualTabCancellation(running: RunningSubagent): Promise<boolean> {
+  if (!running.lineage) return true;
   const { rootDir } = running.lineage;
   const intentId = `manual-tab-close:${running.id}`;
   const current = reduceLineage(rootDir).nodes.get(running.id);
+  if (current?.terminal) return false;
   if (!current?.cancellation?.intent) {
     const recorded = appendLineageEvent(rootDir, intentId, "cancel_intent", running.id, {
       surface: running.surface,
@@ -2394,6 +2395,7 @@ async function recordManualTabCancellation(running: RunningSubagent): Promise<vo
     }
   }
   await destroyOwnedLineageSubtree(running);
+  if (reduceLineage(rootDir).nodes.get(running.id)?.terminal) return false;
   const provenId = `manual-tab-close-proven:${running.id}`;
   if (!appendLineageEvent(rootDir, provenId, "cancel_proven", running.id, {
     surface: running.surface,
@@ -2402,6 +2404,7 @@ async function recordManualTabCancellation(running: RunningSubagent): Promise<vo
   }) && !reduceLineage(rootDir).nodes.get(running.id)?.cancellation?.proven) {
     throw new Error("Unable to prove manual tab cancellation");
   }
+  return true;
 }
 
 async function handleSubagentCancel(params: { id?: string; name?: string }): Promise<AgentToolResult<SubagentCancelDetails>> {
@@ -2634,6 +2637,7 @@ function buildWorkflowChildCommand(params: {
 	const denied =
 		"caller_ping,subagent_done,subagent,subagent_interrupt,subagent_resume,subagents_list,herdr_workflow";
 	const env = [
+		"PI_SUBAGENT_LAUNCHER_PID=$$",
 		...(params.lineage
 			? Object.entries(lineageEnvironment(params.lineage)).map(
 					([key, value]) => `${key}=${shellQuote(value)}`,
@@ -2696,7 +2700,8 @@ export const __test__ = {
 	resolveDenyTools,
 	isSelfSpawnBlocked,
 	resolveInterruptTarget,
-  handleSubagentCancel,
+	recordManualTabCancellation,
+	handleSubagentCancel,
 	requestSubagentInterrupt,
 	handleSubagentInterrupt,
 	resolveResultPresentation,
@@ -3141,8 +3146,7 @@ async function watchSubagent(
 			if (!result.ping) {
 				observeRunningSubagent(running);
 				if (result.paneDisappeared) {
-					await recordManualTabCancellation(running);
-					cancelledByUser = true;
+					cancelledByUser = await recordManualTabCancellation(running);
 					break;
 				}
 

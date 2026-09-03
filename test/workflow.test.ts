@@ -176,6 +176,7 @@ describe("workflow preparation", () => {
 			task: "Inspect the source.",
 		});
 		assert.match(command, /cd '\/checkout'/);
+		assert.match(command, /PI_SUBAGENT_LAUNCHER_PID=\$\$/);
 		assert.match(
 			command,
 			/--no-extensions --no-skills --no-prompt-templates --no-context-files --no-approve/,

@@ -670,7 +670,8 @@ function installAdapterRuntime(dir: string, parentSessionFile: string, cwd = pro
 }
 
 function renderedWidgetText(widgets: TestWidget[]): string {
-	return widgets.flatMap((widget) => widget.render(240)).join("\n");
+	const latest = widgets.at(-1);
+	return latest ? latest.render(240).join("\n") : "";
 }
 
 function failureRecords(path: string, deliveryId: string): any[] {

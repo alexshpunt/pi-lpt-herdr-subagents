@@ -445,7 +445,7 @@ describe("TS-02 result file contents", () => {
 	it("TS-02 round-trips a 200k-character answer character for character", async () => {
 		const materialize = await loadMaterialize();
 		const sessionsDir = tempDir("pi-ts02-large-");
-		const answer = `HEAD-${"h".repeat(100_000)}-MIDDLE-${"t".repeat(99_960)}-TAIL`;
+		const answer = `HEAD-${"h".repeat(100_000)}-MIDDLE-${"t".repeat(99_982)}-TAIL`;
 		assert.equal(answer.length, 200_000);
 
 		const handle = materialize({

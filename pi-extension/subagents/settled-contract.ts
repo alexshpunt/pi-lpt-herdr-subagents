@@ -38,9 +38,9 @@ export type SettledOutcomeKind =
   | "intentional-abort"
   | "unexpected-abort";
 
-/** Parent delivery and child lifecycle action for each settled outcome. */
+/** Parent visibility and child lifecycle action for each settled outcome. */
 export interface SettledOutcomePolicy {
-  parentDelivery: "deliver" | "suppress";
+  parentDelivery: "suppress";
   childLifecycle: "auto-exit" | "keep-open";
 }
 
@@ -48,15 +48,15 @@ export interface SettledOutcomePolicy {
 export const SETTLED_OUTCOME_POLICY: Readonly<
   Record<SettledOutcomeKind, SettledOutcomePolicy>
 > = {
-  clean: { parentDelivery: "deliver", childLifecycle: "auto-exit" },
-  empty: { parentDelivery: "deliver", childLifecycle: "auto-exit" },
-  error: { parentDelivery: "deliver", childLifecycle: "keep-open" },
+  clean: { parentDelivery: "suppress", childLifecycle: "auto-exit" },
+  empty: { parentDelivery: "suppress", childLifecycle: "auto-exit" },
+  error: { parentDelivery: "suppress", childLifecycle: "keep-open" },
   "intentional-abort": {
     parentDelivery: "suppress",
     childLifecycle: "keep-open",
   },
   "unexpected-abort": {
-    parentDelivery: "deliver",
+    parentDelivery: "suppress",
     childLifecycle: "keep-open",
   },
 };
@@ -79,9 +79,8 @@ export interface SettledOutcomeEvidence {
 /**
  * Classify the final assistant evidence without consulting process state.
  *
- * Error responses are deliverable and keep the child open. An intentional
- * abort is suppressed; an abort without an interrupt request is unexpected
- * and is delivered as an explicit problem. Tool errors are recoverable when a
+ * Settled responses stay local. Errors and aborts keep the child open; clean
+ * and empty outcomes can drive auto-exit. Tool errors are recoverable when a
  * later clean assistant response exists.
  */
 export function classifySettledOutcome(

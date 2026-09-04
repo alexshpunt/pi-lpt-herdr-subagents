@@ -69,15 +69,15 @@ describe("settled lifecycle contract", () => {
 
   it("freezes delivery and child-retention behavior for every outcome", () => {
     assert.deepEqual(SETTLED_OUTCOME_POLICY, {
-      clean: { parentDelivery: "deliver", childLifecycle: "auto-exit" },
-      empty: { parentDelivery: "deliver", childLifecycle: "auto-exit" },
-      error: { parentDelivery: "deliver", childLifecycle: "keep-open" },
+      clean: { parentDelivery: "suppress", childLifecycle: "auto-exit" },
+      empty: { parentDelivery: "suppress", childLifecycle: "auto-exit" },
+      error: { parentDelivery: "suppress", childLifecycle: "keep-open" },
       "intentional-abort": {
         parentDelivery: "suppress",
         childLifecycle: "keep-open",
       },
       "unexpected-abort": {
-        parentDelivery: "deliver",
+        parentDelivery: "suppress",
         childLifecycle: "keep-open",
       },
     });

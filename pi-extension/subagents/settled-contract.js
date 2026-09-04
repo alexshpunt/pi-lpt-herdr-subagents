@@ -1,14 +1,14 @@
 export const SETTLED_OUTCOME_POLICY = {
     clean: {
-        parentDelivery: "deliver",
+        parentDelivery: "suppress",
         childLifecycle: "auto-exit"
     },
     empty: {
-        parentDelivery: "deliver",
+        parentDelivery: "suppress",
         childLifecycle: "auto-exit"
     },
     error: {
-        parentDelivery: "deliver",
+        parentDelivery: "suppress",
         childLifecycle: "keep-open"
     },
     "intentional-abort": {
@@ -16,7 +16,7 @@ export const SETTLED_OUTCOME_POLICY = {
         childLifecycle: "keep-open"
     },
     "unexpected-abort": {
-        parentDelivery: "deliver",
+        parentDelivery: "suppress",
         childLifecycle: "keep-open"
     }
 };

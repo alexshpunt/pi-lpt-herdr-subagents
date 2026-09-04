@@ -121,111 +121,27 @@ it("orders settled publication permutations by activity sequence", () => {
 });
 
 describe("settled observer boundaries", () => {
-  it("retries an older no-id boundary after a later boundary succeeds", async () => {
-    const root = mkdtempSync(join(tmpdir(), "settled-observer-"));
+  it("keeps settled turns local and only consumes an intentional abort boundary", async () => {
+    const root = mkdtempSync(join(tmpdir(), "settled-local-only-"));
     try {
-      const sent: string[] = [];
-      let first = true;
-      const api = createApi((message) => {
-        if (first) {
-          first = false;
-          throw new Error("send failed");
-        }
-        sent.push(message.details?.text ?? "");
-      });
-      subagents(api);
+      const sent: unknown[] = [];
+      subagents(createApi((message) => sent.push(message)));
       __test__.runningSubagents.clear();
       const running = makeRunning(root, [
+        { id: "assistant-abort", text: "", stopReason: "aborted" },
         { id: "assistant-one", text: "ONE" },
         { id: "assistant-two", text: "TWO" },
-      ], [{ sequence: 1, outcome: "clean" }, { sequence: 2, outcome: "clean" }]);
-      __test__.runningSubagents.set(running.id, running);
-      __test__.observeRunningSubagent(running);
-      await flush();
-      __test__.observeRunningSubagent(running);
-      await flush();
-      assert.deepEqual(sent, ["TWO", "ONE"]);
-    } finally {
-      __test__.runningSubagents.clear();
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it("keeps rapid fallback boundaries on clean final assistants after tool-use entries", async () => {
-    const root = mkdtempSync(join(tmpdir(), "settled-fallback-correlation-"));
-    try {
-      const sent: string[] = [];
-      const api = createApi((message) => sent.push(message.details?.text ?? ""));
-      subagents(api);
-      __test__.runningSubagents.clear();
-      const running = makeRunning(root, [
-        { id: "assistant-tool-one", text: "", stopReason: "toolUse", toolUse: true },
-        { id: "assistant-final-one", text: "FIRST TEXT", stopReason: "stop" },
-        { id: "assistant-tool-two", text: "", stopReason: "toolUse", toolUse: true },
-        { id: "assistant-final-two", text: "SECOND TEXT", stopReason: "stop" },
       ], [
-        { sequence: 113, outcome: "clean", assistantId: "assistant-3", stopReason: "stop" },
-        { sequence: 126, outcome: "clean", assistantId: "assistant-4", stopReason: "stop" },
+        { sequence: 1, outcome: "intentional-abort", stopReason: "aborted", empty: true },
+        { sequence: 2, outcome: "clean" },
+        { sequence: 3, outcome: "clean" },
       ]);
-      __test__.runningSubagents.set(running.id, running);
-      __test__.observeRunningSubagent(running);
-      await flush();
-      assert.deepEqual(sent, ["FIRST TEXT", "SECOND TEXT"]);
-    } finally {
-      __test__.runningSubagents.clear();
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it("uses outcome evidence for no-id empty, error, and abort boundaries", async () => {
-    const root = mkdtempSync(join(tmpdir(), "settled-outcome-correlation-"));
-    try {
-      const sent: Array<{ outcome: string; text: string | null }> = [];
-      const api = createApi((message) => sent.push({
-        outcome: message.details?.outcome,
-        text: message.details?.text ?? null,
-      }));
-      subagents(api);
-      __test__.runningSubagents.clear();
-      const running = makeRunning(root, [
-        { id: "assistant-empty", text: "", stopReason: "stop" },
-        { id: "assistant-error", text: "", stopReason: "error" },
-        { id: "assistant-abort", text: "", stopReason: "aborted" },
-      ], [
-        { sequence: 1, outcome: "empty", stopReason: "stop", empty: true },
-        { sequence: 2, outcome: "error", stopReason: "error", empty: true },
-        { sequence: 3, outcome: "unexpected-abort", stopReason: "aborted", empty: true },
-      ]);
-      __test__.runningSubagents.set(running.id, running);
-      __test__.observeRunningSubagent(running);
-      await flush();
-      assert.deepEqual(sent, [
-        { outcome: "empty", text: null },
-        { outcome: "error", text: null },
-        { outcome: "unexpected-abort", text: null },
-      ]);
-    } finally {
-      __test__.runningSubagents.clear();
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it("consumes interrupt intent at the abort boundary and delivers rapid clean recovery", async () => {
-    const root = mkdtempSync(join(tmpdir(), "settled-interrupt-"));
-    try {
-      const sent: string[] = [];
-      const api = createApi((message) => sent.push(message.details?.text ?? ""));
-      subagents(api);
-      __test__.runningSubagents.clear();
-      const running = makeRunning(root, [
-        { id: "assistant-abort", text: "", stopReason: "aborted" },
-        { id: "assistant-clean", text: "RECOVERED" },
-      ], [{ sequence: 1, outcome: "unexpected-abort", empty: true }, { sequence: 2, outcome: "clean", empty: false }]);
       running.lifecycle = markInterruptRequested(running.lifecycle, 10);
       __test__.runningSubagents.set(running.id, running);
       __test__.observeRunningSubagent(running);
       await flush();
-      assert.deepEqual(sent, ["RECOVERED"]);
+      assert.deepEqual(sent, [], "settled boundaries must never publish a parent result");
+      assert.notEqual(running.lifecycle.turn.kind, "interrupted", "the abort boundary consumes interrupt intent");
     } finally {
       __test__.runningSubagents.clear();
       rmSync(root, { recursive: true, force: true });

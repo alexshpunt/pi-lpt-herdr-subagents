@@ -96,17 +96,6 @@ interface IntegrationSessionEntry {
 	details?: IntegrationResultDetails;
 }
 
-function readSettledResult(sessionFile: string): IntegrationResultDetails {
-	const entries = readFileSync(sessionFile, "utf8")
-		.trim()
-		.split("\n")
-		.map((line) => JSON.parse(line) as IntegrationSessionEntry);
-	return (
-		entries.find(
-			(entry) => entry.type === "custom_message" && entry.customType === "subagent_result",
-		)?.details ?? {}
-	);
-}
 
 function readSessionEntries(sessionFile: string): any[] {
 	return readFileSync(sessionFile, "utf8")
@@ -152,6 +141,48 @@ async function waitForCustomResultCount(
 	throw new Error(`Timeout waiting for ${count} subagent results in ${sessionFile}`);
 }
 
+
+async function waitForSessionTypeCount(
+	sessionFile: string,
+	type: string,
+	count: number,
+	timeoutMs = PI_TIMEOUT,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (
+			existsSync(sessionFile) &&
+			readSessionEntries(sessionFile).filter((entry) => entry.type === type).length >= count
+		) return;
+		await sleep(50);
+	}
+	throw new Error(`Timeout waiting for ${count} ${type} entries in ${sessionFile}`);
+}
+
+
+async function waitForParentTurnAfterResult(
+	sessionFile: string,
+	timeoutMs = PI_TIMEOUT,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (existsSync(sessionFile)) {
+			const entries = readSessionEntries(sessionFile);
+			const resultIndex = entries.findLastIndex(
+				(entry) => entry.type === "custom_message" && entry.customType === "subagent_result",
+			);
+			if (
+				resultIndex >= 0 &&
+				entries.slice(resultIndex + 1).some(
+					(entry) => entry.type === "message" && entry.message?.role === "assistant",
+				)
+			) return;
+		}
+		await sleep(50);
+	}
+	throw new Error(`Timeout waiting for the parent turn after a subagent result in ${sessionFile}`);
+}
+
 function writeIntegrationSkill(root: string, name: string, bodyMarker: string): void {
 	const directory = join(root, ".pi", "skills", name);
 	mkdirSync(directory, { recursive: true });
@@ -172,6 +203,21 @@ function writeSkillRole(root: string, name: string, skills: string, autoExit = t
 
 function countText(source: string, value: string): number {
 	return source.split(value).length - 1;
+}
+
+
+async function waitForPaneTextCount(
+	paneId: string,
+	value: string,
+	count: number,
+	timeout = PI_TIMEOUT,
+): Promise<void> {
+	const deadline = Date.now() + timeout;
+	while (Date.now() < deadline) {
+		if (countText(readPane(paneId, 300), value) >= count) return;
+		await sleep(50);
+	}
+	throw new Error(`Timeout waiting for ${count} occurrences of ${value} in pane ${paneId}`);
 }
 
 interface PaneSessionRecord {
@@ -2103,10 +2149,16 @@ for (const backend of backends) {
 			);
 		});
 
-		it("suppresses settled delivery after direct child input and still delivers explicit completion", async () => {
+		it("delivers only the latest result when a persistent child explicitly completes", async () => {
 			const id = uniqueId();
 			const childName = `Persistent-${id}`;
 			const parentSession = join(env.dir, `persistent-parent-${id}.jsonl`);
+
+			writeFileSync(
+				join(env.dir, ".pi", "settings.json"),
+				JSON.stringify({ compaction: { keepRecentTokens: 1 } }),
+				"utf8",
+			);
 
 			const surface = createTrackedSurface(env, `persistent-${id}`);
 			await waitForPaneReady(surface);
@@ -2136,39 +2188,19 @@ for (const backend of backends) {
 					}
 				});
 			};
-			const firstDeadline = Date.now() + PI_TIMEOUT;
-			let firstResults = readResults();
-			while (firstResults.length < 1 && Date.now() < firstDeadline) {
-				await sleep(50);
-				firstResults = readResults();
-			}
-			assert.equal(firstResults.length, 1, "first settled turn must be delivered once");
-			assert.match(String(firstResults[0].details?.resultContent), /SETTLED_ONE/);
-			const childSession = firstResults[0].details?.sessionFile;
-			assert.equal(typeof childSession, "string", "settled result must identify the child session");
-			if (typeof childSession !== "string") return;
 
 			const childPane = await waitForAgentPane(childName, env.workspaceId);
+			await waitForPaneTextCount(childPane, "SETTLED_ONE", 2);
+			assert.equal(readResults().length, 0, "an open child must not publish an intermediate result");
+
 			const secondPrompt = execFileSync(
 				"herdr",
 				["agent", "prompt", childPane, "Return exactly SETTLED_TWO. Do not call subagent_done yet."],
 				{ encoding: "utf8" },
 			);
 			assert.ok(secondPrompt.trim(), "Herdr prompt command must acknowledge the second input");
-			const secondDeadline = Date.now() + PI_TIMEOUT;
-			let secondAnswerRecorded = false;
-			while (!secondAnswerRecorded && Date.now() < secondDeadline) {
-				secondAnswerRecorded = readSessionEntries(childSession).some((entry) =>
-					entry.type === "message" &&
-					entry.message?.role === "assistant" &&
-					JSON.stringify(entry.message.content).includes("SETTLED_TWO"),
-				);
-				if (!secondAnswerRecorded) await sleep(50);
-			}
-			assert.equal(secondAnswerRecorded, true, "the direct child prompt must finish before checking suppression");
-			await sleep(1_500);
-			assert.equal(readResults().length, 1, "direct child input must suppress its later settled delivery");
-			assert.ok(listWorkspacePanes(env.workspaceId).some((pane) => pane.label === childName), "persistent child must remain live after intervention");
+			await waitForPaneTextCount(childPane, "SETTLED_TWO", 2);
+			assert.equal(readResults().length, 0, "later settled turns must also stay local");
 
 			const closePrompt = execFileSync(
 				"herdr",
@@ -2176,77 +2208,27 @@ for (const backend of backends) {
 				{ encoding: "utf8" },
 			);
 			assert.ok(closePrompt.trim(), "Herdr prompt command must acknowledge the close input");
-			await waitForFile(`${childSession}.exit`, PI_TIMEOUT, /"type":"done"/);
 			await waitForAgentGone(childPane, env.workspaceId);
-			const finalDeadline = Date.now() + PI_TIMEOUT;
-			let finalResults = readResults();
-			while (finalResults.length < 2 && Date.now() < finalDeadline) {
-				await sleep(50);
-				finalResults = readResults();
-			}
-			assert.equal(finalResults.length, 2, "explicit completion must deliver once after intervention");
-			assert.match(String(finalResults[0].details?.resultContent), /SETTLED_ONE/);
-			assert.match(String(finalResults[1].details?.resultContent), /SETTLED_TWO/);
-			assert.match(String(finalResults[1].details?.deliveryId), /^terminal:/);
-		});
+			const finalEntries = await waitForCustomResultCount(parentSession, 1);
+			const finalResults = customResultEntries(finalEntries);
+			assert.equal(finalResults.length, 1, "explicit completion must publish exactly once");
+			assert.match(String(finalResults[0]?.details?.resultContent), /SETTLED_TWO/);
+			assert.match(String(finalResults[0]?.details?.deliveryId), /^terminal:/);
 
-		it("delivers a settled provider error without ordered model fallback", async () => {
-			const id = uniqueId();
-			const parentSession = join(env.dir, `fallback-parent-${id}.jsonl`);
-			const surface = createTrackedSurface(env, `fallback-${id}`);
-			await waitForPaneReady(surface);
-			startPi(
-				surface,
-				env.dir,
-				[
-					`Call subagent once with name: "Fallback-${id}".`,
-					`agent: "test-echo".`,
-					`model: "pi-integration/fallback-primary, pi-integration/fallback-secondary".`,
-					`task: "Return exactly FALLBACK_ERROR_${id}".`,
-				].join("\n"),
-				{ extraArgs: `--session ${shellQuote(parentSession)}` },
-			);
-
-			await waitForFile(parentSession, PI_TIMEOUT, /"customType":"subagent_result"/);
-			const result = readSettledResult(parentSession);
-			assert.equal(result.kind, "settled");
-			assert.equal(result.outcome, "error");
+			await waitForParentTurnAfterResult(parentSession);
+			const compactionsBefore = readSessionEntries(parentSession).filter(
+				(entry) => entry.type === "compaction",
+			).length;
+			runInPane(surface, "/compact");
+			await waitForSessionTypeCount(parentSession, "compaction", compactionsBefore + 1);
+			runInPane(surface, "Return exactly AFTER_COMPACTION.");
+			await waitForPaneTextCount(surface, "AFTER_COMPACTION", 2);
 			assert.equal(
-				getProviderRequests().some((request) => request.model === "fallback-secondary"),
-				false,
+				readResults().length,
+				1,
+				"compaction and a later parent turn must not attach the result again",
 			);
-			assert.equal(typeof result.sessionFile, "string");
-			if (typeof result.sessionFile === "string") assert.ok(existsSync(result.sessionFile));
 		});
 
-		it("reports a settled provider error when every configured model fails", async () => {
-			const id = uniqueId();
-			const parentSession = join(env.dir, `fallback-fail-parent-${id}.jsonl`);
-			const surface = createTrackedSurface(env, `fallback-fail-${id}`);
-			await waitForPaneReady(surface);
-			startPi(
-				surface,
-				env.dir,
-				[
-					`Call subagent once with name: "FallbackFail-${id}".`,
-					`agent: "test-echo".`,
-					`model: "pi-integration/fallback-primary, pi-integration/fallback-fail".`,
-					`task: "Return exactly SHOULD_NOT_COMPLETE".`,
-				].join("\n"),
-				{ extraArgs: `--session ${shellQuote(parentSession)}` },
-			);
-			await waitForFile(parentSession, PI_TIMEOUT, /"customType":"subagent_result"/);
-			const result = readSettledResult(parentSession);
-			assert.equal(result.kind, "settled");
-			assert.equal(result.outcome, "error");
-			const failedRequests = getProviderRequests().filter((request) =>
-				request.model?.startsWith("fallback-"),
-			);
-			assert.deepEqual(
-				[...new Set(failedRequests.map((request) => request.model))],
-				["fallback-primary"],
-			);
-			assert.equal(failedRequests.every((request) => request.status === 503), true);
-		});
 	});
 }

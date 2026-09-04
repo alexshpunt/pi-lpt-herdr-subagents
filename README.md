@@ -18,7 +18,7 @@ This is the LPT fork of [`pi-herdr-agents`](https://github.com/giuseppecrj/pi-he
 - **Conversation handoff** — continue the active Pi conversation in a new worktree with `/worktree` while preserving the parent session.
 - **Approved review workflows** — prepare and run bounded, read-only multi-agent reviews with fresh evidence and one synthesized result.
 - **Reusable roles** — use bundled agents, project or global definitions, and installable role packs.
-- **Descendant-safe delivery** — launches record durable lineage before resource creation; settled and terminal results wait for recursive descendants and deliver once to the exact parent.
+- **Descendant-safe delivery** — launches record durable lineage before resource creation; only the latest terminal result returns to the exact parent, once, after recursive descendants drain.
 - **Verified cancellation** — `subagent_cancel` is separate from non-terminal `subagent_interrupt` and only reports cancellation after pane and process termination are proven.
 
 ## Requirements
@@ -257,7 +257,7 @@ launch workflow.
 5. Main agent processes result     → continues with new context
 ```
 
-Multiple subagents run concurrently. Each publishable settled or terminal result waits until every recursively owned descendant has drained, then returns once to the exact parent. A persistent child keeps the original order of held settled results. When an autonomous owner settles while descendants are still active, that intermediate response stays local: the last descendant result wakes the owner, and only the owner's next eligible `agent_settled` can publish its result and close the session. A failed inbox publication remains pending without timeout or rerouting. Pending results remain bound to their recorded parent session ID and session file, and materialize when that exact session is restored. Quitting Pi stops the current watchers but keeps durable ownership for startup recovery. The live widget above the input tracks every agent still in flight:
+Multiple subagents run concurrently. Settled turns stay inside the child session. Only the latest terminal result returns to the exact parent, once, after every recursively owned descendant drains. After delivery, the result is detached from active supervision and cannot be attached again after compaction, reload, or another parent tool call. A failed inbox publication remains pending without timeout or rerouting. Pending results remain bound to their recorded parent session ID and session file, and materialize when that exact session is restored. Quitting Pi stops the current watchers but keeps durable ownership for startup recovery. The live widget above the input tracks every agent still in flight:
 
 Lineage identity belongs to the launched Pi process, not to every command it starts. Shell tools and test runners can inherit lineage environment variables, but their processes cannot register fixture or library calls as real subagents. A genuine nested `subagent` launch receives a fresh process-bound identity and joins the same tree.
 
@@ -271,21 +271,15 @@ Lineage identity belongs to the launched Pi process, not to every command it sta
 
 Completion messages render with a colored background and are expandable with `Ctrl+O`. Every delivery contains the complete response, the exact child-session path, and the absolute path to an immutable Markdown result file. The same untruncated payload triggers or steers the exact creator parent, so no separate context-free wake-up can create an empty turn. Completed rows leave the widget after delivery or explicit suppression. After durable terminal publication, an ordinary subagent closes its dedicated Herdr tab; worktree-backed runs keep their existing retained workspace. Closing an already missing pane or tab is a silent idempotent success. Other cleanup failures leave the delivered child visible as `cleanup pending` until absence is confirmed.
 
-### Settled turns and child lifecycle
+### Final result and child lifecycle
 
-A persistent child can return one parent result at every settled turn without closing its session. The five outcomes are:
+A settled turn is not a parent result. Persistent children can have several settled turns while they remain open, but those responses stay in the child session. `subagent_done`, `caller_ping`, auto-exit, cancellation, and confirmed terminal failures end the run. The terminal path reads the latest child answer, waits for recursive descendants to drain, publishes one result, and detaches the child from active supervision.
 
-- clean: a persistent child records the settled result; an `auto-exit` child accepts this as terminal only when no descendant result remains to process, then publishes and closes after the branch drains;
-- empty: a persistent child records the explicit empty result; an `auto-exit` child accepts this as terminal only when no descendant result remains to process, then publishes and closes after the branch drains;
-- provider/agent error: deliver the error and keep the child open;
-- intentional interrupt: stay silent and keep the child open;
-- unexpected abort: deliver an abort notice and keep the child open.
+A non-auto-exit child records completion intent with `subagent_done`; `caller_ping` records a help request. An auto-exit child records terminal intent only from a clean or empty `agent_settled` boundary after it has processed the last descendant result. Earlier settles stay local. Provider errors and intentional aborts remain open. Direct user input or Escape disables automatic exit for that run; mechanical recovery interrupts do not.
 
-A non-auto-exit child records completion intent with `subagent_done`; `caller_ping` records a nonterminal help request. An auto-exit child records terminal intent only from a clean or empty `agent_settled` boundary after it has processed the last descendant result. Earlier settles stay local. The last descendant result wakes the owner; its next eligible boundary waits for final branch drain before publication and closure. Explicit `subagent_done` still waits for recursive drain. Help delivery also waits for descendants, then wakes the exact parent and leaves the child session open for the answer. Direct user input or Escape disables automatic exit for that run; mechanical recovery interrupts do not. Provider errors and intentional aborts remain open. Confirmed manual pane closure is terminal: the surviving ancestor adopts and destroys every open descendant, publishes the branch from the leaves upward, and returns one failure to the exact parent. A terminal outcome that already won cannot be replaced by a later missing-pane observation during cleanup. An unavailable Herdr inspection remains pending rather than guessing that a pane is gone. Settled delivery and terminal delivery use separate identity gates, so a clean auto-exit race cannot send the same result twice. Error terminal results are never suppressed as duplicates of an earlier settled turn. A failed parent enqueue remains retryable.
+Confirmed manual pane closure is terminal. The surviving ancestor adopts and destroys every open descendant, publishes the branch from the leaves upward, and returns one failure to the exact parent. An unavailable Herdr inspection remains pending rather than guessing that a pane is gone. A failed parent enqueue remains retryable. Once delivery is recorded, compaction, reload, restored watchers, and later tool calls cannot publish that result again.
 
 A public `SubagentTree` owner is different: its callbacks process child results inside the tree runtime, so its accepted owner settle may wait on tree drain without requiring another Pi turn.
-Pending results remain bound to their recorded parent session ID and session file, and materialize when that exact session is restored. Legacy runs without lineage are never inferred or acted on.
-
 
 ### In-progress status updates
 
@@ -379,8 +373,7 @@ followed by agent frontmatter, per-agent config, the global default, and finally
 the parent model. Model values must be exact authenticated `provider/model-id`
 references. A value can contain an ordered comma-separated candidate list, for
 example `provider/preferred, provider/fallback`. The extension validates every
-candidate before launch. A provider/agent error that reaches the child's settled
-boundary is returned immediately and does not advance to a later candidate.
+candidate before launch. A provider/agent error that reaches the child's settled boundary does not advance to a later candidate. It stays local until the child reaches a terminal outcome.
 Launch failures before a child reaches that boundary may still use the ordered
 launch fallback behavior. Completion metadata and the status widget report the
 model actually used. Workflow metadata accepts one exact model only, to keep
@@ -426,7 +419,7 @@ subagent({
 | `agent`                | string  | —              | Load defaults from agent definition                                                               |
 | `fork`                 | boolean | `false`        | Force the full-context fork mode for this spawn, overriding any agent `session-mode` frontmatter  |
 | `interactive`          | boolean | derived        | Mark this spawn as interactive (don't wake the parent on stall/recovery). Defaults to the agent's `interactive` frontmatter, otherwise the inverse of `auto-exit`. |
-| `model`                | string  | configured or parent | Exact authenticated `provider/model-id`, or an ordered comma-separated candidate list; candidate lists are unavailable for worktree spawns. A settled provider error is returned immediately rather than advancing candidates. Resolution is tool argument → agent frontmatter → per-agent config → global config → parent |
+| `model`                | string  | configured or parent | Exact authenticated `provider/model-id`, or an ordered comma-separated candidate list; candidate lists are unavailable for worktree spawns. A settled provider error does not advance candidates and stays in the child until terminal delivery. Resolution is tool argument → agent frontmatter → per-agent config → global config → parent |
 | `thinking`             | string  | parent level   | Pi thinking level (`off` through `max`); omit to inherit the parent                                |
 | `systemPrompt`         | string  | —              | Role/system-prompt text for a bare spawn; named agents keep their definition body                  |
 | `skills`               | string  | —              | Comma-separated skill names                                                                       |
@@ -778,7 +771,7 @@ and verify them with `/subagent list` plus a smoke launch.
 | ------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `name`        | string  | Optional explicit agent name used in `agent: "my-agent"`; defaults to the filename stem and must match it in role packs                                                                                                                                                                                            |
 | `description` | string  | Shown in `subagents_list` output                                                                                                                                                                                                                                            |
-| `model`       | string  | Optional exact authenticated Pi model default or ordered comma-separated candidate list; a settled provider error is returned immediately; omit to use per-agent config, global config, then the parent                                                                                                                       |
+| `model`       | string  | Optional exact authenticated Pi model default or ordered comma-separated candidate list; a settled provider error stays local until terminal delivery; omit to use per-agent config, global config, then the parent                                                                                                                       |
 | `thinking`    | string  | Optional Pi thinking default (`off` through `max`); omit to inherit the parent                                                                                                                                   |
 | `system-prompt` | string | `append` passes the agent body through Pi's appended system prompt; `replace` replaces Pi's default system prompt. Without this field, the body is included in the task wrapper                                                                                                                                                                                                                                 |
 | `tools`       | string  | Comma-separated Pi `--tools` allowlist; may contain any registered built-in, extension, or custom tool name                                                                                                                                                                 |

@@ -1,118 +1,46 @@
 # Settled lifecycle contract
 
-The public subagent tree API builds its child and terminal promises on this settled identity and delivery model. See [Public subagent tree API](public-subagent-tree-api.md).
+This document defines how child turns become one parent result. The TypeScript source for settled outcome shapes is `pi-extension/subagents/settled-contract.ts`.
 
-This document freezes the shared shapes for the settled lifecycle streams. It is
-an implementation boundary, not a new public tool API.
+## Settled turns stay local
 
-The TypeScript source is
-`pi-extension/subagents/settled-contract.ts`.
-
-## Outcome policy
-
-A settled assistant entry is classified as one of five outcomes:
+A settled assistant entry is still classified for child control:
 
 - `clean`: non-empty assistant text with no final provider error.
-- `empty`: a settled assistant entry with no usable text. This is delivered as
-  an explicit empty result; an earlier response must not be reused.
-- `error`: `stopReason: "error"`. Deliver the error once and keep the child
-  session open for resume.
-- `intentional-abort`: `stopReason: "aborted"` after the parent recorded an
-  interrupt request. Do not deliver a parent result; keep the child open.
+- `empty`: a settled assistant entry with no usable text.
+- `error`: `stopReason: "error"`.
+- `intentional-abort`: `stopReason: "aborted"` after the parent recorded an interrupt request.
 - `unexpected-abort`: `stopReason: "aborted"` without an interrupt request.
-  Deliver an explicit aborted problem once and keep the child open.
 
-A tool error is recoverable when a later clean assistant response is produced
-in the same settled run. The final assistant entry remains authoritative. The
-policy constant is `SETTLED_TOOL_ERROR_POLICY`.
+These boundaries do not publish parent results. A persistent child can settle many times while it remains open. Its earlier answers, empty turns, errors, and aborts stay in its own session.
 
-For an autonomous owner, a clean or empty boundary is terminal only after the
-last descendant result has been processed. Earlier boundaries update local
-waiting state but do not enter the settled delivery stream or arm a future
-shutdown. The stale watchdog also excludes every owner with an undrained direct
-or recursive descendant. The last descendant result wakes the owner, resets its
-quiet window, and protects the active model turn that processes the result. Its
-next eligible `agent_settled` boundary arms shutdown; publication and closure
-wait until the branch is drained. After that processing turn and quiet window,
-normal stale-leaf evaluation resumes.
+For an autonomous child, a clean or empty boundary can record terminal intent only after it has processed the last descendant result. Earlier boundaries stay local. Provider errors and aborts keep the child open.
 
-Manual and automatic Pi context compaction is observable active work. A
-`session_before_compact` boundary protects the leaf from stale recovery until
-`session_compact` or `session_compact_failed` records success, failure, or
-abort. The terminal boundary refreshes activity and restores the surrounding
-active or waiting state. It never requests another turn; Pi keeps ownership of
-retry, queued work, and normal settlement.
+Manual and automatic context compaction are active child work. `session_before_compact` protects the child from stale recovery until `session_compact` or `session_compact_failed` ends that state. Compaction never publishes or repeats a parent result.
 
-Persistent children keep their existing per-turn settled delivery.
-A public `SubagentTree` owner keeps its existing callback-driven drain behavior:
-its tree runtime processes child results internally, so it does not require a
-new Pi turn after the last child callback.
-`SETTLED_OUTCOME_POLICY` freezes the parent and child action for each outcome:
+## One terminal result
 
-| Outcome | Parent | Child |
-| --- | --- | --- |
-| `clean` | persistent: record; autonomous: record only when no descendant result remains to process | autonomous: close from that boundary after final branch drain |
-| `empty` | persistent: record explicit empty result; autonomous: record only when no descendant result remains to process | autonomous: close from that boundary after final branch drain |
-| `error` | deliver explicit error | keep open |
-| `intentional-abort` | suppress | keep open |
-| `unexpected-abort` | deliver explicit aborted problem | keep open |
+A child publishes only when it reaches a terminal lifecycle outcome, such as auto-exit, `subagent_done`, cancellation, confirmed pane loss, or recovery failure.
 
-A missing owned Herdr tab is not a recoverable process crash. After the
-completion-sidecar grace period, it records a cancellation intent, stops
-descendants from the leaves upward, and publishes one `cancelled` terminal
-outcome to the exact creator. It does not consume recovery attempts. Any
-worktree stays retained.
+The terminal path:
 
-## Identity and ordering
+1. reads the latest child result;
+2. waits for every recursive descendant to drain;
+3. writes one immutable result file and one durable inbox entry;
+4. materializes that inbox in the exact parent session once;
+5. records delivery before cleanup; and
+6. removes the child from active supervision as soon as cleanup allows.
 
-`NewestAssistantEntry` preserves the assistant entry `id`, text, content
-length, stop reason, provider error, and empty state. The entry `id` is the
-response identity; do not use text or turn index as a deduplication key.
+The stable terminal delivery ID is the child ID prefixed with `terminal:`. Delivery uses an exclusive durable claim. A successful send is acknowledged once. A failed send remains retryable. Compaction, reload, restored watchers, and later parent tool calls cannot materialize an acknowledged delivery again.
 
-`SessionBaselineCursor` records the session file, pre-run entry count, leaf id,
-and inherited assistant ids. Fork history is baseline state, not new child
-output.
+Old pending `settled` inbox entries are acknowledged without being sent. This prevents an upgrade or restored session from exposing an intermediate response after the terminal-only rule is active.
 
-`SettledDeliveryIdentity` is the tuple `(childId, sessionFile,
-assistantEntryId)`. `settledDeliveryKey()` serializes that tuple without
-ambiguous path delimiters.
+Cleanup is separate from delivery. An ordinary child pane closes after delivery. A worktree child keeps its review workspace. If cleanup fails, the delivered child can remain visible as `cleanup pending`, but its result is not sent again.
 
-## Delivery gates and parent payload
+## Descendants and exact-parent binding
 
-Settled delivery and terminal completion are separate gates:
+A child drains only after its terminal outcome reaches its exact immediate-parent inbox and all descendants drain recursively. Failed inbox publication has no timeout and is never rerouted. A pending session inbox stays bound to its recorded parent session ID and file until that exact session returns.
 
-- `SettledDeliveryGate` tracks the latest activity sequence and delivered
-  settled identities. It can deliver multiple turns for one child.
-- `TerminalDeliveryGate` remains `pending`, `delivered`, or `suppressed` and
-  represents the one terminal outcome. Settled delivery must never consume it.
+Lineage identity belongs to the launched Pi process. Shell commands and test runners may inherit environment variables, but they cannot register fixture calls as real descendants.
 
-Before either gate crosses the parent boundary, the durable lineage reducer
-checks recursive descendants. A child drains only after its own terminal outcome
-and exact immediate-parent inbox delivery are recorded, and every descendant
-has drained. Failed inbox publication remains pending without timeout or
-rerouting. A pending session inbox remains bound to its recorded parent session
-ID and file, and materializes when that exact session is restored.
-
-A lineage environment is accepted only by the Pi process started by its launch
-shell. Ordinary subprocesses inherit environment variables but have a different
-launcher relationship, so test fixtures and imported launch helpers cannot
-register themselves as descendants. Every genuine nested or resumed Pi launch
-receives a new process-bound lineage identity.
-
-Once a terminal outcome wins, a later missing-pane observation is cleanup, not
-user cancellation. The watcher preserves the winning terminal payload and does
-not append manual-close intent.
-
-Active materialization is protected by a durable lineage gate plus one exclusive
-claim per delivery ID. The gate compares all still-pending inbox entries for the
-same exact parent sink by activity sequence, so independent Pi processes cannot
-materialize a later settled, error, or terminal result before an earlier one. A
-competing observer waits; after a crash it checks exact-session evidence and the
-claiming process incarnation (PID plus Linux `/proc/<pid>/stat` start time) before
-acknowledging or reclaiming. Platforms without that identity fail closed, so send
-and acknowledgement retries cannot duplicate or reorder a parent result.
-
-`SettledParentPayload` carries the explicit parent fields: child id, session
-file, assistant entry id, activity sequence, turn index, outcome, text, stop
-reason, provider error, and empty state. Parent delivery bounds presentation
-text while preserving these identity and outcome fields.
+A public `SubagentTree` owner is different. Its callbacks process child results inside the tree runtime. The tree result still waits for all reserved descendants, but ordinary model-facing `subagent_result` delivery follows the one-terminal-result rule above.

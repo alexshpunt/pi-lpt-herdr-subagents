@@ -115,7 +115,7 @@
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import {
 	createLifecycle,
@@ -751,7 +751,6 @@ function swallowedCatches(body: string): string[] {
 const FORMER_SWALLOW_SITES = [
 	{ fn: "startRecoveredWatcher", label: "recovered subagent watcher" },
 	{ fn: "startRecoveredWorkflowWatcher", label: "recovered workflow watcher" },
-	{ fn: "observeSettledRunningSubagent", label: "settled delivery enqueue" },
 	{ fn: "attemptPendingTerminalDelivery", label: "terminal delivery catch" },
 ];
 
@@ -1083,84 +1082,6 @@ describe("TS-06 loud failures at the real adapter catches", () => {
 		}
 	});
 
-	it("TS-06 records one failure and one failed projection at the settled-enqueue adapter", async () => {
-		const sessionsDir = tempDir("pi-ts06-settled-adapter-");
-		const parentSessionFile = join(sessionsDir, "parent.jsonl");
-		writeFileSync(parentSessionFile, "", "utf8");
-		const sessionFile = join(sessionsDir, "child.jsonl");
-		writeSessionFile(sessionFile, { id: "child", cwd: sessionsDir });
-		const settledEventsFile = join(sessionsDir, "child.settled.jsonl");
-		appendFileSync(
-			sessionFile,
-			`${JSON.stringify({
-				type: "message",
-				id: "assistant-1",
-				message: {
-					role: "assistant",
-					content: [{ type: "text", text: "settled answer" }],
-					stopReason: "stop",
-				},
-			})}\n`,
-		);
-		writeFileSync(
-			settledEventsFile,
-			`${JSON.stringify({
-				schema: 1,
-				childId: "settled-child",
-				sequence: 1,
-				recordedAt: 1_788_247_000_000,
-				outcome: "clean",
-				assistantId: "assistant-1",
-				stopReason: "stop",
-				empty: false,
-			})}\n`,
-		);
-		const runtimeHarness = installAdapterRuntime(sessionsDir, parentSessionFile);
-		const running: any = {
-			id: "settled-child",
-			name: "reviewer",
-			task: "review",
-			surface: "missing-surface",
-			startTime: 0,
-			sessionFile,
-			settledEventsFile,
-			sessionBaseline: {
-				sessionFile,
-				entryCount: 1,
-				leafId: "child",
-				assistantEntryIds: [],
-			},
-			interactive: false,
-			runtimePlan: undefined,
-			lifecycle: createLifecycle(0),
-		};
-		(__test__.runningSubagents as Map<string, unknown>).set(running.id, running);
-
-		const hostErrors: unknown[] = [];
-		const onHostError = (error: unknown) => hostErrors.push(error);
-		process.on("unhandledRejection", onHostError);
-		process.on("uncaughtException", onHostError);
-		try {
-			// This is the real observer used by the settled-delivery adapter, not
-			// the generic transaction seam or a source-text approximation.
-			(__test__.observeRunningSubagent as any)(running, 1_000);
-			for (let turn = 0; turn < 20; turn += 1) await tick();
-
-			const deliveryId = "settled:settled-child:1:assistant-1";
-			assert.equal(runtimeHarness.sends.length, 1, "the settled adapter attempted one parent delivery");
-			const records = failureRecords(join(sessionsDir, "subagent-delivery.log"), deliveryId);
-			assert.equal(records.length, 1, `one settled-enqueue failure record, saw ${JSON.stringify(records)}`);
-			assert.equal(
-				countOccurrences(renderedWidgetText(runtimeHarness.widgets), "delivery-failed"),
-				1,
-				"the settled-enqueue adapter projects exactly one delivery-failed widget row",
-			);
-			assert.deepEqual(hostErrors, [], "the settled-enqueue failure stays inside the Pi host");
-		} finally {
-			process.off("unhandledRejection", onHostError);
-			process.off("uncaughtException", onHostError);
-		}
-	});
 
 	it("TS-06 records one failure and one failed projection at the recovered-watcher adapter", async () => {
 		const startRecoveredWatcher = requireExport<any>(
